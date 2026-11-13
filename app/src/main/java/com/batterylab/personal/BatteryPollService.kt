@@ -16,6 +16,11 @@ object PollScheduler {
 
     fun schedule(context: Context) {
         val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+        // Re-scheduling an existing job replaces it, and Android then runs it right away.
+        // That made every app open trigger an extra sample (and, with Ring monitoring on,
+        // an extra Ring BLE wakeup). Keep the existing job; it reads settings when it runs.
+        val existing = scheduler.getPendingJob(JOB_ID)
+        if (existing != null && existing.isPeriodic && existing.intervalMillis == FIFTEEN_MINUTES) return
         // Periodic jobs are opportunistic. Sample timestamps reflect actual collection time.
         scheduler.schedule(JobInfo.Builder(JOB_ID, ComponentName(context, BatteryPollService::class.java))
             .setPeriodic(FIFTEEN_MINUTES)

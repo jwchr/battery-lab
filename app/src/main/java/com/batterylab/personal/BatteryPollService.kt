@@ -27,6 +27,9 @@ object PollScheduler {
 
     fun ringEnabled(context: Context) = prefs(context).getBoolean(RING_ENABLED, false)
     fun ringAddress(context: Context) = prefs(context).getString(RING_ADDRESS, null)
+
+    /** Ring history id: the selected Ring's address when chosen, else a widget-only id. */
+    fun ringDeviceId(context: Context) = ringAddress(context)?.let { "ring:$it" } ?: "ring:samsung_widget"
     fun setRingEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(RING_ENABLED, enabled).apply()
         schedule(context)
@@ -40,6 +43,8 @@ class BatteryPollService : JobService() {
         stopped = false
         val store = BatteryStore(this)
         PhoneBattery.read(this)?.let(store::append)
+        // Zero-radio source: whatever Samsung's Battery widget currently shows (main thread).
+        SamsungWidgetSource.sample(this, store)
         val address = PollScheduler.ringAddress(this)
         if (!PollScheduler.ringEnabled(this) || address == null) {
             store.close()

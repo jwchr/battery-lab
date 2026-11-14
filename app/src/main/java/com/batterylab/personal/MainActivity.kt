@@ -13,7 +13,10 @@ import android.graphics.Path
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.net.Uri
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.InputType
 import android.view.View
 import android.widget.Button
@@ -36,6 +39,7 @@ class MainActivity : Activity() {
     private val bg = Color.rgb(12, 20, 34)
     private val panel = Color.rgb(22, 34, 52)
     private val blue = Color.rgb(95, 172, 255)
+    private val warn = Color.rgb(255, 183, 77)
     private val REQUEST_BLUETOOTH = 108
     private val EXPORT_CSV = 109
     private val BIND_WIDGET = 110
@@ -256,6 +260,17 @@ class MainActivity : Activity() {
         val connected = SamsungWidgetSource.widgetId(this) != null
         section("Samsung Battery widget source", "Reads the percentages Samsung's Battery widget already shows. " +
             "No Bluetooth, no extra Ring or Watch wakeups. Checked about every 15 minutes and whenever you open Battery Lab.").apply {
+            // Soak test: without the exemption, Adaptive Battery demoted the app to RARE and the
+            // 15-minute job stopped for hours. Ignoring optimizations needs no permission to check.
+            val power = getSystemService(POWER_SERVICE) as PowerManager
+            if (!power.isIgnoringBatteryOptimizations(packageName)) {
+                addView(label("Background checks may stop for hours: set Battery Lab's battery usage to " +
+                    "Unrestricted (App info → Battery → Unrestricted).", 13f, warn, true))
+                button("Open Battery Lab app info") {
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.fromParts("package", packageName, null)))
+                }
+            }
             if (!connected) {
                 addView(label("Not connected. Android will ask you to allow Battery Lab to use the widget.", 13f, quiet))
                 button("Connect Samsung Battery widget") { connectWidget() }

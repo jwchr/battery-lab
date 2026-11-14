@@ -6,11 +6,11 @@ Test hardware: Galaxy S26 Ultra (Android 17 / SDK 37, One UI 9.0), Galaxy Watch8
 
 | Priority | Source | Radio cost | Status |
 |---|---|---|---|
-| 1 | **Samsung Battery widget, hosted by Battery Lab** (`SamsungWidgetSource`) | None: reads what Samsung already displays | Verified readable on device; background reading needs a soak test |
+| 1 | **Samsung Battery widget, hosted by Battery Lab** (`SamsungWidgetSource`) | None: reads what Samsung already displays | Verified on device, including background reads (soak test below); needs battery usage set to Unrestricted |
 | 2 | Android `BatteryManager` for the phone itself | None | Existing, unchanged |
 | 3 | Manual entry from Samsung's widget | None | Existing, unchanged |
 | 4 | Direct Ring BLE battery request (SamsungOpenRing RFC-SGR-001) | Wakes the Ring once per request | Existing `RingReader`, **off by default**; fallback and the "monitoring" arm of A/B tests only |
-| 5 | Wear OS companion over the Data Layer | Watch app runs about every 30 min | Existing; `wear` module currently fails to compile (pre-existing, see below) |
+| 5 | Wear OS companion over the Data Layer | Watch app runs about every 30 min | Existing; compiles again (the `val` reassignment in `WatchActivity` is fixed) |
 
 The background job (`BatteryPollService`, about every 15 minutes, opportunistic) records the
 phone battery, then reads the hosted widget offscreen. It only does a Ring BLE request if the
@@ -71,14 +71,35 @@ Android's `ACTION_APPWIDGET_BIND` dialog.
 - **Freshness is Samsung's.** The stored timestamp is when Battery Lab observed the widget,
   not when the wearable reported. When a wearable disconnects, the widget may keep showing
   its last value.
-- **Background reads are unverified.** They use `AppWidgetHost.createView`, which returns
-  the latest views Android cached for our widget id, inflated offscreen. Whether Samsung keeps
-  updating a widget whose host is not listening still needs an on-device soak test.
+- **Background reads need the app exempt from battery optimization.** See the soak test below.
+  The app shows a warning with a shortcut to App info when it is not exempt.
 - **Charging is inferred** from the presence of a second icon in the slot. This was validated
   for the phone slot only.
 - **Samsung can change the widget layout in an update.** Parsing keys on the
   `arc_progress` / `list_progress_fg` ids and numeric text. If those disappear, the source
   logs a probe event and records nothing; it does not record guesses.
+
+## Soak test: background reads (2026-11-13 to 14)
+Background reads use `AppWidgetHost.createView`, which inflates offscreen the latest views
+Android cached for our widget id. Samsung keeps that cache current even when no host is
+listening, so reads made while Battery Lab is closed return fresh values.
+Results are summarized with `tools/soak_report.sh`, which reports counts and changes only.
+
+- **Default battery setting:** reads worked for about 2.5 hours with the app closed.
+  - Adaptive Battery then moved the app to the FREQUENT standby bucket, and later to RARE.
+  - In RARE, JobScheduler allows 3 sessions per 24 hours. The poll stopped for about 5 hours
+    with only the quota constraint unsatisfied.
+  - Each run takes under a second, so the limiting factor is the number of runs, not the
+    runtime.
+- **Battery usage set to Unrestricted** (standby bucket 5, exempted), over about 14 hours:
+  - The poll ran 56 times. The gaps averaged 15.5 minutes, and the longest was 37 minutes.
+  - The Ring and Watch were read on almost every run.
+  - One Ring dropout lasted a single run and was logged. No read failed.
+  - Most background reads showed a new value, so they are fresh, not cached.
+- **Diagnostics** (written to `probe_events`):
+  - Standby bucket changes.
+  - A labeled Ring or Watch that is missing from the widget.
+  - Changes in which slots are unlabeled.
 
 ## A/B Ring-overhead experiment
 Start and finish readings now come from the widget first, then a manual entry less than
@@ -87,7 +108,3 @@ wakeups, and the widget gives continuous baseline samples between the endpoints.
 **monitoring** arm still turns on the 15-minute BLE request, and requires choosing the paired
 Ring. Comparing the two arms gives a measurable estimate of the BLE fallback's battery cost.
 A sensible fallback cadence is decided from that data, not assumed.
-
-## Pre-existing issue
-`wear/src/main/java/com/batterylab/personal/WatchActivity.kt:29` reassigns a `val`, so the
-`wear` module does not compile on `main`. It is unrelated to this change and not fixed here.

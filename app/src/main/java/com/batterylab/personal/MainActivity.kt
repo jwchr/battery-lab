@@ -369,6 +369,29 @@ class MainActivity : StyledActivity() {
                 if (android.text.format.DateUtils.isToday(it.timeMs)) 0
                 else android.text.format.DateUtils.FORMAT_SHOW_DATE or android.text.format.DateUtils.FORMAT_ABBREV_MONTH)
         }
+        // A second source's latest number, shown only when it was read near the same time and
+        // disagrees. The phone's comes from Samsung's widget; a wearable's from its other source.
+        val other = when {
+            last == null || !fresh -> null
+            id == "phone" -> store.latest(SamsungWidgetSource.PHONE_WIDGET_DEVICE)
+            else -> recent.lastOrNull { it.source != last.source }
+        }?.takeIf { kotlin.math.abs(it.timeMs - last!!.timeMs) <= 30 * 60_000L && it.percent != last.percent }
+        val otherLabel = when (other?.source) {
+            SamsungWidgetSource.SOURCE -> "Samsung widget"
+            "ring_ble" -> "Ring over Bluetooth"
+            "android" -> "Android"
+            "wear_os" -> "Watch app"
+            "manual_widget" -> "Your entry"
+            else -> "Other source"
+        }
+        // Android's own estimates exist only for this phone; Samsung's widget offers none.
+        val androidEstimate = if (id == "phone" && fresh) AndroidEstimates.read(this) else null
+        fun span(ms: Long) = BatteryMath.timeLeftLabel(ms / 3_600_000.0).let { (v, u) -> "$v ${u.removeSuffix(" left")}" }
+        val androidLine = when {
+            androidEstimate == null -> null
+            last?.charging == true -> androidEstimate.chargeMs?.let { "Android: full in ${span(it)}" }
+            else -> androidEstimate.dischargeMs?.let { "Android: ${span(it)} left" }
+        }
         val (status, statusColor) = when {
             last == null -> "No data yet" to Palette.quiet
             !fresh -> "Offline" to Palette.amberInk
@@ -404,6 +427,14 @@ class MainActivity : StyledActivity() {
                     }.joinToString(" · ").ifEmpty { "Waiting for the first reading" }
                     textSize = 11.5f; setTextColor(Palette.quiet)
                 })
+                if (androidLine != null) addView(TextView(this@MainActivity).apply {
+                    text = androidLine
+                    textSize = 11.5f; setTextColor(Palette.tintInk)
+                })
+                if (other != null) addView(TextView(this@MainActivity).apply {
+                    text = "$otherLabel says ${other.percent}%"
+                    textSize = 11.5f; typeface = medium; setTextColor(Palette.amberInk)
+                })
             }, LinearLayout.LayoutParams(0, -2, 1f))
             addView(LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
@@ -419,6 +450,10 @@ class MainActivity : StyledActivity() {
                 addView(TextView(this@MainActivity).apply {
                     text = unit
                     textSize = 11f; setTextColor(Palette.quiet)
+                })
+                if (projection != null) addView(TextView(this@MainActivity).apply {
+                    text = "Battery Lab"
+                    textSize = 9.5f; setTextColor(Palette.quiet)
                 })
             })
         }

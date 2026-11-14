@@ -47,7 +47,12 @@ data class ReadingDetail(
     val elapsedMs: Long? = null,
     val bootCount: Int? = null,
     /** What asked for the read: "job", "app", "manual". */
-    val trigger: String? = null
+    val trigger: String? = null,
+    /** Android's own estimates at this moment, recorded so they can be scored against what happened. */
+    val androidDischargeMs: Long? = null,
+    val androidChargeMs: Long? = null,
+    /** Whether Android says its time-left estimate is learned from this phone's usage. */
+    val androidPersonalized: Boolean? = null
 ) {
     companion object {
         /** Just the clock fields, for readings taken on this phone right now. */
@@ -76,7 +81,7 @@ data class Experiment(
  * writes overlap.
  */
 class BatteryStore private constructor(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, "battery_lab.db", null, 3) {
+    SQLiteOpenHelper(context.applicationContext, "battery_lab.db", null, 4) {
     init { setWriteAheadLoggingEnabled(true) }
 
     /** Shared for the life of the process; callers may still call close(), which does nothing. */
@@ -88,7 +93,7 @@ class BatteryStore private constructor(context: Context) :
             time_ms INTEGER NOT NULL, percent INTEGER NOT NULL, charging INTEGER,
             source TEXT NOT NULL, temp_tenths_c INTEGER, voltage_mv INTEGER,
             remaining_uah INTEGER)""")
-        addDetailColumns(db)
+        addColumns(db, V3_COLUMNS + V4_COLUMNS)
         db.execSQL("CREATE INDEX idx_readings_device_time ON readings(device, time_ms)")
         db.execSQL("""CREATE TABLE experiments (
             id INTEGER PRIMARY KEY AUTOINCREMENT, device TEXT NOT NULL,
@@ -108,11 +113,13 @@ class BatteryStore private constructor(context: Context) :
             }
         }
         // v3: audit columns, added empty. Existing rows keep every value and read as unknown.
-        if (oldVersion < 3) addDetailColumns(db)
+        if (oldVersion < 3) addColumns(db, V3_COLUMNS)
+        // v4: Android's own time-left / time-to-full estimates.
+        if (oldVersion < 4) addColumns(db, V4_COLUMNS)
     }
 
-    private fun addDetailColumns(db: SQLiteDatabase) {
-        for ((name, type) in DETAIL_COLUMNS) db.execSQL("ALTER TABLE readings ADD COLUMN $name $type")
+    private fun addColumns(db: SQLiteDatabase, columns: List<Pair<String, String>>) {
+        for ((name, type) in columns) db.execSQL("ALTER TABLE readings ADD COLUMN $name $type")
     }
 
     fun append(r: Reading) {
@@ -139,6 +146,9 @@ class BatteryStore private constructor(context: Context) :
                 d.elapsedMs?.let { put("elapsed_ms", it) }
                 d.bootCount?.let { put("boot_count", it) }
                 d.trigger?.let { put("read_trigger", it) }
+                d.androidDischargeMs?.let { put("android_discharge_ms", it) }
+                d.androidChargeMs?.let { put("android_charge_ms", it) }
+                d.androidPersonalized?.let { put("android_personalized", if (it) 1 else 0) }
             }
         }
         writableDatabase.insertOrThrow("readings", null, v)
@@ -171,7 +181,9 @@ class BatteryStore private constructor(context: Context) :
                     nullableInt("plugged"), nullableInt("status"), nullableInt("health"),
                     nullableInt("level_raw"), nullableInt("scale"), nullableInt("cycle_count"),
                     nullableLong("energy_raw"), nullableLong("elapsed_ms"), nullableInt("boot_count"),
-                    if (c.isNull(trigIx)) null else c.getString(trigIx)).takeIf { it != ReadingDetail() }
+                    if (c.isNull(trigIx)) null else c.getString(trigIx),
+                    nullableLong("android_discharge_ms"), nullableLong("android_charge_ms"),
+                    nullableInt("android_personalized")?.let { it == 1 }).takeIf { it != ReadingDetail() }
                 output.add(Reading(c.getString(c.getColumnIndexOrThrow("device")),
                     c.getLong(c.getColumnIndexOrThrow("time_ms")),
                     c.getInt(c.getColumnIndexOrThrow("percent")),
@@ -298,11 +310,14 @@ class BatteryStore private constructor(context: Context) :
         const val RING_ID = "ring:samsung_widget"
         private const val PROBE_KEEP = 3000L
         /** Audit columns added in schema v3, in export order. */
-        private val DETAIL_COLUMNS = listOf(
+        private val V3_COLUMNS = listOf(
             "current_now_raw" to "INTEGER", "current_avg_raw" to "INTEGER", "plugged" to "INTEGER",
             "status" to "INTEGER", "health" to "INTEGER", "level_raw" to "INTEGER", "scale" to "INTEGER",
             "cycle_count" to "INTEGER", "energy_raw" to "INTEGER", "elapsed_ms" to "INTEGER",
             "boot_count" to "INTEGER", "read_trigger" to "TEXT")
+        private val V4_COLUMNS = listOf("android_discharge_ms" to "INTEGER", "android_charge_ms" to "INTEGER",
+            "android_personalized" to "INTEGER")
+        private val DETAIL_COLUMNS = V3_COLUMNS + V4_COLUMNS
         @Volatile private var shared: BatteryStore? = null
         fun get(context: Context): BatteryStore =
             shared ?: synchronized(this) { shared ?: BatteryStore(context).also { shared = it } }
@@ -335,9 +350,30 @@ object PhoneBattery {
             levelRaw = level, scale = scale,
             cycleCount = extra("android.os.extra.CYCLE_COUNT")?.takeIf { it >= 0 },
             energyRaw = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER).takeIf { it != Long.MIN_VALUE })
+            .let { d -> AndroidEstimates.read(context).let { a ->
+                d.copy(androidDischargeMs = a.dischargeMs, androidChargeMs = a.chargeMs, androidPersonalized = a.personalized) } }
         return Reading("phone", System.currentTimeMillis(), percent, charging, "android",
             intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1).takeIf { it >= 0 },
             intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1).takeIf { it > 0 },
             rawCharge.takeIf { it > 0 && it != Int.MAX_VALUE }, detail)
+    }
+}
+
+/** Android's own estimates for this phone. Null when Android has none right now. */
+data class AndroidEstimate(val dischargeMs: Long?, val chargeMs: Long?, val personalized: Boolean?)
+
+object AndroidEstimates {
+    fun read(context: Context): AndroidEstimate {
+        val pm = context.getSystemService(android.os.PowerManager::class.java)
+        val bm = context.getSystemService(BatteryManager::class.java)
+        val discharge = if (android.os.Build.VERSION.SDK_INT >= 31) try {
+            pm?.batteryDischargePrediction?.toMillis()?.takeIf { it > 0 }
+        } catch (e: Exception) { null } else null
+        val personalized = if (discharge != null && android.os.Build.VERSION.SDK_INT >= 31) try {
+            pm?.isBatteryDischargePredictionPersonalized
+        } catch (e: Exception) { null } else null
+        // -1 means "not charging or not known yet".
+        val charge = try { bm?.computeChargeTimeRemaining()?.takeIf { it > 0 } } catch (e: Exception) { null }
+        return AndroidEstimate(discharge, charge, personalized)
     }
 }

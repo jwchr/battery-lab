@@ -40,6 +40,7 @@ class MainActivity : Activity() {
     private val panel = Color.rgb(22, 34, 52)
     private val blue = Color.rgb(95, 172, 255)
     private val warn = Color.rgb(255, 183, 77)
+    private val HISTORY_WEEKS = 26
     private val REQUEST_BLUETOOTH = 108
     private val EXPORT_CSV = 109
     private val BIND_WIDGET = 110
@@ -179,6 +180,8 @@ class MainActivity : Activity() {
             addView(label("Blue: phone   •   Green: watch   •   Orange: ring", 12f, quiet))
         }
 
+        renderBatteryLifeSection(devices)
+
         renderWidgetSection()
 
         section("Galaxy Ring direct BLE (optional fallback)", "Only needed if the Samsung widget source is unavailable. " +
@@ -254,6 +257,58 @@ class MainActivity : Activity() {
         "manual_widget" -> "manual entry"
         "ring_ble" -> "Ring BLE"
         else -> source
+    }
+
+    /**
+     * Per-charge runtime history and weekly trends. Ring and Watch have no health data, so the
+     * weekly full-charge runtime is the longevity signal; the phone also gets capacity from
+     * Android's charge counter.
+     */
+    private fun renderBatteryLifeSection(devices: List<Pair<String, String>>) {
+        val from = System.currentTimeMillis() - HISTORY_WEEKS * 7 * 86_400_000L
+        val when_ = java.text.SimpleDateFormat("EEE MMM d HH:mm", Locale.getDefault())
+        val weekFmt = java.text.SimpleDateFormat("MMM d", Locale.getDefault())
+        section("Battery life history", "Each line is one discharge between charges (at least 1 hour and 4 points). " +
+            "\"Full charge\" projects that drain rate from 100% to 0%. Weekly values weight longer discharges more.").apply {
+            for ((id, name) in devices) {
+                val readings = store.since(id, from)
+                val stretches = BatteryMath.dischargeStretches(readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) })
+                addView(label(name, 16f, ink, true))
+                if (stretches.isEmpty()) {
+                    addView(label("No complete discharges yet.", 13f, quiet))
+                    continue
+                }
+                for (s in stretches.takeLast(5).asReversed()) {
+                    addView(label("${when_.format(s.startMs)} → ${when_.format(s.endMs)}\n" +
+                        "${s.fromPct}% → ${s.toPct}% in ${f(s.hours)} h · ${f(s.percentPerHour)} pp/h · " +
+                        "full charge ~${s.fullChargeHours.roundToInt()} h", 13f, quiet))
+                }
+                val weeks = BatteryMath.weeklyRuntime(stretches, ::weekStart).takeLast(8)
+                if (weeks.size > 1) {
+                    addView(label("By week (full-charge runtime):", 13f, ink))
+                    for (w in weeks.asReversed()) addView(label("Week of ${weekFmt.format(w.weekStartMs)}: ~${w.fullChargeHours.roundToInt()} h " +
+                        "· ${w.stretches} discharge${if (w.stretches == 1) "" else "s"}, ${f(w.observedHours)} h observed", 12f, quiet))
+                }
+                if (id == "phone") {
+                    val capacity = readings.mapNotNull { r ->
+                        BatteryMath.impliedCapacityMah(r.percent, r.remainingUah, r.charging)?.let { weekStart(r.timeMs) to it }
+                    }.groupBy({ it.first }, { it.second }).toSortedMap()
+                    for ((week, values) in capacity.entries.toList().takeLast(8).asReversed()) {
+                        val mah = BatteryMath.median(values) ?: continue
+                        addView(label("Estimated full capacity, week of ${weekFmt.format(week)}: ~${mah.roundToInt()} mAh " +
+                            "(from Android's charge counter; an estimate, not a health test)", 12f, quiet))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun weekStart(timeMs: Long): Long = java.util.Calendar.getInstance().run {
+        timeInMillis = timeMs
+        set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+        set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+        while (get(java.util.Calendar.DAY_OF_WEEK) != firstDayOfWeek) add(java.util.Calendar.DAY_OF_MONTH, -1)
+        timeInMillis
     }
 
     private fun renderWidgetSection() {

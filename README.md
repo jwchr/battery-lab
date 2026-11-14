@@ -5,6 +5,11 @@ Ring Bluetooth battery probe, discharge estimates, and paired baseline/monitorin
 
 ## Status / important limitations
 
+- **New in 0.3:** Battery Lab can host Samsung's own Battery widget, with your approval, and
+  record the Ring and Watch percentages it displays. This uses no Bluetooth and causes no
+  extra wearable wakeups. Each device is labeled once in the app. Evidence, limits and
+  source priority are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 - **Source code prototype, not yet verified on real devices.** The battery calculations and
   documented Ring battery-response decoding have been tested with local Kotlin smoke tests.
   An Android APK build, installation, and actual BLE connectivity **have not yet been tested**.

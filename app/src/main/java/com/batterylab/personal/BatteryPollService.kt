@@ -4,6 +4,7 @@ import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
 import android.app.job.JobService
+import android.app.usage.UsageStatsManager
 import android.content.ComponentName
 import android.content.Context
 
@@ -16,6 +17,11 @@ object PollScheduler {
 
     fun schedule(context: Context) {
         val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
+        // Re-scheduling an existing job replaces it, and Android then runs it right away.
+        // That made every app open trigger an extra sample (and, with Ring monitoring on,
+        // an extra Ring BLE wakeup). Keep the existing job; it reads settings when it runs.
+        val existing = scheduler.getPendingJob(JOB_ID)
+        if (existing != null && existing.isPeriodic && existing.intervalMillis == FIFTEEN_MINUTES) return
         // Periodic jobs are opportunistic. Sample timestamps reflect actual collection time.
         scheduler.schedule(JobInfo.Builder(JOB_ID, ComponentName(context, BatteryPollService::class.java))
             .setPeriodic(FIFTEEN_MINUTES)
@@ -27,11 +33,16 @@ object PollScheduler {
 
     fun ringEnabled(context: Context) = prefs(context).getBoolean(RING_ENABLED, false)
     fun ringAddress(context: Context) = prefs(context).getString(RING_ADDRESS, null)
+
+    /** Ring history id: the selected Ring's address when chosen, else a widget-only id. */
+    fun ringDeviceId(context: Context) = ringAddress(context)?.let { "ring:$it" } ?: "ring:samsung_widget"
     fun setRingEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(RING_ENABLED, enabled).apply()
         schedule(context)
     }
 }
+
+private const val KEY_LAST_BUCKET = "last_standby_bucket"
 
 class BatteryPollService : JobService() {
     private var reader: RingReader? = null
@@ -39,7 +50,10 @@ class BatteryPollService : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         stopped = false
         val store = BatteryStore(this)
+        logStandbyBucketChange(store)
         PhoneBattery.read(this)?.let(store::append)
+        // Zero-radio source: whatever Samsung's Battery widget currently shows (main thread).
+        SamsungWidgetSource.sample(this, store)
         val address = PollScheduler.ringAddress(this)
         if (!PollScheduler.ringEnabled(this) || address == null) {
             store.close()
@@ -53,6 +67,18 @@ class BatteryPollService : JobService() {
             if (!stopped) jobFinished(params, false)
         }.also { it.start() }
         return true
+    }
+
+    /**
+     * Adaptive Battery can demote the app to RARE (40), where job quotas stop the 15-minute
+     * poll for hours. Logging each change explains gaps in background history.
+     */
+    private fun logStandbyBucketChange(store: BatteryStore) {
+        val bucket = (getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager).appStandbyBucket
+        val prefs = PollScheduler.prefs(this)
+        if (prefs.getInt(KEY_LAST_BUCKET, -1) == bucket) return
+        prefs.edit().putInt(KEY_LAST_BUCKET, bucket).apply()
+        store.logProbe("job", "Standby bucket now $bucket")
     }
 
     override fun onStopJob(params: JobParameters): Boolean {

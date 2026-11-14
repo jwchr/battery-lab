@@ -128,8 +128,25 @@ object UsageSource {
         }
         screenSince?.let { if (toMs > it) screen += Span(it, toMs) }
         closeApp(toMs)
-        return screen to apps
+        // Private apps are folded into "Other" here, before anything else sees their names.
+        val hidden = privateApps(context)
+        val folded = HashMap<String, MutableList<Span>>()
+        apps.forEach { (pkg, spans) ->
+            folded.getOrPut(if (pkg in hidden) DrainAnalysis.UNATTRIBUTED else pkg) { mutableListOf() } += spans
+        }
+        return screen to folded
     }
+
+    /**
+     * Package names the user wants counted as "Other" and never shown by name. Kept only in a
+     * file in the app's private storage on the phone (one package per line), never in the code,
+     * the history database or any backup.
+     */
+    private fun privateApps(context: Context): Set<String> = try {
+        java.io.File(context.filesDir, PRIVATE_APPS_FILE).readLines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+    } catch (_: Exception) { emptySet() }
+
+    const val PRIVATE_APPS_FILE = "private_apps.txt"
 
     /** The app's display name, or a tidy version of its package name if it isn't visible. */
     fun label(context: Context, pkg: String): String = when (pkg) {

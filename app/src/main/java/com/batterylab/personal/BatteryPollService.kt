@@ -4,6 +4,7 @@ import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
 import android.app.job.JobService
+import android.app.usage.UsageStatsManager
 import android.content.ComponentName
 import android.content.Context
 
@@ -41,12 +42,15 @@ object PollScheduler {
     }
 }
 
+private const val KEY_LAST_BUCKET = "last_standby_bucket"
+
 class BatteryPollService : JobService() {
     private var reader: RingReader? = null
     private var stopped = false
     override fun onStartJob(params: JobParameters): Boolean {
         stopped = false
         val store = BatteryStore(this)
+        logStandbyBucketChange(store)
         PhoneBattery.read(this)?.let(store::append)
         // Zero-radio source: whatever Samsung's Battery widget currently shows (main thread).
         SamsungWidgetSource.sample(this, store)
@@ -63,6 +67,18 @@ class BatteryPollService : JobService() {
             if (!stopped) jobFinished(params, false)
         }.also { it.start() }
         return true
+    }
+
+    /**
+     * Adaptive Battery can demote the app to RARE (40), where job quotas stop the 15-minute
+     * poll for hours. Logging each change explains gaps in background history.
+     */
+    private fun logStandbyBucketChange(store: BatteryStore) {
+        val bucket = (getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager).appStandbyBucket
+        val prefs = PollScheduler.prefs(this)
+        if (prefs.getInt(KEY_LAST_BUCKET, -1) == bucket) return
+        prefs.edit().putInt(KEY_LAST_BUCKET, bucket).apply()
+        store.logProbe("job", "Standby bucket now $bucket")
     }
 
     override fun onStopJob(params: JobParameters): Boolean {

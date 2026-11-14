@@ -61,6 +61,7 @@ object SamsungWidgetSource {
 
     private const val KEY_WIDGET_ID = "samsung_widget_id"
     private const val KEY_LABELS = "samsung_widget_labels"
+    private const val KEY_LAST_UNMATCHED = "samsung_widget_last_unmatched"
     private const val WIDTH_DP = 267f   // 4x2 size the Samsung launcher reports on the test phone
     private const val HEIGHT_DP = 173f
     private const val MATCH_DISTANCE = 64 // of 512 fingerprint bits
@@ -130,8 +131,14 @@ object SamsungWidgetSource {
     /** Stores labeled Ring/Watch slots as readings. Phone slots are never stored (Android is authoritative). */
     fun record(context: Context, store: BatteryStore, snapshot: WidgetSnapshot): List<Reading> {
         val saved = mutableListOf<Reading>()
+        val seen = mutableSetOf<String>()
+        val unmatched = mutableListOf<String>()
         for (slot in snapshot.slots) {
-            val device = when (labelFor(context, slot.fingerprint)) {
+            val label = labelFor(context, slot.fingerprint)
+            if (label == null) {
+                unmatched += "${slot.index}:${if (slot.fingerprint == null) "unreadable" else "unrecognized"}"
+            } else seen += label
+            val device = when (label) {
                 LABEL_RING -> PollScheduler.ringDeviceId(context)
                 LABEL_WATCH -> WATCH_DEVICE
                 else -> null
@@ -145,6 +152,22 @@ object SamsungWidgetSource {
             }
             store.append(reading)
             saved += reading
+        }
+        // Unlabeled slots (often the phone, which needs no label) are logged only when the set
+        // changes, so icon drift shows up without one row per poll.
+        val unmatchedKey = unmatched.joinToString(",")
+        val prefs = PollScheduler.prefs(context)
+        if (prefs.getString(KEY_LAST_UNMATCHED, null) != unmatchedKey) {
+            prefs.edit().putString(KEY_LAST_UNMATCHED, unmatchedKey).apply()
+            store.logProbe(SOURCE, "Unlabeled slots now: ${unmatchedKey.ifEmpty { "none" }}")
+        }
+        // A labeled device that drops out of the widget (dead, disconnected, icon changed)
+        // otherwise leaves only a silent gap in history.
+        val known = labels(context).let { json -> json.keys().asSequence().map(json::optString).toSet() }
+        for (label in listOf(LABEL_RING, LABEL_WATCH)) {
+            if (label in known && label !in seen) {
+                store.logProbe(SOURCE, "$label not in widget (${snapshot.slots.size} slots shown)")
+            }
         }
         return saved
     }

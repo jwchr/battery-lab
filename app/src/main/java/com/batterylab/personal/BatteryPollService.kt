@@ -10,7 +10,9 @@ import android.content.Context
 
 object PollScheduler {
     private const val JOB_ID = 44007
-    private const val FIFTEEN_MINUTES = 15 * 60 * 1000L
+    const val INTERVAL_MINUTES = "poll_interval_minutes"
+    /** Choices offered in the app. 15 min is Android's floor for periodic jobs. */
+    val INTERVAL_CHOICES = listOf(15, 30, 60, 120, 240)
     const val PREFS = "battery_settings"
     const val RING_ADDRESS = "ring_address"
     const val RING_ENABLED = "ring_monitoring_enabled"
@@ -21,15 +23,30 @@ object PollScheduler {
         // That made every app open trigger an extra sample (and, with Ring monitoring on,
         // an extra Ring BLE wakeup). Keep the existing job; it reads settings when it runs.
         val existing = scheduler.getPendingJob(JOB_ID)
-        if (existing != null && existing.isPeriodic && existing.intervalMillis == FIFTEEN_MINUTES) return
+        val interval = intervalMinutes(context) * 60_000L
+        if (existing != null && existing.isPeriodic && existing.intervalMillis == interval) return
         // Periodic jobs are opportunistic. Sample timestamps reflect actual collection time.
         scheduler.schedule(JobInfo.Builder(JOB_ID, ComponentName(context, BatteryPollService::class.java))
-            .setPeriodic(FIFTEEN_MINUTES)
+            .setPeriodic(interval)
             .setPersisted(true)
             .build())
     }
 
     fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun intervalMinutes(context: Context) =
+        prefs(context).getInt(INTERVAL_MINUTES, 15).takeIf { it in INTERVAL_CHOICES } ?: 15
+
+    /** Changing the interval replaces the job, which also runs it once right away. */
+    fun setIntervalMinutes(context: Context, minutes: Int) {
+        prefs(context).edit().putInt(INTERVAL_MINUTES, minutes).apply()
+        schedule(context)
+    }
+
+    /** Readings further apart than this are a gap in the record, not a measured stretch. */
+    fun gapLimits(context: Context) = GapLimits.forInterval(intervalMinutes(context))
+
+    fun intervalLabel(minutes: Int) = if (minutes < 60) "$minutes min" else if (minutes == 60) "hour" else "${minutes / 60} hours"
 
     fun ringEnabled(context: Context) = prefs(context).getBoolean(RING_ENABLED, false)
     fun ringAddress(context: Context) = prefs(context).getString(RING_ADDRESS, null)
@@ -54,6 +71,8 @@ class BatteryPollService : JobService() {
         PhoneBattery.read(this)?.let(store::append)
         // Zero-radio source: whatever Samsung's Battery widget currently shows (main thread).
         SamsungWidgetSource.sample(this, store)
+        // Phone-side only: writes the backup file (at most every 12 h); the Drive app uploads it.
+        DriveBackup.maybeBackup(this, store)
         val address = PollScheduler.ringAddress(this)
         if (!PollScheduler.ringEnabled(this) || address == null) {
             store.close()

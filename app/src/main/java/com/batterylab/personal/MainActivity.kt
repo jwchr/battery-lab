@@ -29,44 +29,27 @@ import android.widget.Toast
 import kotlin.math.roundToInt
 import java.util.Locale
 
-class MainActivity : Activity() {
+class MainActivity : StyledActivity() {
     private lateinit var store: BatteryStore
-    private lateinit var body: LinearLayout
-    private lateinit var scroll: ScrollView
     private var reader: RingReader? = null
-    private val ink = Color.rgb(232, 240, 250)
-    private val quiet = Color.rgb(155, 174, 199)
-    private val bg = Color.rgb(12, 20, 34)
-    private val panel = Color.rgb(22, 34, 52)
-    private val blue = Color.rgb(95, 172, 255)
-    private val warn = Color.rgb(255, 183, 77)
+    private var labOpen = false
     private val HISTORY_WEEKS = 26
     private val REQUEST_BLUETOOTH = 108
     private val EXPORT_CSV = 109
     private val BIND_WIDGET = 110
     private val CONFIGURE_WIDGET = 111
+    private val PICK_BACKUP = 112
     private var pendingWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID
     private var widgetSnapshot: WidgetSnapshot? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        window.statusBarColor = bg
-        window.navigationBarColor = bg
         store = BatteryStore(this)
         pendingWidgetId = savedInstanceState?.getInt("pendingWidgetId", pendingWidgetId) ?: pendingWidgetId
         PhoneBattery.read(this)?.let(store::append)
         PollScheduler.schedule(this)
 
-        body = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(18), dp(18), dp(28))
-            setBackgroundColor(bg)
-        }
-        scroll = ScrollView(this).apply {
-            isFillViewport = true
-            addView(body)
-        }
-        setContentView(scroll)
+        setUpPage()
         if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
             != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), REQUEST_BLUETOOTH)
@@ -76,7 +59,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        if (::store.isInitialized && ::body.isInitialized) {
+        if (::store.isInitialized && pageReady) {
             refreshWidget()
             render()
         }
@@ -97,58 +80,11 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun dp(value: Int): Int = (resources.displayMetrics.density * value).roundToInt()
-
-    private fun label(text: String, size: Float = 15f, color: Int = ink, bold: Boolean = false): TextView =
-        TextView(this).apply {
-            this.text = text
-            textSize = size
-            setTextColor(color)
-            setPadding(0, dp(3), 0, dp(5))
-            if (bold) setTypeface(null, Typeface.BOLD)
-        }
-
-    private fun makeButton(text: String, onClick: () -> Unit): Button = Button(this).apply {
-        isAllCaps = false
-        this.text = text
-        setTextColor(Color.WHITE)
-        background = GradientDrawable().apply {
-            setColor(Color.rgb(39, 64, 95))
-            cornerRadius = dp(11).toFloat()
-        }
-        setPadding(dp(12), dp(8), dp(12), dp(8))
-        setOnClickListener { onClick() }
-    }
-
-    private fun section(title: String, description: String? = null): LinearLayout {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(15))
-            background = GradientDrawable().apply {
-                setColor(panel)
-                cornerRadius = dp(16).toFloat()
-            }
-        }
-        card.addView(label(title, 19f, ink, true))
-        if (description != null) card.addView(label(description, 13f, quiet))
-        body.addView(card, LinearLayout.LayoutParams(-1, -2).apply {
-            bottomMargin = dp(12)
-        })
-        return card
-    }
-
-    private fun LinearLayout.button(text: String, onClick: () -> Unit) {
-        addView(makeButton(text, onClick), LinearLayout.LayoutParams(-1, dp(47)).apply {
-            topMargin = dp(7)
-        })
-    }
-
     private fun render() {
         val oldScroll = scroll.scrollY
         body.removeAllViews()
-        body.addView(label("Battery Lab", 29f, ink, true))
-        body.addView(label("Phone • Watch8 • Galaxy Ring", 15f, quiet))
-        body.addView(label("Local, timestamped battery history. All predictions are estimates.", 13f, quiet))
+        val exempt = (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
+        renderHeader(exempt)
 
         val ringAddress = PollScheduler.ringAddress(this)
         val ringId = PollScheduler.ringDeviceId(this)
@@ -156,36 +92,73 @@ class MainActivity : Activity() {
             .maxByOrNull { store.latest(it)?.timeMs ?: 0L }
         val devices = listOf("phone" to "Phone", (watchId ?: "watch:unknown") to "Galaxy Watch8",
             ringId to "Galaxy Ring")
-        for ((id, name) in devices) {
-            val recent = store.recent(id, 1000)
-            val last = recent.lastOrNull()
-            val projection = if (last != null && System.currentTimeMillis() - last.timeMs <= 6 * 3_600_000L)
-                BatteryMath.estimate(recent.map { BatteryPoint(it.timeMs, it.percent, it.charging) }) else null
-            section("$name   ${last?.percent?.let { "$it%" } ?: "—"}",
-                last?.let { "${BatteryStore.format(it.timeMs)} • ${if (it.charging == true) "Charging" else if (it.charging == false) "Not charging" else "Charge state unknown"} • ${sourceName(it.source)}" }
-                    ?: "No readings yet").apply {
-                val prediction = if (projection != null) {
-                    "Observed drain: ${f(projection.percentPerHour)} pp/hour · " +
-                        "~${f(projection.hoursRemaining)}h remaining · ~${f(projection.hoursFromFull)}h from full"
-                } else "Runtime prediction needs ≥4 percentage points of discharge over ≥1 hour."
-                addView(label(prediction, 14f, quiet))
-                if (id == "phone" && last?.remainingUah != null)
-                    addView(label("Reported remaining charge: ${last.remainingUah / 1000} mAh (not battery health)", 12f, quiet))
+        if (!exempt) section("Heads up", "Background checks may pause for hours",
+            "Android limits apps it thinks you don't use. Set Battery Lab's battery usage to Unrestricted " +
+                "(App info → Battery → Unrestricted) so it keeps checking every ${PollScheduler.intervalLabel(PollScheduler.intervalMinutes(this))}.", fill = Palette.amberSoft).apply {
+            button("Open Battery Lab app info", primary = true) {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
+            }
+        }
+        if (SamsungWidgetSource.widgetId(this) == null) section("Get started", "Follow your Ring and Watch",
+            "Battery Lab reads the numbers Samsung's Battery widget already shows. No Bluetooth, no extra wakeups.").apply {
+            button("Connect Samsung's Battery widget", primary = true) { connectWidget() }
+        }
+
+        val colors = listOf(Palette.phone, Palette.watch, Palette.ring)
+        section("Right now", "How your batteries are doing.", tagView = intervalPill(exempt)).apply {
+            devices.forEachIndexed { i, (id, _) ->
+                if (i > 0) addView(hairline(), LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(4) })
+                addView(deviceBoard(id, devices[i].second, colors[i]))
             }
         }
 
-        section("History · last 48 hours", "Gaps are real gaps; Android can defer background jobs.").apply {
-            addView(BatteryGraph(this@MainActivity, devices.map { (id, _) -> store.recent(id, 4000) }),
-                LinearLayout.LayoutParams(-1, dp(185)))
-            addView(label("Blue: phone   •   Green: watch   •   Orange: ring", 12f, quiet))
+        section("Last 48 hours", "How the last two days went.").apply {
+            addView(chipRow(chip("Phone", colors[0]), chip("Watch", colors[1]), chip("Ring", colors[2])))
+            addView(BatteryGraph(this@MainActivity, devices.map { (id, _) -> store.recent(id, 4000) }, colors),
+                LinearLayout.LayoutParams(-1, dp(190)))
+            addView(label("Gaps mean Android delayed a check, not that a battery stopped.", 11.5f, Palette.quiet))
         }
 
-        renderBatteryLifeSection(devices)
+        renderBatteryLifeSection(devices, colors)
+
+        val backupUri = DriveBackup.uri(this)
+        section("Backup", if (backupUri != null) "Backing up to your Drive." else "Keep a copy in Google Drive.",
+            if (backupUri != null) DriveBackup.lastBackupMs(this)?.let {
+                "Last saved ${BatteryStore.format(it)}. Updated about twice a day with your full history (zipped CSV)."
+            } ?: "Waiting for the first save." else "Pick a file in Google Drive once; Battery Lab updates it about " +
+                "twice a day with your full history. Your history otherwise lives only on this phone.",
+            tag = if (backupUri != null) "On" else null).apply {
+            if (backupUri == null) button("Choose a Drive file", primary = true) {
+                startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "application/gzip"
+                    putExtra(Intent.EXTRA_TITLE, "battery-lab-history.csv.gz")
+                }, PICK_BACKUP)
+            } else {
+                button("Back up now") {
+                    toast(if (DriveBackup.maybeBackup(this@MainActivity, store, force = true)) "Saved to your backup file"
+                        else "Backup failed; check that the file still exists")
+                    render()
+                }
+                button("Stop backing up") { DriveBackup.disable(this@MainActivity); render() }
+            }
+        }
+
+        section("Stats", "For the curious", "Battery health, charging habits, hungriest hours, " +
+            "rolling averages and some very nerdy conversions.").apply {
+            button("Open stats", primary = true) { startActivity(Intent(this@MainActivity, StatsActivity::class.java)) }
+        }
+
+        section("Lab tools", "Sources, tests and your data", tag = if (labOpen) "Open" else null).apply {
+            addView(label("The widget connection, Ring Bluetooth, the A/B test and CSV export.", 13f))
+            button(if (labOpen) "Hide lab tools" else "Show lab tools") { labOpen = !labOpen; render() }
+        }
+        if (!labOpen) { scroll.post { scroll.scrollTo(0, oldScroll) }; return }
 
         renderWidgetSection()
 
-        section("Galaxy Ring direct BLE (optional fallback)", "Only needed if the Samsung widget source is unavailable. " +
-            "Each request wakes the Ring. Battery-only BLE requests.").apply {
+        section("Ring Bluetooth", "Direct Ring reading", "Optional fallback when the widget is unavailable. " +
+            "Each request wakes the Ring, so it is off by default.").apply {
             addView(label("Selected: ${ringAddress ?: "None"}", 13f, quiet))
             addView(label("Periodic Ring sampling: ${if (PollScheduler.ringEnabled(this@MainActivity)) "ON" else "OFF"}. " +
                 "The default is OFF to avoid influencing your battery tests.", 13f, quiet))
@@ -206,7 +179,8 @@ class MainActivity : Activity() {
             if (event != null) addView(label("Last BLE diagnostic: $event", 12f, quiet))
         }
 
-        section("Controlled battery-impact experiment", "Run baseline and monitored periods for similar durations, ideally starting near the same charge percentage. Repeat in alternating order.").apply {
+        section("Experiment", "Does Ring monitoring cost battery?", "Run baseline and monitored periods for similar " +
+            "durations, ideally starting near the same charge. Repeat in alternating order.").apply {
             val active = store.activeExperiment()
             if (active != null) {
                 addView(label("ACTIVE: ${active.mode.uppercase(Locale.US)} · " +
@@ -238,7 +212,7 @@ class MainActivity : Activity() {
             }
         }
 
-        section("Data & privacy", "Everything is stored on this device. No account and no remote server.").apply {
+        section("Your data", "Stays on this phone", "No account and no server. Export it any time.").apply {
             button("Export timestamped readings and tests · CSV") { export() }
             button("Record current phone battery now") {
                 PhoneBattery.read(this@MainActivity)?.let(store::append)
@@ -264,42 +238,170 @@ class MainActivity : Activity() {
      * weekly full-charge runtime is the longevity signal; the phone also gets capacity from
      * Android's charge counter.
      */
-    private fun renderBatteryLifeSection(devices: List<Pair<String, String>>) {
+    private fun renderBatteryLifeSection(devices: List<Pair<String, String>>, colors: List<Int>) {
         val from = System.currentTimeMillis() - HISTORY_WEEKS * 7 * 86_400_000L
-        val when_ = java.text.SimpleDateFormat("EEE MMM d HH:mm", Locale.getDefault())
+        val day = java.text.SimpleDateFormat("EEE HH:mm", Locale.getDefault())
         val weekFmt = java.text.SimpleDateFormat("MMM d", Locale.getDefault())
-        section("Battery life history", "Each line is one discharge between charges (at least 1 hour and 4 points). " +
-            "\"Full charge\" projects that drain rate from 100% to 0%. Weekly values weight longer discharges more.").apply {
-            for ((id, name) in devices) {
-                val readings = store.since(id, from)
-                val stretches = BatteryMath.dischargeStretches(readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) })
-                addView(label(name, 16f, ink, true))
+        val perDevice = devices.map { (id, _) ->
+            val readings = store.since(id, from)
+            readings to BatteryMath.dischargeStretches(readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = PollScheduler.gapLimits(this))
+        }
+        // One scale for every bar so devices compare at a glance.
+        val maxHours = perDevice.flatMap { (_, s) -> s.takeLast(4).map { it.fullChargeHours } }.maxOrNull() ?: 1.0
+        section("Battery life", "How long a charge lasts.", "Each bar is one stretch between charges, " +
+            "projected to a full 100% → 0% at the rate it actually drained.").apply {
+            devices.forEachIndexed { i, (id, name) ->
+                val (readings, stretches) = perDevice[i]
+                addView(deviceBanner(name, colors[i]))
                 if (stretches.isEmpty()) {
-                    addView(label("No complete discharges yet.", 13f, quiet))
-                    continue
+                    addView(label("Not enough yet: needs an hour of use between charges.", 12.5f, Palette.quiet))
+                    return@forEachIndexed
                 }
-                for (s in stretches.takeLast(5).asReversed()) {
-                    addView(label("${when_.format(s.startMs)} → ${when_.format(s.endMs)}\n" +
-                        "${s.fromPct}% → ${s.toPct}% in ${f(s.hours)} h · ${f(s.percentPerHour)} pp/h · " +
-                        "full charge ~${s.fullChargeHours.roundToInt()} h", 13f, quiet))
-                }
-                val weeks = BatteryMath.weeklyRuntime(stretches, ::weekStart).takeLast(8)
+                for (s in stretches.takeLast(4).asReversed()) addView(barRow(
+                    day.format(s.startMs).uppercase(Locale.getDefault()), s.fullChargeHours / maxHours,
+                    "${s.fullChargeHours.roundToInt()} h", colors[i],
+                    "${s.fromPct}% → ${s.toPct}% over ${f1(s.hours)} h"))
+                val weeks = BatteryMath.weeklyRuntime(stretches, ::weekStart).takeLast(6)
                 if (weeks.size > 1) {
-                    addView(label("By week (full-charge runtime):", 13f, ink))
-                    for (w in weeks.asReversed()) addView(label("Week of ${weekFmt.format(w.weekStartMs)}: ~${w.fullChargeHours.roundToInt()} h " +
-                        "· ${w.stretches} discharge${if (w.stretches == 1) "" else "s"}, ${f(w.observedHours)} h observed", 12f, quiet))
+                    addView(eyebrow("By week").apply { setPadding(0, dp(10), 0, dp(2)) })
+                    val top = weeks.maxOf { it.fullChargeHours }
+                    for (w in weeks.asReversed()) addView(barRow(weekFmt.format(w.weekStartMs).uppercase(Locale.getDefault()),
+                        w.fullChargeHours / top, "${w.fullChargeHours.roundToInt()} h", colors[i]))
                 }
                 if (id == "phone") {
-                    val capacity = readings.mapNotNull { r ->
-                        BatteryMath.impliedCapacityMah(r.percent, r.remainingUah, r.charging)?.let { weekStart(r.timeMs) to it }
-                    }.groupBy({ it.first }, { it.second }).toSortedMap()
-                    for ((week, values) in capacity.entries.toList().takeLast(8).asReversed()) {
-                        val mah = BatteryMath.median(values) ?: continue
-                        addView(label("Estimated full capacity, week of ${weekFmt.format(week)}: ~${mah.roundToInt()} mAh " +
-                            "(from Android's charge counter; an estimate, not a health test)", 12f, quiet))
-                    }
+                    val mah = BatteryMath.median(readings.filter { it.timeMs >= weekStart(System.currentTimeMillis()) }
+                        .mapNotNull { BatteryMath.impliedCapacityMah(it.percent, it.remainingUah, it.charging) })
+                    if (mah != null) addView(label("Battery capacity this week: about ${String.format(Locale.getDefault(), "%,d", mah.roundToInt())} mAh " +
+                        "· estimated from Android's charge counter", 12f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
                 }
             }
+        }
+    }
+
+    private fun renderHeader(exempt: Boolean) {
+        body.addView(LinearLayout(this).apply {
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(6), dp(4), dp(18))
+            addView(TextView(this@MainActivity).apply {
+                text = "b"
+                textSize = 24f
+                typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                setTextColor(ink)
+                gravity = android.view.Gravity.CENTER
+                setPadding(0, 0, 0, dp(3))
+                background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Palette.amber) }
+            }, LinearLayout.LayoutParams(dp(44), dp(44)))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(12), 0, 0, 0)
+                addView(TextView(this@MainActivity).apply {
+                    text = "battery lab."
+                    textSize = 28f
+                    typeface = Typeface.create("sans-serif", Typeface.BOLD)
+                    letterSpacing = -0.03f
+                    setTextColor(ink)
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = "Every charge, every device — kept on this phone."
+                    textSize = 12f
+                    setTextColor(Palette.body)
+                })
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+        })
+    }
+
+    /** "● Every 15 min ▾" pill for the Right now card; tapping it picks how often to check. */
+    private fun intervalPill(exempt: Boolean): View = TextView(this).apply {
+        val minutes = PollScheduler.intervalMinutes(this@MainActivity)
+        val words = if (exempt) "Every ${PollScheduler.intervalLabel(minutes)}" else "Checks limited"
+        val s = android.text.SpannableString("●  $words  ▾")
+        s.setSpan(android.text.style.ForegroundColorSpan(if (exempt) Palette.green else Palette.amber), 0, 1, 0)
+        text = s
+        textSize = 11.5f
+        typeface = medium
+        setTextColor(ink)
+        setPadding(dp(10), dp(5), dp(10), dp(5))
+        background = android.graphics.drawable.RippleDrawable(
+            android.content.res.ColorStateList.valueOf(Color.argb(40, 36, 69, 107)),
+            rounded(Color.argb(215, 255, 253, 248), 14, Palette.cardStroke), null)
+        contentDescription = "Check interval: $words. Tap to change."
+        setOnClickListener { v ->
+            android.widget.PopupMenu(this@MainActivity, v).apply {
+                PollScheduler.INTERVAL_CHOICES.forEachIndexed { i, m ->
+                    menu.add(0, m, i, "Every ${PollScheduler.intervalLabel(m)}" + if (m == 15) "  (recommended)" else "")
+                        .apply { isCheckable = true; isChecked = m == minutes }
+                }
+                setOnMenuItemClickListener { item ->
+                    if (item.itemId != minutes) {
+                        PollScheduler.setIntervalMinutes(this@MainActivity, item.itemId)
+                        toast("Checking every ${PollScheduler.intervalLabel(item.itemId)}")
+                        render()
+                    }
+                    true
+                }
+                show()
+            }
+        }
+    }
+
+    /** One device: color gauge, name with a status pill, hours left on the right, a quiet meta line. */
+    private fun deviceBoard(id: String, name: String, color: Int): View {
+        val recent = store.recent(id, 1000)
+        val last = recent.lastOrNull()
+        val fresh = last != null && System.currentTimeMillis() - last.timeMs <= maxOf(6 * 3_600_000L, PollScheduler.gapLimits(this).stepMs)
+        val projection = if (fresh) BatteryMath.estimate(recent.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, PollScheduler.gapLimits(this)) else null
+        val time = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT)
+        val (status, statusColor) = when {
+            last == null -> "No data yet" to Palette.quiet
+            !fresh -> "Not seen lately" to Palette.amberInk
+            last.charging == true -> "Charging" to Palette.green
+            else -> "On battery" to Palette.tintInk
+        }
+        return LinearLayout(this).apply {
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, dp(6), 0, dp(2))
+            addView(GaugeView(this@MainActivity, last?.percent, color), LinearLayout.LayoutParams(dp(68), dp(68)))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(14), 0, dp(6), 0)
+                // Name and status pill share one line to keep each device row compact.
+                addView(LinearLayout(this@MainActivity).apply {
+                    gravity = android.view.Gravity.CENTER_VERTICAL
+                    addView(TextView(this@MainActivity).apply {
+                        text = name; textSize = 17f; typeface = medium; setTextColor(ink)
+                        maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
+                    }, LinearLayout.LayoutParams(-2, -2, 0f))
+                    addView(TextView(this@MainActivity).apply {
+                        text = status; textSize = 11f; typeface = medium; letterSpacing = 0.04f
+                        setTextColor(statusColor); maxLines = 1
+                        setPadding(dp(8), dp(3), dp(8), dp(3))
+                        background = rounded(Color.argb(28, Color.red(statusColor), Color.green(statusColor), Color.blue(statusColor)), 6)
+                    }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
+                }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
+                addView(TextView(this@MainActivity).apply {
+                    text = buildList {
+                        if (last != null) add("Updated ${time.format(java.util.Date(last.timeMs))}")
+                        if (projection != null) add("about ${f1(projection.percentPerHour)}% an hour")
+                    }.joinToString(" · ").ifEmpty { "Waiting for the first reading" }
+                    textSize = 11.5f; setTextColor(Palette.quiet)
+                })
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = android.view.Gravity.END
+                // Count down from the reading's time, not from now: an old reading means less left.
+                val (value, unit) = if (projection != null && last != null) BatteryMath.timeLeftLabel(
+                    BatteryMath.timeLeftNow(projection.hoursRemaining, last.timeMs, System.currentTimeMillis()))
+                else "—" to "hours left"
+                addView(TextView(this@MainActivity).apply {
+                    text = value
+                    textSize = 28f; typeface = medium; setTextColor(ink)
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = unit
+                    textSize = 11f; setTextColor(Palette.quiet)
+                })
+            })
         }
     }
 
@@ -313,19 +415,11 @@ class MainActivity : Activity() {
 
     private fun renderWidgetSection() {
         val connected = SamsungWidgetSource.widgetId(this) != null
-        section("Samsung Battery widget source", "Reads the percentages Samsung's Battery widget already shows. " +
-            "No Bluetooth, no extra Ring or Watch wakeups. Checked about every 15 minutes and whenever you open Battery Lab.").apply {
-            // Soak test: without the exemption, Adaptive Battery demoted the app to RARE and the
-            // 15-minute job stopped for hours. Ignoring optimizations needs no permission to check.
-            val power = getSystemService(POWER_SERVICE) as PowerManager
-            if (!power.isIgnoringBatteryOptimizations(packageName)) {
-                addView(label("Background checks may stop for hours: set Battery Lab's battery usage to " +
-                    "Unrestricted (App info → Battery → Unrestricted).", 13f, warn, true))
-                button("Open Battery Lab app info") {
-                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.fromParts("package", packageName, null)))
-                }
-            }
+        // The Unrestricted warning lives at the top of the page (see render): without the exemption,
+        // Adaptive Battery demoted the app to RARE in the soak test and the job stopped for hours.
+        section("Widget source", "Samsung Battery widget", "Reads the percentages Samsung's widget already shows, " +
+            "about every 15 minutes and whenever you open Battery Lab. No Bluetooth, no extra wakeups.",
+            tag = if (connected) "Connected" else "Off").apply {
             if (!connected) {
                 addView(label("Not connected. Android will ask you to allow Battery Lab to use the widget.", 13f, quiet))
                 button("Connect Samsung Battery widget") { connectWidget() }
@@ -552,6 +646,15 @@ class MainActivity : Activity() {
             afterWidgetReady()
             return
         }
+        if (requestCode == PICK_BACKUP && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            try {
+                DriveBackup.enable(this, uri)
+                toast(if (DriveBackup.maybeBackup(this, store, force = true)) "Backup on: first copy saved" else "Backup on; first save failed")
+            } catch (e: Exception) { toast("Couldn't use that file: ${e.message}") }
+            render()
+            return
+        }
         if (requestCode == EXPORT_CSV && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             try {
@@ -572,59 +675,56 @@ class MainActivity : Activity() {
 }
 
 /** Simple timestamp-proportional history visualization. No invented or interpolated readings. */
-class BatteryGraph(context: android.content.Context, private val series: List<List<Reading>>) : View(context) {
+/** 48-hour line chart on a light card: hairline grid, device-colored lines, emphasized latest point. */
+class BatteryGraph(context: android.content.Context, private val series: List<List<Reading>>,
+                   private val colors: List<Int>) : View(context) {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        val d = resources.displayMetrics.density
         val w = width.toFloat()
         val h = height.toFloat()
-        val left = 35f * resources.displayMetrics.density
-        val right = w - 8f * resources.displayMetrics.density
-        val top = 12f * resources.displayMetrics.density
-        val bottom = h - 23f * resources.displayMetrics.density
-        val start = System.currentTimeMillis() - 48L * 3_600_000L
+        val left = 30f * d
+        val right = w - 6f * d
+        val top = 8f * d
+        val bottom = h - 22f * d
         val end = System.currentTimeMillis()
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 1f
-        paint.color = Color.rgb(67, 80, 99)
-        for (pct in listOf(0, 25, 50, 75, 100)) {
-            val y = bottom - (bottom - top) * pct / 100f
-            canvas.drawLine(left, y, right, y, paint)
-            paint.style = Paint.Style.FILL
-            paint.color = Color.rgb(162, 177, 198)
-            paint.textSize = 11f * resources.displayMetrics.scaledDensity
-            canvas.drawText("$pct", 2f, y + 4f, paint)
-            paint.style = Paint.Style.STROKE
-            paint.color = Color.rgb(67, 80, 99)
+        val start = end - 48L * 3_600_000L
+        fun x(t: Long) = left + (right - left) * (t - start).toFloat() / (end - start)
+        fun y(pct: Int) = bottom - (bottom - top) * pct / 100f
+        paint.textSize = 10.5f * d
+        for (pct in listOf(0, 50, 100)) {
+            paint.style = Paint.Style.STROKE; paint.strokeWidth = 1f; paint.color = Palette.hairline
+            canvas.drawLine(left, y(pct), right, y(pct), paint)
+            paint.style = Paint.Style.FILL; paint.color = Palette.quiet
+            canvas.drawText("$pct%", 0f, y(pct) + 4f * d, paint)
         }
-        val colors = listOf(Color.rgb(95, 172, 255), Color.rgb(99, 213, 166), Color.rgb(255, 172, 92))
         series.forEachIndexed { index, data ->
             val recent = data.filter { it.timeMs in start..end }
             if (recent.isEmpty()) return@forEachIndexed
             paint.color = colors[index % colors.size]
-            paint.strokeWidth = 2.5f * resources.displayMetrics.density
+            paint.strokeWidth = 2.5f * d
+            paint.strokeCap = Paint.Cap.ROUND
+            paint.strokeJoin = Paint.Join.ROUND
             paint.style = Paint.Style.STROKE
             val path = Path()
-            recent.forEachIndexed { i, reading ->
-                val x = left + (right - left) * (reading.timeMs - start).toFloat() / (end - start)
-                val y = bottom - (bottom - top) * reading.percent / 100f
-                if (i == 0) path.moveTo(x, y) else {
-                    if (reading.timeMs - recent[i - 1].timeMs > 8 * 3_600_000L) path.moveTo(x, y)
-                    else path.lineTo(x, y)
-                }
+            recent.forEachIndexed { i, r ->
+                if (i == 0 || r.timeMs - recent[i - 1].timeMs > 8 * 3_600_000L) path.moveTo(x(r.timeMs), y(r.percent))
+                else path.lineTo(x(r.timeMs), y(r.percent))
             }
             canvas.drawPath(path, paint)
+            val lastR = recent.last()
             paint.style = Paint.Style.FILL
-            for (reading in recent) {
-                val x = left + (right - left) * (reading.timeMs - start).toFloat() / (end - start)
-                val y = bottom - (bottom - top) * reading.percent / 100f
-                canvas.drawCircle(x, y, 2f * resources.displayMetrics.density, paint)
-            }
+            paint.color = Color.WHITE
+            canvas.drawCircle(x(lastR.timeMs), y(lastR.percent), 5f * d, paint)
+            paint.color = colors[index % colors.size]
+            canvas.drawCircle(x(lastR.timeMs), y(lastR.percent), 3.5f * d, paint)
         }
-        paint.color = Color.rgb(155, 174, 199)
-        paint.textSize = 11f * resources.displayMetrics.scaledDensity
         paint.style = Paint.Style.FILL
-        canvas.drawText("48h ago", left, h - 4f, paint)
-        canvas.drawText("now", right - 23f * resources.displayMetrics.density, h - 4f, paint)
+        paint.color = Palette.quiet
+        paint.textSize = 10.5f * d
+        canvas.drawText("2 days ago", left, h - 4f * d, paint)
+        canvas.drawText("yesterday", (left + right) / 2 - 22f * d, h - 4f * d, paint)
+        canvas.drawText("now", right - 20f * d, h - 4f * d, paint)
     }
 }

@@ -28,8 +28,9 @@ class RingReader(
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val finished = AtomicBoolean(false)
-    private var gatt: BluetoothGatt? = null
+    @Volatile private var gatt: BluetoothGatt? = null
     private val deadline = Runnable { complete(null, "Timed out after 20 seconds") }
+    private val closer = Runnable { closeGatt() }
 
     fun start() {
         if (Build.VERSION.SDK_INT >= 31 &&
@@ -56,14 +57,24 @@ class RingReader(
     private fun complete(reading: Reading?, error: String?) {
         if (!finished.compareAndSet(false, true)) return
         main.removeCallbacks(deadline)
+        // Hang up now, but release the connection only once Android reports the link is down
+        // (or after 2 s), so the Bluetooth stack isn't left holding a half-closed link.
         try { gatt?.disconnect() } catch (_: Exception) { }
-        try { gatt?.close() } catch (_: Exception) { }
-        gatt = null
+        main.postDelayed(closer, 2_000)
         main.post { completion(reading, error) }
+    }
+
+    /** Main thread only. */
+    private fun closeGatt() {
+        main.removeCallbacks(closer)
+        val g = gatt ?: return
+        gatt = null
+        try { g.close() } catch (_: Exception) { }
     }
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) main.post { if (finished.get()) closeGatt() }
             if (finished.get()) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 complete(null, "BLE connection failed (status $status)")
@@ -154,7 +165,7 @@ class RingReader(
             if (finished.get() || uuid != NOTIFY_UUID) return
             val result = RingBatteryProtocol.parseBatteryReport(value) ?: return
             complete(Reading(BatteryStore.RING_ID, System.currentTimeMillis(), result.first,
-                result.second, "ring_ble"), null)
+                result.second, "ring_ble", detail = ReadingDetail.clock(context, null)), null)
         }
     }
 

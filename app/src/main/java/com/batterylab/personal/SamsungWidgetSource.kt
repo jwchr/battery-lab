@@ -31,7 +31,8 @@ data class WidgetSlot(
     val icon: Bitmap?
 )
 
-data class WidgetSnapshot(val timeMs: Long, val slots: List<WidgetSlot>)
+data class WidgetSnapshot(val timeMs: Long, val slots: List<WidgetSlot>,
+    val elapsedMs: Long = android.os.SystemClock.elapsedRealtime())
 
 /**
  * Reads battery percentages that Samsung's own Battery widget already displays.
@@ -53,6 +54,11 @@ object SamsungWidgetSource {
     const val HOST_ID = 0x424C
     const val SOURCE = "samsung_widget"
     const val WATCH_DEVICE = "watch:samsung_widget"
+    /**
+     * Samsung's own number for this phone, kept as a separate series only to compare against
+     * Android's reading. Never used for the phone's capacity, drain or charging stats.
+     */
+    const val PHONE_WIDGET_DEVICE = "phone:samsung_widget"
 
     const val LABEL_RING = "ring"
     const val LABEL_WATCH = "watch"
@@ -112,7 +118,7 @@ object SamsungWidgetSource {
      * Inflates the latest views Android holds for our hosted widget, offscreen.
      * Must run on the main thread. Returns null if no widget is bound.
      */
-    fun snapshot(context: Context): WidgetSnapshot? {
+    fun snapshot(context: Context, includeIcons: Boolean = true): WidgetSnapshot? {
         val id = widgetId(context) ?: return null
         val manager = AppWidgetManager.getInstance(context)
         val info = manager.getAppWidgetInfo(id) ?: return null
@@ -126,14 +132,16 @@ object SamsungWidgetSource {
                 View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY))
             view.layout(0, 0, w, h)
         }
-        return WidgetSnapshot(System.currentTimeMillis(), parse(view))
+        return WidgetSnapshot(System.currentTimeMillis(), parse(view, includeIcons))
     }
 
     /** Stores labeled Ring/Watch slots as readings. Phone slots are never stored (Android is authoritative). */
-    fun record(context: Context, store: BatteryStore, snapshot: WidgetSnapshot): List<Reading> {
+    fun record(context: Context, store: BatteryStore, snapshot: WidgetSnapshot, trigger: String = "job"): List<Reading> {
         val saved = mutableListOf<Reading>()
         val seen = mutableSetOf<String>()
         val unmatched = mutableListOf<String>()
+        val clock = ReadingDetail.clock(context, trigger).copy(elapsedMs = snapshot.elapsedMs)
+        recognizePhoneSlot(context, store, snapshot)
         for (slot in snapshot.slots) {
             val label = labelFor(context, slot.fingerprint)
             if (label == null) {
@@ -142,9 +150,10 @@ object SamsungWidgetSource {
             val device = when (label) {
                 LABEL_RING -> PollScheduler.ringDeviceId(context)
                 LABEL_WATCH -> WATCH_DEVICE
+                LABEL_PHONE -> PHONE_WIDGET_DEVICE
                 else -> null
             } ?: continue
-            val reading = Reading(device, snapshot.timeMs, slot.percent, slot.chargingIcon, SOURCE)
+            val reading = Reading(device, snapshot.timeMs, slot.percent, slot.chargingIcon, SOURCE, detail = clock)
             val last = store.latest(device)
             if (last != null && last.source == SOURCE && last.percent == reading.percent &&
                 last.charging == reading.charging && reading.timeMs - last.timeMs < DUPLICATE_WINDOW_MS) {
@@ -175,6 +184,32 @@ object SamsungWidgetSource {
         }
         return saved
     }
+
+    /**
+     * One-time setup: if no slot is labeled as the phone yet and exactly one unlabeled slot shows
+     * Android's own percentage (within 1), label that slot's icon as the phone. From then on it is
+     * matched by icon, not by number, so later comparisons with Android aren't circular.
+     */
+    private fun recognizePhoneSlot(context: Context, store: BatteryStore, snapshot: WidgetSnapshot) {
+        val labels = snapshot.slots.map { labelFor(context, it.fingerprint) }
+        if (LABEL_PHONE in labels(context).let { json -> json.keys().asSequence().map(json::optString).toSet() }) return
+        val android = PhoneBattery.read(context, "widget_check")?.percent ?: return
+        val candidates = snapshot.slots.filterIndexed { i, s -> labels[i] == null && s.fingerprint != null }
+        val match = candidates.singleOrNull() ?: return
+        if (kotlin.math.abs(match.percent - android) > 1) return
+        setLabel(context, match.fingerprint!!, LABEL_PHONE)
+        store.logProbe(SOURCE, "Recognized the phone's widget slot; saving it for comparison")
+    }
+
+    /** Device ids that are labeled but were absent from the widget at the last read (dead, off, out of range). */
+    fun missingDevices(context: Context): Set<String> =
+        PollScheduler.prefs(context).getString(KEY_LAST_MISSING, null).orEmpty().split(',').mapNotNull {
+            when (it) {
+                LABEL_RING -> PollScheduler.ringDeviceId(context)
+                LABEL_WATCH -> WATCH_DEVICE
+                else -> null
+            }
+        }.toSet()
 
     /** Snapshot + record; logs and swallows failures so callers (jobs) never crash. */
     fun sample(context: Context, store: BatteryStore): List<Reading> = try {
@@ -212,7 +247,8 @@ object SamsungWidgetSource {
 
     // ---- view parsing -------------------------------------------------------------------
 
-    private fun parse(root: View): List<WidgetSlot> {
+    /** [includeIcons] draws a display copy of each icon; background reads only need the fingerprint. */
+    private fun parse(root: View, includeIcons: Boolean): List<WidgetSlot> {
         val bars = mutableListOf<ProgressBar>()
         walk(root) { v ->
             if (v is ProgressBar && v.isShown(root) && entryName(v) in PROGRESS_IDS) bars += v
@@ -231,7 +267,7 @@ object SamsungWidgetSource {
             }?.takeIf { it in 0..100 } ?: return@mapIndexedNotNull null // empty slot
             val icon = images.firstOrNull()?.drawable
             WidgetSlot(index, percent, bar.progress, images.size >= 2,
-                icon?.let(::fingerprint), icon?.let { render(it, 96) })
+                icon?.let(::fingerprint), if (includeIcons) icon?.let { render(it, 96) } else null)
         }
     }
 

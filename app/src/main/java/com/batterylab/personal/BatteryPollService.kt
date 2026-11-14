@@ -83,11 +83,11 @@ class BatteryPollService : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         stopped = false
         val store = BatteryStore.get(this)
-        val snapshot = try { SamsungWidgetSource.snapshot(this) to null } catch (e: Exception) { null to e }
+        val snapshot = try { SamsungWidgetSource.snapshot(this, includeIcons = false) to null } catch (e: Exception) { null to e }
         Background.io.execute {
             try {
                 logStandbyBucketChange(store)
-                PhoneBattery.read(this)?.let(store::append)
+                PhoneBattery.read(this, "job")?.let(store::append)
                 snapshot.first?.let { SamsungWidgetSource.record(this, store, it) }
                 snapshot.second?.let { store.logProbe(SamsungWidgetSource.SOURCE, "Widget read failed: ${it.javaClass.simpleName}: ${it.message}") }
                 // Phone-side only: writes the backup file (at most every 12 h); the Drive app uploads it.

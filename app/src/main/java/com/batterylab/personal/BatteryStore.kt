@@ -21,8 +21,44 @@ data class Reading(
     val source: String,
     val tempTenthsC: Int? = null,
     val voltageMv: Int? = null,
-    val remainingUah: Int? = null
+    val remainingUah: Int? = null,
+    val detail: ReadingDetail? = null
 )
+
+/**
+ * Audit fields recorded alongside a reading, kept raw. Null always means unknown or unsupported,
+ * never zero. Currents are exactly what Android reports (nominally microamps; the sign
+ * convention and real units vary by phone), the energy counter nominally nanowatt-hours.
+ */
+data class ReadingDetail(
+    val currentNowRaw: Int? = null,
+    val currentAvgRaw: Int? = null,
+    /** BatteryManager.EXTRA_PLUGGED: 0 unplugged, 1 AC, 2 USB, 4 wireless, 8 dock. */
+    val plugged: Int? = null,
+    /** BatteryManager.EXTRA_STATUS: the full enum, not just charging yes/no. */
+    val status: Int? = null,
+    /** BatteryManager.EXTRA_HEALTH: a category, never a capacity number. */
+    val health: Int? = null,
+    val levelRaw: Int? = null,
+    val scale: Int? = null,
+    val cycleCount: Int? = null,
+    val energyRaw: Long? = null,
+    /** SystemClock.elapsedRealtime() at the read: immune to wall-clock changes within one boot. */
+    val elapsedMs: Long? = null,
+    val bootCount: Int? = null,
+    /** What asked for the read: "job", "app", "manual". */
+    val trigger: String? = null
+) {
+    companion object {
+        /** Just the clock fields, for readings taken on this phone right now. */
+        fun clock(context: Context, trigger: String?) =
+            ReadingDetail(elapsedMs = android.os.SystemClock.elapsedRealtime(), bootCount = bootCount(context), trigger = trigger)
+
+        fun bootCount(context: Context): Int? = try {
+            android.provider.Settings.Global.getInt(context.contentResolver, android.provider.Settings.Global.BOOT_COUNT)
+        } catch (e: Exception) { null }
+    }
+}
 
 data class Experiment(
     val id: Long,
@@ -40,7 +76,7 @@ data class Experiment(
  * writes overlap.
  */
 class BatteryStore private constructor(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, "battery_lab.db", null, 2) {
+    SQLiteOpenHelper(context.applicationContext, "battery_lab.db", null, 3) {
     init { setWriteAheadLoggingEnabled(true) }
 
     /** Shared for the life of the process; callers may still call close(), which does nothing. */
@@ -52,6 +88,7 @@ class BatteryStore private constructor(context: Context) :
             time_ms INTEGER NOT NULL, percent INTEGER NOT NULL, charging INTEGER,
             source TEXT NOT NULL, temp_tenths_c INTEGER, voltage_mv INTEGER,
             remaining_uah INTEGER)""")
+        addDetailColumns(db)
         db.execSQL("CREATE INDEX idx_readings_device_time ON readings(device, time_ms)")
         db.execSQL("""CREATE TABLE experiments (
             id INTEGER PRIMARY KEY AUTOINCREMENT, device TEXT NOT NULL,
@@ -70,6 +107,12 @@ class BatteryStore private constructor(context: Context) :
                     arrayOf(RING_ID, RING_ID))
             }
         }
+        // v3: audit columns, added empty. Existing rows keep every value and read as unknown.
+        if (oldVersion < 3) addDetailColumns(db)
+    }
+
+    private fun addDetailColumns(db: SQLiteDatabase) {
+        for ((name, type) in DETAIL_COLUMNS) db.execSQL("ALTER TABLE readings ADD COLUMN $name $type")
     }
 
     fun append(r: Reading) {
@@ -83,6 +126,20 @@ class BatteryStore private constructor(context: Context) :
             if (r.tempTenthsC != null) put("temp_tenths_c", r.tempTenthsC)
             if (r.voltageMv != null) put("voltage_mv", r.voltageMv)
             if (r.remainingUah != null) put("remaining_uah", r.remainingUah)
+            r.detail?.let { d ->
+                d.currentNowRaw?.let { put("current_now_raw", it) }
+                d.currentAvgRaw?.let { put("current_avg_raw", it) }
+                d.plugged?.let { put("plugged", it) }
+                d.status?.let { put("status", it) }
+                d.health?.let { put("health", it) }
+                d.levelRaw?.let { put("level_raw", it) }
+                d.scale?.let { put("scale", it) }
+                d.cycleCount?.let { put("cycle_count", it) }
+                d.energyRaw?.let { put("energy_raw", it) }
+                d.elapsedMs?.let { put("elapsed_ms", it) }
+                d.bootCount?.let { put("boot_count", it) }
+                d.trigger?.let { put("read_trigger", it) }
+            }
         }
         writableDatabase.insertOrThrow("readings", null, v)
     }
@@ -105,13 +162,23 @@ class BatteryStore private constructor(context: Context) :
                     val ix = c.getColumnIndexOrThrow(name)
                     return if (c.isNull(ix)) null else c.getInt(ix)
                 }
+                fun nullableLong(name: String): Long? {
+                    val ix = c.getColumnIndexOrThrow(name)
+                    return if (c.isNull(ix)) null else c.getLong(ix)
+                }
+                val trigIx = c.getColumnIndexOrThrow("read_trigger")
+                val detail = ReadingDetail(nullableInt("current_now_raw"), nullableInt("current_avg_raw"),
+                    nullableInt("plugged"), nullableInt("status"), nullableInt("health"),
+                    nullableInt("level_raw"), nullableInt("scale"), nullableInt("cycle_count"),
+                    nullableLong("energy_raw"), nullableLong("elapsed_ms"), nullableInt("boot_count"),
+                    if (c.isNull(trigIx)) null else c.getString(trigIx)).takeIf { it != ReadingDetail() }
                 output.add(Reading(c.getString(c.getColumnIndexOrThrow("device")),
                     c.getLong(c.getColumnIndexOrThrow("time_ms")),
                     c.getInt(c.getColumnIndexOrThrow("percent")),
                     nullableInt("charging")?.let { it == 1 },
                     c.getString(c.getColumnIndexOrThrow("source")),
                     nullableInt("temp_tenths_c"), nullableInt("voltage_mv"),
-                    nullableInt("remaining_uah")))
+                    nullableInt("remaining_uah"), detail))
             }
         }
         return output.reversed()
@@ -188,8 +255,12 @@ class BatteryStore private constructor(context: Context) :
     fun exportCsv(out: Writer) {
         val iso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         fun utc(ms: Long) = iso.format(Date(ms))
-        out.write("kind,device,mode_or_source,timestamp_utc,percentage,charging,temp_c,voltage_mv,remaining_uah,end_timestamp_utc,end_percentage,drop_pp_per_hour\n")
-        readableDatabase.rawQuery("SELECT device,time_ms,percent,charging,source,temp_tenths_c,voltage_mv,remaining_uah FROM readings ORDER BY time_ms", null).use { c ->
+        out.write("kind,device,mode_or_source,timestamp_utc,percentage,charging,temp_c,voltage_mv,remaining_uah,end_timestamp_utc,end_percentage,drop_pp_per_hour," +
+            DETAIL_COLUMNS.joinToString(",") { it.first } + "\n")
+        // Audit columns go last so tools that read the original columns by position still work.
+        val blanks = List(DETAIL_COLUMNS.size) { "" }
+        readableDatabase.rawQuery("SELECT device,time_ms,percent,charging,source,temp_tenths_c,voltage_mv,remaining_uah," +
+            DETAIL_COLUMNS.joinToString(",") { it.first } + " FROM readings ORDER BY time_ms", null).use { c ->
             while (c.moveToNext()) {
                 val charging = if (c.isNull(3)) "" else if (c.getInt(3) == 1) "true" else "false"
                 val temp = if (c.isNull(5)) "" else (c.getInt(5) / 10.0).toString()
@@ -197,14 +268,21 @@ class BatteryStore private constructor(context: Context) :
                 val charge = if (c.isNull(7)) "" else c.getInt(7).toString()
                 out.write(listOf("reading", csv(c.getString(0)), csv(c.getString(4)),
                     utc(c.getLong(1)), c.getInt(2).toString(), charging, temp, volt, charge,
-                    "", "", "").joinToString(",") + "\n")
+                    "", "", "").plus(DETAIL_COLUMNS.indices.map { i ->
+                        val ix = 8 + i
+                        when {
+                            c.isNull(ix) -> ""
+                            DETAIL_COLUMNS[i].second == "TEXT" -> csv(c.getString(ix))
+                            else -> c.getLong(ix).toString()
+                        }
+                    }).joinToString(",") + "\n")
             }
         }
         for (e in experiments(5000).reversed()) {
             val rate = BatteryMath.experimentDrain(e.startMs, e.endMs, e.startPct, e.endPct)
             out.write(listOf("experiment", csv(e.device), e.mode, utc(e.startMs),
                 e.startPct.toString(), "", "", "", "", e.endMs?.let(::utc) ?: "",
-                e.endPct?.toString() ?: "", rate?.toString() ?: "").joinToString(",") + "\n")
+                e.endPct?.toString() ?: "", rate?.toString() ?: "").plus(blanks).joinToString(",") + "\n")
             Unit
         }
     }
@@ -219,6 +297,12 @@ class BatteryStore private constructor(context: Context) :
         /** Every Ring reading, from the widget or Bluetooth, shares this history id. */
         const val RING_ID = "ring:samsung_widget"
         private const val PROBE_KEEP = 3000L
+        /** Audit columns added in schema v3, in export order. */
+        private val DETAIL_COLUMNS = listOf(
+            "current_now_raw" to "INTEGER", "current_avg_raw" to "INTEGER", "plugged" to "INTEGER",
+            "status" to "INTEGER", "health" to "INTEGER", "level_raw" to "INTEGER", "scale" to "INTEGER",
+            "cycle_count" to "INTEGER", "energy_raw" to "INTEGER", "elapsed_ms" to "INTEGER",
+            "boot_count" to "INTEGER", "read_trigger" to "TEXT")
         @Volatile private var shared: BatteryStore? = null
         fun get(context: Context): BatteryStore =
             shared ?: synchronized(this) { shared ?: BatteryStore(context).also { shared = it } }
@@ -228,7 +312,8 @@ class BatteryStore private constructor(context: Context) :
 }
 
 object PhoneBattery {
-    fun read(context: Context): Reading? {
+    /** The phone's own battery right now. [trigger] says what asked: "job", "app" or "manual". */
+    fun read(context: Context, trigger: String): Reading? {
         val intent: Intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return null
         val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
@@ -238,9 +323,21 @@ object PhoneBattery {
         val charging = state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         val rawCharge = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+        // Int.MIN_VALUE / Long.MIN_VALUE mean "not supported"; a real 0 is kept as 0.
+        fun prop(id: Int) = bm.getIntProperty(id).takeIf { it != Int.MIN_VALUE }
+        fun extra(name: String) = intent.getIntExtra(name, Int.MIN_VALUE).takeIf { it != Int.MIN_VALUE }
+        val detail = ReadingDetail.clock(context, trigger).copy(
+            currentNowRaw = prop(BatteryManager.BATTERY_PROPERTY_CURRENT_NOW),
+            currentAvgRaw = prop(BatteryManager.BATTERY_PROPERTY_CURRENT_AVERAGE),
+            plugged = extra(BatteryManager.EXTRA_PLUGGED),
+            status = state.takeIf { it >= 0 },
+            health = extra(BatteryManager.EXTRA_HEALTH),
+            levelRaw = level, scale = scale,
+            cycleCount = extra("android.os.extra.CYCLE_COUNT")?.takeIf { it >= 0 },
+            energyRaw = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_ENERGY_COUNTER).takeIf { it != Long.MIN_VALUE })
         return Reading("phone", System.currentTimeMillis(), percent, charging, "android",
             intent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1).takeIf { it >= 0 },
             intent.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1).takeIf { it > 0 },
-            rawCharge.takeIf { it > 0 && it != Int.MAX_VALUE })
+            rawCharge.takeIf { it > 0 && it != Int.MAX_VALUE }, detail)
     }
 }

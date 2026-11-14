@@ -46,7 +46,7 @@ class MainActivity : StyledActivity() {
         super.onCreate(savedInstanceState)
         store = BatteryStore.get(this)
         pendingWidgetId = savedInstanceState?.getInt("pendingWidgetId", pendingWidgetId) ?: pendingWidgetId
-        PhoneBattery.read(this)?.let(store::append)
+        PhoneBattery.read(this, "app")?.let(store::append)
         PollScheduler.schedule(this)
 
         setUpPage()
@@ -73,7 +73,7 @@ class MainActivity : StyledActivity() {
     /** Reads Samsung's widget (no radio use) and records labeled Ring/Watch slots. */
     private fun refreshWidget() {
         widgetSnapshot = try {
-            SamsungWidgetSource.snapshot(this)?.also { SamsungWidgetSource.record(this, store, it) }
+            SamsungWidgetSource.snapshot(this)?.also { SamsungWidgetSource.record(this, store, it, "app") }
         } catch (e: Exception) {
             store.logProbe(SamsungWidgetSource.SOURCE, "Widget read failed: ${e.javaClass.simpleName}: ${e.message}")
             null
@@ -221,7 +221,7 @@ class MainActivity : StyledActivity() {
         section("Your data", "Stays on this phone", "No account and no server. Export it any time.").apply {
             button("Export timestamped readings and tests · CSV") { export() }
             button("Record current phone battery now") {
-                PhoneBattery.read(this@MainActivity)?.let(store::append)
+                PhoneBattery.read(this@MainActivity, "manual")?.let(store::append)
                 render()
             }
             addView(label("For Watch8 data, install the included Wear OS companion and open it once. " +
@@ -354,19 +354,32 @@ class MainActivity : StyledActivity() {
     private fun deviceBoard(id: String, name: String, color: Int): View {
         val recent = store.recent(id, 1000)
         val last = recent.lastOrNull()
-        val fresh = last != null && System.currentTimeMillis() - last.timeMs <= maxOf(6 * 3_600_000L, PollScheduler.gapLimits(this).stepMs)
+        val now = System.currentTimeMillis()
+        // The phone's own job can sleep for hours in Doze, so it gets a long allowance. A wearable
+        // that misses three checks in a row, or drops out of Samsung's widget, is treated as offline:
+        // its last number is history, not a live reading.
+        val staleAfter = if (id == "phone") maxOf(6 * 3_600_000L, PollScheduler.gapLimits(this).stepMs)
+            else maxOf(45 * 60_000L, 3L * PollScheduler.intervalMinutes(this) * 60_000L)
+        val dropped = last?.source == SamsungWidgetSource.SOURCE && id in SamsungWidgetSource.missingDevices(this)
+        val fresh = last != null && !dropped && now - last.timeMs <= staleAfter
         val projection = if (fresh) BatteryMath.estimate(recent.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, PollScheduler.gapLimits(this)) else null
         val time = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT)
+        val seenAt = last?.let {
+            android.text.format.DateUtils.formatDateTime(this, it.timeMs, android.text.format.DateUtils.FORMAT_SHOW_TIME or
+                if (android.text.format.DateUtils.isToday(it.timeMs)) 0
+                else android.text.format.DateUtils.FORMAT_SHOW_DATE or android.text.format.DateUtils.FORMAT_ABBREV_MONTH)
+        }
         val (status, statusColor) = when {
             last == null -> "No data yet" to Palette.quiet
-            !fresh -> "Not seen lately" to Palette.amberInk
+            !fresh -> "Offline" to Palette.amberInk
             last.charging == true -> "Charging" to Palette.green
             else -> "On battery" to Palette.tintInk
         }
         return LinearLayout(this).apply {
             gravity = android.view.Gravity.CENTER_VERTICAL
             setPadding(0, dp(6), 0, dp(2))
-            addView(GaugeView(this@MainActivity, last?.percent, color), LinearLayout.LayoutParams(dp(68), dp(68)))
+            // An offline device gets an empty gauge; its last value moves to the line below.
+            addView(GaugeView(this@MainActivity, if (fresh) last?.percent else null, color), LinearLayout.LayoutParams(dp(68), dp(68)))
             addView(LinearLayout(this@MainActivity).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(14), 0, dp(6), 0)
@@ -385,7 +398,7 @@ class MainActivity : StyledActivity() {
                     }, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
                 }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(4) })
                 addView(TextView(this@MainActivity).apply {
-                    text = buildList {
+                    text = if (last != null && !fresh) "Last seen $seenAt at ${last.percent}%" else buildList {
                         if (last != null) add("Updated ${time.format(java.util.Date(last.timeMs))}")
                         if (projection != null) add("about ${f1(projection.percentPerHour)}% an hour")
                     }.joinToString(" · ").ifEmpty { "Waiting for the first reading" }
@@ -435,7 +448,7 @@ class MainActivity : StyledActivity() {
             if (snap == null || snap.slots.isEmpty()) {
                 addView(label("Connected, but no battery values were readable yet. Tap Read now in a few seconds.", 13f, quiet))
             } else {
-                val phone = PhoneBattery.read(this@MainActivity)
+                val phone = PhoneBattery.read(this@MainActivity, "app")
                 addView(label("Widget read ${BatteryStore.format(snap.timeMs)}. Tap a device to label it once.", 13f, quiet))
                 for (slot in snap.slots) addView(slotRow(slot, phone))
                 if (snap.slots.any { SamsungWidgetSource.labelFor(this@MainActivity, it.fingerprint) == null })
@@ -454,7 +467,7 @@ class MainActivity : StyledActivity() {
         val labelName = when (SamsungWidgetSource.labelFor(this, slot.fingerprint)) {
             SamsungWidgetSource.LABEL_RING -> "Galaxy Ring"
             SamsungWidgetSource.LABEL_WATCH -> "Galaxy Watch"
-            SamsungWidgetSource.LABEL_PHONE -> "This phone (not recorded)"
+            SamsungWidgetSource.LABEL_PHONE -> "This phone (kept for comparison)"
             SamsungWidgetSource.LABEL_OTHER -> "Other device (ignored)"
             else -> "Unlabeled — tap to label"
         }
@@ -482,7 +495,7 @@ class MainActivity : StyledActivity() {
         AlertDialog.Builder(this).setTitle("Which device shows ${slot.percent}% in Samsung's widget?")
             .setItems(names) { _, which ->
                 SamsungWidgetSource.setLabel(this, fingerprint, labels[which])
-                widgetSnapshot?.let { SamsungWidgetSource.record(this, store, it) }
+                widgetSnapshot?.let { SamsungWidgetSource.record(this, store, it, "manual") }
                 render()
             }.setNegativeButton("Cancel", null).show()
     }
@@ -577,7 +590,8 @@ class MainActivity : StyledActivity() {
             .setView(edit).setPositiveButton("Save") { _, _ ->
                 val pct = edit.text.toString().toIntOrNull()
                 if (pct == null || pct !in 0..100) { toast("Enter 0–100"); return@setPositiveButton }
-                store.append(Reading(PollScheduler.ringDeviceId(this), System.currentTimeMillis(), pct, null, "manual_widget"))
+                store.append(Reading(PollScheduler.ringDeviceId(this), System.currentTimeMillis(), pct, null, "manual_widget",
+                    detail = ReadingDetail.clock(this, "manual")))
                 render()
             }.setNegativeButton("Cancel", null).show()
     }

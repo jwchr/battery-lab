@@ -52,4 +52,34 @@ class BatteryStatsTest {
         assertEquals(30.0, t.avgOnBatteryC!!, 1e-9)
         assertEquals(19.35, BatteryStats.wattHours(100, 5000.0), 1e-9)
     }
+
+    // Review reproductions, now pinned to the intended behavior.
+    @Test fun inferredChargeIsNotASpeedRecord() {
+        val st = BatteryStats.device(listOf(rd(0.0, 20), rd(0.5, 80)), { (it / H % 24).toInt() })
+        org.junit.Assert.assertEquals(1, st.charges.size)
+        org.junit.Assert.assertEquals(false, st.charges[0].observed)
+        org.junit.Assert.assertNull(st.fastestCharge)
+    }
+
+    @Test fun drainIsSplitAcrossClockHours() {
+        val st = BatteryStats.device(listOf(rd(0.75, 100), rd(1.75, 90)), { (it / H % 24).toInt() })
+        org.junit.Assert.assertEquals(10.0, st.drainByHour[1]!!, 1e-9)
+        org.junit.Assert.assertNull(st.drainByHour[0])          // only 15 min seen in hour 0
+    }
+
+    @Test fun longestUnpluggedFollowsTheIntervalSetting() {
+        val st = BatteryStats.device(listOf(rd(0.0, 100), rd(9.0, 90), rd(13.0, 80)),
+            { (it / H % 24).toInt() }, GapLimits.forInterval(240))
+        org.junit.Assert.assertEquals(13.0, st.longestOnBatteryHours, 1e-9)
+    }
+
+    @Test fun parkedAtFullOnlyCountsWhilePluggedIn() {
+        val st = BatteryStats.device(listOf(rd(0.0, 100), rd(0.5, 100), rd(1.0, 100, true), rd(1.5, 100, true)),
+            { (it / H % 24).toInt() })
+        org.junit.Assert.assertEquals(0.5, st.hoursAt100, 1e-9)
+    }
+
+    private val H = 3_600_000L
+    private fun rd(hours: Double, pct: Int, charging: Boolean? = false) =
+        Reading("phone", (hours * H).toLong(), pct, charging, "android")
 }

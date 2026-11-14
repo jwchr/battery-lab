@@ -34,21 +34,32 @@ object DriveBackup {
         } catch (_: SecurityException) { }
     }
 
-    /** Writes the backup if one is set up and it is due (or [force]). Returns true when written. */
+    /**
+     * Writes the backup if one is set up and it is due (or [force]). Returns true when written.
+     * Call from a background thread. The archive is built and checked in a local file first, so
+     * the copy in the chosen file is only replaced by a complete, readable one.
+     */
+    @Synchronized
     fun maybeBackup(context: Context, store: BatteryStore, force: Boolean = false): Boolean {
         val uri = uri(context) ?: return false
         val last = lastBackupMs(context) ?: 0L
         val now = System.currentTimeMillis()
         if (!force && now - last < INTERVAL_MS) return false
+        val staged = java.io.File(context.cacheDir, "backup-staging.csv.gz")
         return try {
-            // "wt" truncates, so the file always holds exactly the current history.
-            context.contentResolver.openOutputStream(uri, "wt")?.let { GZIPOutputStream(it).bufferedWriter() }?.use(store::exportCsv)
-                ?: error("provider returned no stream")
+            GZIPOutputStream(staged.outputStream()).bufferedWriter().use(store::exportCsv)
+            // Read it back: a truncated or corrupt archive never reaches the backup file.
+            val lines = java.util.zip.GZIPInputStream(staged.inputStream()).bufferedReader().useLines { it.count() }
+            check(lines >= 1) { "empty archive" }
+            val out = context.contentResolver.openOutputStream(uri, "wt") ?: error("provider returned no stream")
+            out.use { o -> staged.inputStream().use { it.copyTo(o) } }
             PollScheduler.prefs(context).edit().putLong(KEY_LAST, now).apply()
             true
         } catch (e: Exception) {
-            store.logProbe("backup", "Drive backup failed: ${e.javaClass.simpleName}")
+            store.logProbe("backup", "Backup failed: ${e.javaClass.simpleName}")
             false
+        } finally {
+            staged.delete()
         }
     }
 }

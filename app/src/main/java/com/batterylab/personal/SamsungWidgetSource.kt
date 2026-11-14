@@ -62,6 +62,7 @@ object SamsungWidgetSource {
     private const val KEY_WIDGET_ID = "samsung_widget_id"
     private const val KEY_LABELS = "samsung_widget_labels"
     private const val KEY_LAST_UNMATCHED = "samsung_widget_last_unmatched"
+    private const val KEY_LAST_MISSING = "samsung_widget_last_missing"
     private const val WIDTH_DP = 267f   // 4x2 size the Samsung launcher reports on the test phone
     private const val HEIGHT_DP = 173f
     private const val MATCH_DISTANCE = 64 // of 512 fingerprint bits
@@ -163,11 +164,14 @@ object SamsungWidgetSource {
         }
         // A labeled device that drops out of the widget (dead, disconnected, icon changed)
         // otherwise leaves only a silent gap in history.
+        // Logged when the set of missing devices changes, not on every poll.
         val known = labels(context).let { json -> json.keys().asSequence().map(json::optString).toSet() }
-        for (label in listOf(LABEL_RING, LABEL_WATCH)) {
-            if (label in known && label !in seen) {
-                store.logProbe(SOURCE, "$label not in widget (${snapshot.slots.size} slots shown)")
-            }
+        val missing = listOf(LABEL_RING, LABEL_WATCH).filter { it in known && it !in seen }
+        val missingKey = missing.joinToString(",")
+        if (prefs.getString(KEY_LAST_MISSING, null) != missingKey) {
+            prefs.edit().putString(KEY_LAST_MISSING, missingKey).apply()
+            store.logProbe(SOURCE, if (missing.isEmpty()) "All labeled devices back in widget"
+                else "${missing.joinToString(" and ")} not in widget (${snapshot.slots.size} slots shown)")
         }
         return saved
     }

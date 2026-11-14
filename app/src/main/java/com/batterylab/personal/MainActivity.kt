@@ -44,7 +44,7 @@ class MainActivity : StyledActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        store = BatteryStore(this)
+        store = BatteryStore.get(this)
         pendingWidgetId = savedInstanceState?.getInt("pendingWidgetId", pendingWidgetId) ?: pendingWidgetId
         PhoneBattery.read(this)?.let(store::append)
         PollScheduler.schedule(this)
@@ -114,7 +114,7 @@ class MainActivity : StyledActivity() {
 
         section("Last 48 hours", "How the last two days went.").apply {
             addView(chipRow(chip("Phone", colors[0]), chip("Watch", colors[1]), chip("Ring", colors[2])))
-            addView(BatteryGraph(this@MainActivity, devices.map { (id, _) -> store.recent(id, 4000) }, colors),
+            addView(BatteryGraph(this@MainActivity, devices.map { (id, _) -> store.since(id, System.currentTimeMillis() - 48 * 3_600_000L) }, colors),
                 LinearLayout.LayoutParams(-1, dp(190)))
             addView(label("Gaps mean Android delayed a check, not that a battery stopped.", 11.5f, Palette.quiet))
         }
@@ -136,9 +136,15 @@ class MainActivity : StyledActivity() {
                 }, PICK_BACKUP)
             } else {
                 button("Back up now") {
-                    toast(if (DriveBackup.maybeBackup(this@MainActivity, store, force = true)) "Saved to your backup file"
-                        else "Backup failed; check that the file still exists")
-                    render()
+                    toast("Backing up\u2026")
+                    Background.io.execute {
+                        val ok = DriveBackup.maybeBackup(this@MainActivity, store, force = true)
+                        Background.onMain {
+                            if (isDestroyed) return@onMain
+                            toast(if (ok) "Saved to your backup file" else "Backup failed; check that the file still exists")
+                            render()
+                        }
+                    }
                 }
                 button("Stop backing up") { DriveBackup.disable(this@MainActivity); render() }
             }
@@ -302,7 +308,7 @@ class MainActivity : StyledActivity() {
                     setTextColor(ink)
                 })
                 addView(TextView(this@MainActivity).apply {
-                    text = "Every charge, every device — kept on this phone."
+                    text = "Every charge, every device."
                     textSize = 12f
                     setTextColor(Palette.body)
                 })
@@ -554,7 +560,7 @@ class MainActivity : StyledActivity() {
                 ready(reading)
                 toast("Ring: ${reading.percent}%")
             } else {
-                store.logProbe("ring:$address", error ?: "Unknown BLE error")
+                store.logProbe(BatteryStore.RING_ID, error ?: "Unknown BLE error")
                 toast("Ring BLE failed: ${error ?: "Unknown"}. Manual entry is available.")
             }
             render()
@@ -650,17 +656,28 @@ class MainActivity : StyledActivity() {
             val uri = data?.data ?: return
             try {
                 DriveBackup.enable(this, uri)
-                toast(if (DriveBackup.maybeBackup(this, store, force = true)) "Backup on: first copy saved" else "Backup on; first save failed")
-            } catch (e: Exception) { toast("Couldn't use that file: ${e.message}") }
+            } catch (e: Exception) { toast("Couldn't use that file: ${e.message}"); return }
+            Background.io.execute {
+                val ok = DriveBackup.maybeBackup(this, store, force = true)
+                Background.onMain {
+                    if (isDestroyed) return@onMain
+                    toast(if (ok) "Backup on: first copy saved" else "Backup on; first save failed")
+                    render()
+                }
+            }
             render()
             return
         }
         if (requestCode == EXPORT_CSV && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
-            try {
-                contentResolver.openOutputStream(uri)?.bufferedWriter()?.use(store::exportCsv)
-                toast("CSV exported")
-            } catch (e: Exception) { toast("CSV export failed: ${e.message}") }
+            Background.io.execute {
+                val error = try {
+                    val out = contentResolver.openOutputStream(uri) ?: error("the app that holds the file didn't open it")
+                    out.bufferedWriter().use(store::exportCsv)
+                    null
+                } catch (e: Exception) { e.message ?: e.javaClass.simpleName }
+                Background.onMain { if (!isDestroyed) toast(if (error == null) "CSV exported" else "CSV export failed: $error") }
+            }
         }
     }
 

@@ -27,13 +27,29 @@ class DrainAnalysisTest {
         assertEquals(0.75, d.apps[0].foregroundHours, 1e-9)
     }
 
-    @Test fun ignoresChargingAndGapsAndCreditsUnknownScreenTime() {
+    @Test fun ignoresChargingAndGapsAndSplitsNothingWithoutABaseline() {
         val points = listOf(p(0.0, 50), p(1.0, 60, true), p(2.0, 60), p(5.0, 50), p(5.5, 45))
         val d = DrainAnalysis.analyze(points, listOf(span(5.0, 5.5)), emptyMap(), h)
         // Only the last step counts (the 3 h step exceeds the 1 h limit); no idle rate yet.
         assertEquals(5.0, d.totalDrop, 1e-9)
         assertNull(d.screenOffRate)
-        assertEquals(DrainAnalysis.UNATTRIBUTED, d.apps.single().app)
+        assertEquals(false, d.baselineKnown)
+        assertEquals(0, d.apps.size)
+    }
+
+    @Test fun unknownIdleIsNotZeroIdle() {
+        // Review case: 100 -> 90 in 30 min, no screen data. Must not claim 100% used by apps.
+        val d = DrainAnalysis.analyze(listOf(p(0.0, 100), p(0.5, 90)), emptyList(), emptyMap(), h)
+        assertEquals(false, d.baselineKnown)
+        assertEquals(0, d.apps.size)
+        assertNull(d.screenOnRate)
+    }
+
+    @Test fun neverReportsScreenOnDrainBelowIdle() {
+        // Review case: 100, 96, 96 with the screen on only for the last half hour gave -4 %/h.
+        val d = DrainAnalysis.analyze(listOf(p(0.0, 100), p(1.0, 96), p(2.0, 96)), listOf(span(1.5, 2.0)), emptyMap(), h)
+        assertEquals(4.0, d.screenOffRate!!, 1e-9)
+        assertNull(d.screenOnRate)
     }
 
     @Test fun gapLimitsGrowWithLongerIntervals() {

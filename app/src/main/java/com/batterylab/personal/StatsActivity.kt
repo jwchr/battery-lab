@@ -26,9 +26,18 @@ class StatsActivity : StyledActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        store = BatteryStore(this)
+        store = BatteryStore.get(this)
         setUpPage()
         render()
+    }
+
+    private var resumedOnce = false
+
+    /** Coming back (for example after granting Usage access) shows current numbers. */
+    override fun onResume() {
+        super.onResume()
+        if (resumedOnce && pageReady) render()
+        resumedOnce = true
     }
 
     override fun onDestroy() {
@@ -69,18 +78,26 @@ class StatsActivity : StyledActivity() {
         renderShowdown(devices, data)
         renderRolling(devices, data)
         BatteryStats.temperature(phone)?.let(::renderTemperature)
-        renderFun(stats[0], phoneCapacity(phone), phone)
+        renderFun(stats[0], phoneCapacity(phone)?.first, phone)
         body.addView(label("All numbers come from readings stored on this phone. Estimates, not lab measurements.",
             11.5f, Palette.body).apply { setPadding(dp(6), dp(4), dp(6), 0) })
     }
 
-    /** Full capacity: the charge counter at the most recent 100% reading, else the median implied value. */
-    private fun phoneCapacity(phone: List<Reading>): Double? =
-        phone.lastOrNull { it.percent == 100 && (it.remainingUah ?: 0) > 0 }?.remainingUah?.div(1000.0)
-            ?: BatteryMath.median(phone.mapNotNull { BatteryMath.impliedCapacityMah(it.percent, it.remainingUah, it.charging) })
+    /**
+     * Estimated full capacity in mAh and when it was observed: Android's charge counter at the
+     * latest 100% reading, else the median implied by partial readings. Only the last 30 days
+     * count, so an old reading can't stand in for today's battery.
+     */
+    private fun phoneCapacity(phone: List<Reading>): Pair<Double, Long>? {
+        val recent = phone.filter { it.timeMs >= System.currentTimeMillis() - 30 * 86_400_000L }
+        recent.lastOrNull { it.percent == 100 && (it.remainingUah ?: 0) > 0 }?.let { return it.remainingUah!! / 1000.0 to it.timeMs }
+        val implied = recent.mapNotNull { r -> BatteryMath.impliedCapacityMah(r.percent, r.remainingUah, r.charging)?.let { it to r.timeMs } }
+        return BatteryMath.median(implied.map { it.first })?.let { it to implied.last().second }
+    }
 
     private fun renderPhoneHealth(phone: List<Reading>) {
-        val capacity = phoneCapacity(phone)
+        val estimate = phoneCapacity(phone)
+        val capacity = estimate?.first
         val spec = PhoneSpecs.forModel(Build.MODEL)
         val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val cycles = if (Build.VERSION.SDK_INT >= 34) sticky?.getIntExtra(BatteryManager.EXTRA_CYCLE_COUNT, -1)?.takeIf { it > 0 } else null
@@ -93,7 +110,7 @@ class StatsActivity : StyledActivity() {
             else -> "Unknown"
         }
         val pct = if (capacity != null && spec != null) capacity / spec.typicalMah * 100 else null
-        section("Phone battery health", pct?.let { "${String.format(Locale.US, "%.1f", it)}% of new." } ?: "Measuring…",
+        section("Phone battery capacity", capacity?.let { "About ${fmt(it)} mAh when full." } ?: "Measuring\u2026",
             tag = health).apply {
             addView(LinearLayout(this@StatsActivity).apply {
                 gravity = Gravity.CENTER_VERTICAL
@@ -101,10 +118,11 @@ class StatsActivity : StyledActivity() {
                 addView(GaugeView(this@StatsActivity, pct?.roundToInt()?.coerceAtMost(100), Palette.green),
                     LinearLayout.LayoutParams(dp(84), dp(84)))
                 addView(label(buildString {
-                    if (capacity != null) append("Holds about ${fmt(capacity)} mAh when full.")
-                    if (spec != null) append("\nNew: ${fmt(spec.typicalMah)} mAh advertised, ${fmt(spec.ratedMah)} mAh rated minimum.")
-                    if (capacity != null && spec != null && capacity > spec.ratedMah)
-                        append("\nStill above the rated minimum.")
+                    if (pct != null) append("Roughly ${String.format(Locale.US, "%.0f", pct)}% of the ${fmt(spec!!.typicalMah)} mAh advertised")
+                    else if (spec != null) append("Advertised: ${fmt(spec.typicalMah)} mAh")
+                    if (spec != null) append(" (${fmt(spec.ratedMah)} mAh rated minimum).")
+                    if (estimate != null) append("\nEstimated from Android's charge counter, ${shortWhen(estimate.second)}. " +
+                        "A rough guide, not a measured health test.")
                 }, 13f, Palette.body).apply { setPadding(dp(14), 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
             })
             val tiles = mutableListOf<Triple<String, String, String?>>()
@@ -117,7 +135,7 @@ class StatsActivity : StyledActivity() {
                 tiles += Triple("${String.format(Locale.US, "%.1f", it / 10.0)}°C", "temperature now", null)
             }
             addTiles(tiles)
-            if (spec == null) addView(label("Health % needs this model's factory capacity, which Battery Lab doesn't know yet.", 11.5f, Palette.quiet))
+            if (spec == null) addView(label("Comparing to new needs this model's factory capacity, which Battery Lab doesn't know yet.", 11.5f, Palette.quiet))
         }
     }
 
@@ -228,16 +246,20 @@ class StatsActivity : StyledActivity() {
         val wh = BatteryStats.wattHours(phone.percentUsed, cap)
         if (wh <= 0.0) return
         val days = readings.firstOrNull()?.let { (System.currentTimeMillis() - it.timeMs) / 86_400_000.0 } ?: 0.0
-        val cents = wh / 1000 * CENTS_PER_KWH
+        val rate = centsPerKwh()
+        val cents = wh / 1000 * rate
         val fullCharge = BatteryStats.wattHours(100, cap)
         section("What it costs", "${money(cents)} of electricity so far.",
-            "At about ${CENTS_PER_KWH.roundToInt()}¢ per kWh, PSE&G's typical all-in home rate in 2026.").apply {
+            if (rateIsSet()) "At ${f1(rate)}\u00a2 per kWh, the rate you set." else
+                "At ${f1(rate)}\u00a2 per kWh, a rough US average. Set your own rate from your bill.").apply {
             addTiles(listOfNotNull(
-                Triple(money(fullCharge / 1000 * CENTS_PER_KWH), "per full charge", "${f1(fullCharge)} Wh"),
+                Triple(money(fullCharge / 1000 * rate), "per full charge", "${f1(fullCharge)} Wh"),
                 if (days >= 1.0) Triple(money(cents / days * 365), "a year at this pace", "for the phone") else null,
                 Triple("${fmt(wh / 1000 / FRIDGE_KWH_PER_DAY * 24 * 60)} min", "of a fridge", "a typical fridge uses about 1.5 kWh a day"),
                 Triple("${fmt(wh / EV_WH_PER_METER)} m", "in an electric car", "at about 300 Wh per mile"),
             ))
+            addView(makeButton(if (rateIsSet()) "Change your rate" else "Set your rate") { askRate() },
+                LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
         }
         section("Where it comes from", "What it takes to make ${f1(wh)} Wh.",
             "If all of it came from one source. Rough US averages, before charger losses.").apply {
@@ -276,16 +298,20 @@ class StatsActivity : StyledActivity() {
         }
         val now = System.currentTimeMillis()
         val from = now - 7 * 86_400_000L
-        val recent = phone.filter { it.timeMs >= from }
-        val (screen, apps) = UsageSource.load(this, from, now)
-        val d = DrainAnalysis.analyze(recent.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, screen, apps, gaps.stepMs)
-        if (d.totalDrop < 5) {
-            section("What's draining it", "Collecting…", "Needs a few hours of the phone off the charger.")
+        val usage = UsageSource.load(this, from, now)
+        val start = usage.coverageStartMs
+        val recent = if (start == null) emptyList() else phone.filter { it.timeMs >= start }
+        val d = DrainAnalysis.analyze(recent.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, usage.screenOn, usage.apps, gaps.stepMs)
+        if (d.totalDrop < 5 || !d.baselineKnown) {
+            section("What's draining it", "Collecting\u2026",
+                if (d.totalDrop < 5) "Needs a few hours of the phone off the charger, within the days Android keeps app history."
+                else "Needs at least an hour with the screen off to measure idle drain before anything can be split by app.")
             return
         }
         val spanDays = (now - (recent.firstOrNull()?.timeMs ?: now)) / 86_400_000.0
-        section("What's draining it", "Where your phone's battery went.",
-            "Last ${f1(spanDays)} days. Estimated from 1% steps, so it sharpens with more days.").apply {
+        section("What's draining it", "Battery lost while each app was on screen.",
+            "Last ${f1(spanDays)} days of Android's app history. A correlation from 1% steps, not a per-app meter: " +
+                "background work and radios count toward whatever was on screen.").apply {
             addTiles(listOfNotNull(
                 Triple("${pctOf(d.totalDrop - d.standbyDrop, d.totalDrop)}%", "used by apps on screen", "${f1(d.screenOnHours)} h of screen time"),
                 Triple("${pctOf(d.standbyDrop, d.totalDrop)}%", "idle drain", "what the phone uses on its own"),
@@ -297,8 +323,12 @@ class StatsActivity : StyledActivity() {
             if (top.isNotEmpty()) addView(label("Top apps", 12.5f, Palette.body).apply { setPadding(0, dp(14), 0, 0) })
             top.forEach { a -> addView(appRow(UsageSource.label(this@StatsActivity, a.app), a.percent / most,
                 "${f1(a.percent / d.totalDrop * 100)}%", "${f1(a.foregroundHours)} h")) }
-            if (top.isNotEmpty()) addView(label("Share of all battery used, on top of idle drain, and time on screen.",
+            if (top.isNotEmpty()) addView(label("Share of all battery lost, beyond idle drain, while the app was on screen; then its screen time.",
                 11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
+            val candidates = d.apps.map { it.app }.filter { it != DrainAnalysis.UNATTRIBUTED }.take(15)
+            if (candidates.isNotEmpty() || (UsageSource.hiddenCount(this@StatsActivity) ?: 0) > 0)
+                addView(makeButton("Hide apps from this list") { askHide(candidates) },
+                    LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
         }
     }
 
@@ -358,7 +388,9 @@ class StatsActivity : StyledActivity() {
     }
 
     private companion object {
-        const val CENTS_PER_KWH = 26.0
+        /** Shown until the user sets their own rate; their rate lives only in the phone's settings. */
+        const val DEFAULT_CENTS_PER_KWH = 18.0
+        const val KEY_CENTS_PER_KWH = "cents_per_kwh"
         const val FRIDGE_KWH_PER_DAY = 1.5
         const val EV_WH_PER_METER = 300.0 / 1609.0
         // Per Wh of electricity, rough US figures (EIA): coal ~1.1 lb/kWh, gas ~7.4 ft3/kWh,
@@ -388,6 +420,49 @@ class StatsActivity : StyledActivity() {
         sec >= 60 -> "${fmt(sec / 60)} min"
         sec >= 1 -> "${fmt(sec)} s"
         else -> "${String.format(Locale.US, "%.2f", sec)} s"
+    }
+
+    private fun rateIsSet() = PollScheduler.prefs(this).contains(KEY_CENTS_PER_KWH)
+    private fun centsPerKwh() = PollScheduler.prefs(this).getFloat(KEY_CENTS_PER_KWH, DEFAULT_CENTS_PER_KWH.toFloat()).toDouble()
+
+    /** Asks for the all-in price per kWh (total bill \u00f7 kWh used); stored on the phone only. */
+    private fun askRate() {
+        val input = android.widget.EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setText(if (rateIsSet()) f1(centsPerKwh()) else "")
+            hint = "for example ${f1(DEFAULT_CENTS_PER_KWH)}"
+        }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Your electricity rate")
+            .setMessage("Cents per kWh, all charges included: your bill's total divided by the kWh used.")
+            .setView(LinearLayout(this).apply { setPadding(dp(20), 0, dp(20), 0); addView(input, LinearLayout.LayoutParams(-1, -2)) })
+            .setPositiveButton("Save") { _, _ ->
+                val v = input.text.toString().toDoubleOrNull()
+                if (v != null && v in 1.0..200.0) {
+                    PollScheduler.prefs(this).edit().putFloat(KEY_CENTS_PER_KWH, v.toFloat()).apply()
+                    render()
+                }
+            }
+            .setNeutralButton("Use default") { _, _ -> PollScheduler.prefs(this).edit().remove(KEY_CENTS_PER_KWH).apply(); render() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /** Pick apps to count as "Other". Already-hidden apps are never listed by name. */
+    private fun askHide(candidates: List<String>) {
+        val labels = candidates.map { UsageSource.label(this, it) }.toTypedArray()
+        val picked = BooleanArray(candidates.size)
+        val hidden = UsageSource.hiddenCount(this) ?: 0
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Count as \u201cOther\u201d")
+            .setMultiChoiceItems(labels, picked) { _, i, on -> picked[i] = on }
+            .setPositiveButton("Hide") { _, _ ->
+                UsageSource.hideApps(this, candidates.filterIndexed { i, _ -> picked[i] })
+                render()
+            }
+            .apply { if (hidden > 0) setNeutralButton("Unhide all ($hidden)") { _, _ -> UsageSource.unhideAll(this@StatsActivity); render() } }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     /** Cents under a dollar ("0.48¢"), dollars above ("$1.73"). */

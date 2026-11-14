@@ -51,8 +51,9 @@ object PollScheduler {
     fun ringEnabled(context: Context) = prefs(context).getBoolean(RING_ENABLED, false)
     fun ringAddress(context: Context) = prefs(context).getString(RING_ADDRESS, null)
 
-    /** Ring history id: the selected Ring's address when chosen, else a widget-only id. */
-    fun ringDeviceId(context: Context) = ringAddress(context)?.let { "ring:$it" } ?: "ring:samsung_widget"
+    /** One Ring history whatever the source; the Bluetooth address is never part of it. */
+    @Suppress("UNUSED_PARAMETER")
+    fun ringDeviceId(context: Context) = BatteryStore.RING_ID
     fun setRingEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(RING_ENABLED, enabled).apply()
         schedule(context)
@@ -61,31 +62,59 @@ object PollScheduler {
 
 private const val KEY_LAST_BUCKET = "last_standby_bucket"
 
+/** One background worker for database, analysis and file work, so the main thread never waits on it. */
+object Background {
+    val io: java.util.concurrent.ExecutorService = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "battery-lab-io").apply { isDaemon = true }
+    }
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
+    fun onMain(block: () -> Unit) { main.post(block) }
+}
+
 class BatteryPollService : JobService() {
     private var reader: RingReader? = null
-    private var stopped = false
+    @Volatile private var stopped = false
+
+    /**
+     * Runs on the main thread, so it only does what must happen there: render Samsung's widget
+     * offscreen. Saving readings and the backup happen on [Background.io]; the job finishes
+     * once that work (and the optional Ring read) is done.
+     */
     override fun onStartJob(params: JobParameters): Boolean {
         stopped = false
-        val store = BatteryStore(this)
-        logStandbyBucketChange(store)
-        PhoneBattery.read(this)?.let(store::append)
-        // Zero-radio source: whatever Samsung's Battery widget currently shows (main thread).
-        SamsungWidgetSource.sample(this, store)
-        // Phone-side only: writes the backup file (at most every 12 h); the Drive app uploads it.
-        DriveBackup.maybeBackup(this, store)
+        val store = BatteryStore.get(this)
+        val snapshot = try { SamsungWidgetSource.snapshot(this) to null } catch (e: Exception) { null to e }
+        Background.io.execute {
+            try {
+                logStandbyBucketChange(store)
+                PhoneBattery.read(this)?.let(store::append)
+                snapshot.first?.let { SamsungWidgetSource.record(this, store, it) }
+                snapshot.second?.let { store.logProbe(SamsungWidgetSource.SOURCE, "Widget read failed: ${it.javaClass.simpleName}: ${it.message}") }
+                // Phone-side only: writes the backup file (at most every 12 h); the Drive app uploads it.
+                if (!stopped) DriveBackup.maybeBackup(this, store)
+            } catch (e: Exception) {
+                store.logProbe("job", "Background work failed: ${e.javaClass.simpleName}")
+            }
+            Background.onMain { readRingOrFinish(params, store) }
+        }
+        return true
+    }
+
+    private fun readRingOrFinish(params: JobParameters, store: BatteryStore) {
+        if (stopped) return
         val address = PollScheduler.ringAddress(this)
         if (!PollScheduler.ringEnabled(this) || address == null) {
-            store.close()
-            return false
+            jobFinished(params, false)
+            return
         }
         reader = RingReader(applicationContext, address) { reading, error ->
-            if (reading != null) store.append(reading)
-            if (error != null) store.logProbe("ring:$address", error)
-            store.close()
             reader = null
-            if (!stopped) jobFinished(params, false)
+            Background.io.execute {
+                if (reading != null) store.append(reading)
+                if (error != null) store.logProbe(BatteryStore.RING_ID, error)
+                Background.onMain { if (!stopped) jobFinished(params, false) }
+            }
         }.also { it.start() }
-        return true
     }
 
     /**

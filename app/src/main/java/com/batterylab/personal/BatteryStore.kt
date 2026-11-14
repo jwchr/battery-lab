@@ -34,7 +34,18 @@ data class Experiment(
     val endPct: Int?
 )
 
-class BatteryStore(context: Context) : SQLiteOpenHelper(context, "battery_lab.db", null, 1) {
+/**
+ * The history database. One shared instance per process (see [get]) so the screens, the poll job
+ * and the watch receiver never hold competing connections; write-ahead logging lets reads and
+ * writes overlap.
+ */
+class BatteryStore private constructor(context: Context) :
+    SQLiteOpenHelper(context.applicationContext, "battery_lab.db", null, 2) {
+    init { setWriteAheadLoggingEnabled(true) }
+
+    /** Shared for the life of the process; callers may still call close(), which does nothing. */
+    override fun close() = Unit
+
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("""CREATE TABLE readings (
             id INTEGER PRIMARY KEY AUTOINCREMENT, device TEXT NOT NULL,
@@ -50,7 +61,16 @@ class BatteryStore(context: Context) : SQLiteOpenHelper(context, "battery_lab.db
             id INTEGER PRIMARY KEY AUTOINCREMENT, time_ms INTEGER NOT NULL,
             device TEXT NOT NULL, message TEXT NOT NULL)""")
     }
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) {
+            // v2: one stable Ring history. Readings taken over Bluetooth used "ring:<address>",
+            // which split the Ring's timeline and put its address in backups.
+            for (table in listOf("readings", "experiments", "probe_events")) {
+                db.execSQL("UPDATE $table SET device=? WHERE device LIKE 'ring:%' AND device<>?",
+                    arrayOf(RING_ID, RING_ID))
+            }
+        }
+    }
 
     fun append(r: Reading) {
         require(r.percent in 0..100)
@@ -149,11 +169,13 @@ class BatteryStore(context: Context) : SQLiteOpenHelper(context, "battery_lab.db
     }
 
     fun logProbe(device: String, message: String) {
-        writableDatabase.insert("probe_events", null, ContentValues().apply {
+        val id = writableDatabase.insert("probe_events", null, ContentValues().apply {
             put("time_ms", System.currentTimeMillis())
             put("device", device)
             put("message", message.take(300))
         })
+        // Diagnostics only: keep the newest few thousand rows (readings are never trimmed).
+        if (id > 0 && id % 100 == 0L) writableDatabase.delete("probe_events", "id<=?", arrayOf((id - PROBE_KEEP).toString()))
     }
 
     fun lastProbeEvent(device: String): String? {
@@ -164,6 +186,8 @@ class BatteryStore(context: Context) : SQLiteOpenHelper(context, "battery_lab.db
     }
 
     fun exportCsv(out: Writer) {
+        val iso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
+        fun utc(ms: Long) = iso.format(Date(ms))
         out.write("kind,device,mode_or_source,timestamp_utc,percentage,charging,temp_c,voltage_mv,remaining_uah,end_timestamp_utc,end_percentage,drop_pp_per_hour\n")
         readableDatabase.rawQuery("SELECT device,time_ms,percent,charging,source,temp_tenths_c,voltage_mv,remaining_uah FROM readings ORDER BY time_ms", null).use { c ->
             while (c.moveToNext()) {
@@ -181,15 +205,24 @@ class BatteryStore(context: Context) : SQLiteOpenHelper(context, "battery_lab.db
             out.write(listOf("experiment", csv(e.device), e.mode, utc(e.startMs),
                 e.startPct.toString(), "", "", "", "", e.endMs?.let(::utc) ?: "",
                 e.endPct?.toString() ?: "", rate?.toString() ?: "").joinToString(",") + "\n")
+            Unit
         }
     }
 
-    private fun csv(value: String) = "\"${value.replace("\"", "\"\"")}\""
-    private fun utc(ms: Long) = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-        timeZone = TimeZone.getTimeZone("UTC")
-    }.format(Date(ms))
+    /** Quoted CSV field; a leading = + - @ or control character is defused for spreadsheets. */
+    private fun csv(value: String): String {
+        val safe = if (value.isNotEmpty() && value[0] in "=+-@\t\r") "'$value" else value
+        return "\"${safe.replace("\"", "\"\"")}\""
+    }
 
     companion object {
+        /** Every Ring reading, from the widget or Bluetooth, shares this history id. */
+        const val RING_ID = "ring:samsung_widget"
+        private const val PROBE_KEEP = 3000L
+        @Volatile private var shared: BatteryStore? = null
+        fun get(context: Context): BatteryStore =
+            shared ?: synchronized(this) { shared ?: BatteryStore(context).also { shared = it } }
+
         fun format(ms: Long): String = SimpleDateFormat("MMM d, h:mm a", Locale.US).format(Date(ms))
     }
 }

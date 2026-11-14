@@ -153,7 +153,7 @@ class RingReader(
         private fun accept(uuid: UUID, value: ByteArray) {
             if (finished.get() || uuid != NOTIFY_UUID) return
             val result = RingBatteryProtocol.parseBatteryReport(value) ?: return
-            complete(Reading("ring:$address", System.currentTimeMillis(), result.first,
+            complete(Reading(BatteryStore.RING_ID, System.currentTimeMillis(), result.first,
                 result.second, "ring_ble"), null)
         }
     }

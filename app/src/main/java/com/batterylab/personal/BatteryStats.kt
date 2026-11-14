@@ -3,12 +3,16 @@ package com.batterylab.personal
 import kotlin.math.max
 import kotlin.math.min
 
-/** One detected charge: plugged in at [fromPct], unplugged (or last seen charging) at [toPct]. */
-data class ChargeSession(val startMs: Long, val endMs: Long, val fromPct: Int, val toPct: Int) {
+/**
+ * One detected charge: plugged in at [fromPct], unplugged (or last seen charging) at [toPct].
+ * [observed] is false when the charge was only inferred from a jump between two unplugged
+ * readings, so its real start, end and speed are unknown.
+ */
+data class ChargeSession(val startMs: Long, val endMs: Long, val fromPct: Int, val toPct: Int, val observed: Boolean = true) {
     val gained: Int get() = toPct - fromPct
     val minutes: Double get() = (endMs - startMs) / 60_000.0
-    /** Percent per minute; null when the charge was inferred from a jump rather than watched. */
-    val ratePerMinute: Double? get() = if (minutes >= 5 && gained > 0) gained / minutes else null
+    /** Percent per minute; null when the charge wasn't watched or was too short to time. */
+    val ratePerMinute: Double? get() = if (observed && minutes >= 5 && gained > 0) gained / minutes else null
 }
 
 /** Everything the Stats screen shows for one device, computed from its stored readings. */
@@ -41,6 +45,7 @@ data class TempStats(val avgC: Double, val minC: Double, val maxC: Double, val m
 
 object BatteryStats {
     private const val HOUR = 3_600_000.0
+    private const val HOUR_MS = 3_600_000L
 
     /** [hourOf] maps a time to its local hour of day (0..23); injected so tests are timezone-free. */
     /** Steps longer than [GapLimits.stepMs] are gaps (phone off, job deferred) and are not counted as time. */
@@ -71,22 +76,28 @@ object BatteryStats {
                 if (dt <= gaps.stepMs) {
                     val h = dt / HOUR
                     if (prev.percent < 20) below20 += h
-                    if (prev.percent == 100) at100 += h
+                    if (prev.percent == 100 && prevCharging) at100 += h
                     if (prevCharging) charging += h else onBattery += h
                     if (!prevCharging && !isCharging && drop >= 0 && h > 0) {
                         used += drop
-                        // Spread the drop over the hour the interval started in.
-                        val hr = hourOf(prev.timeMs)
-                        hourSum[hr] += drop.toDouble(); hourWeight[hr] += h
+                        // Share the drop across the clock hours the interval spans, by time in each.
+                        var t = prev.timeMs
+                        while (t < cur.timeMs) {
+                            val next = minOf(cur.timeMs, (t / HOUR_MS + 1) * HOUR_MS)
+                            val part = (next - t).toDouble() / dt
+                            val hr = hourOf(t)
+                            hourSum[hr] += drop * part; hourWeight[hr] += h * part
+                            t = next
+                        }
                     }
                 }
                 // Charges: watched (charging flag) or inferred (a jump up of more than 2 points).
                 if (isCharging && !prevCharging) { closeCharge(); chargeStart = prev; chargePeak = cur }
                 else if (isCharging) { if (cur.percent >= (chargePeak?.percent ?: -1)) chargePeak = cur }
                 else if (prevCharging) closeCharge()
-                else if (cur.percent > prev.percent + 2) charges += ChargeSession(prev.timeMs, cur.timeMs, prev.percent, cur.percent)
+                else if (cur.percent > prev.percent + 2) charges += ChargeSession(prev.timeMs, cur.timeMs, prev.percent, cur.percent, observed = false)
                 // Longest unbroken time on battery: ends at a charge, a jump up, or a gap.
-                val breaks = isCharging || cur.percent > prev.percent + 2 || dt > 8 * HOUR
+                val breaks = isCharging || cur.percent > prev.percent + 2 || dt > gaps.stretchMs
                 if (breaks) streakStart = null
                 else if (!prevCharging) {
                     if (streakStart == null) streakStart = prev.timeMs

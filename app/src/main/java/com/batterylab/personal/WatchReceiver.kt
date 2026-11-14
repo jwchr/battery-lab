@@ -8,7 +8,7 @@ import com.google.android.gms.wearable.WearableListenerService
 /** Receives a Watch8 battery snapshot from the separately installed Wear OS companion. */
 class WatchReceiver : WearableListenerService() {
     override fun onDataChanged(events: DataEventBuffer) {
-        val store = BatteryStore(this)
+        val store = BatteryStore.get(this)
         try {
             for (event in events) {
                 if (event.type != DataEvent.TYPE_CHANGED ||

@@ -28,7 +28,13 @@ data class DrainBreakdown(
     val standbyDrop: Double,
     /** Drop on top of idle while the screen was on, split across apps by time on screen. */
     val apps: List<AppDrain>,
-)
+) {
+    /** False until there's at least an hour of screen-off history to measure idle drain from. */
+    val baselineKnown: Boolean get() = screenOffRate != null
+}
+
+/** Android's screen and app history for a window, and where that history actually begins. */
+data class UsageWindow(val screenOn: List<Span>, val apps: Map<String, List<Span>>, val coverageStartMs: Long?)
 
 /**
  * Splits observed phone drain into "idle" and per-app shares. Each reading step on battery is
@@ -57,7 +63,9 @@ object DrainAnalysis {
         val dark = steps.filter { it.onMs * 20 <= it.to - it.from }
         val darkHours = dark.sumOf { it.to - it.from } / HOUR
         val offRate = if (darkHours >= 1.0) dark.sumOf { it.drop } / darkHours else null
-        val idle = offRate ?: 0.0
+        // Unknown idle drain is not zero idle drain: without a baseline, nothing is split.
+        if (offRate == null) return DrainBreakdown(onMs / HOUR, offMs / HOUR, null, null, totalDrop, 0.0, emptyList())
+        val idle = offRate
 
         var standby = 0.0
         val share = HashMap<String, Double>()
@@ -74,8 +82,9 @@ object DrainAnalysis {
             if (total == 0L) share[UNATTRIBUTED] = (share[UNATTRIBUTED] ?: 0.0) + extra
             else inStep.forEach { (app, ms) -> share[app] = (share[app] ?: 0.0) + extra * ms / total }
         }
-        val onRate = if (onMs >= HOUR / 2 && offRate != null) {
-            (totalDrop - offRate * offMs / HOUR) / (onMs / HOUR)
+        // Screen-on drain can't really be below idle drain; if the fit says so, the data is too thin.
+        val onRate = if (onMs >= HOUR / 2) {
+            ((totalDrop - offRate * offMs / HOUR) / (onMs / HOUR)).takeIf { it >= offRate }
         } else null
         val list = (share.keys + fgMs.keys).distinct().map { app ->
             AppDrain(app, (fgMs[app] ?: 0L) / HOUR, share[app] ?: 0.0)
@@ -88,13 +97,20 @@ object DrainAnalysis {
 object UsageSource {
     fun granted(context: Context): Boolean {
         val ops = context.getSystemService(AppOpsManager::class.java) ?: return false
-        return ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName) ==
-            AppOpsManager.MODE_ALLOWED
+        val mode = if (android.os.Build.VERSION.SDK_INT >= 29)
+            ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName)
+        else @Suppress("DEPRECATION") ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName)
+        return mode == AppOpsManager.MODE_ALLOWED
     }
 
-    /** Screen-on spans and per-package on-screen spans between [fromMs] and [toMs]. */
-    fun load(context: Context, fromMs: Long, toMs: Long): Pair<List<Span>, Map<String, List<Span>>> {
-        val usm = context.getSystemService(UsageStatsManager::class.java) ?: return emptyList<Span>() to emptyMap()
+    /**
+     * Screen-on spans and per-package on-screen spans between [fromMs] and [toMs]. Android keeps
+     * only a few days of events, so coverage starts at the first screen event it still has;
+     * before that the screen state is unknown, not "off".
+     */
+    fun load(context: Context, fromMs: Long, toMs: Long): UsageWindow {
+        val usm = context.getSystemService(UsageStatsManager::class.java) ?: return UsageWindow(emptyList(), emptyMap(), null)
+        var coverage: Long? = null
         val events = usm.queryEvents(fromMs, toMs)
         val e = UsageEvents.Event()
         val screen = mutableListOf<Span>()
@@ -112,15 +128,18 @@ object UsageSource {
             events.getNextEvent(e)
             val t = e.timeStamp
             when (e.eventType) {
-                UsageEvents.Event.SCREEN_INTERACTIVE -> { screenKnown = true; if (screenSince == null) screenSince = t }
+                UsageEvents.Event.SCREEN_INTERACTIVE -> {
+                    if (coverage == null) coverage = t
+                    screenKnown = true; if (screenSince == null) screenSince = t
+                }
                 UsageEvents.Event.SCREEN_NON_INTERACTIVE -> {
-                    val since = screenSince ?: if (!screenKnown) fromMs else null
-                    if (since != null && t > since) screen += Span(since, t)
+                    if (coverage == null) coverage = t
+                    if (screenKnown) screenSince?.let { if (t > it) screen += Span(it, t) }
                     screenSince = null; screenKnown = true
                     closeApp(t)
                 }
                 UsageEvents.Event.ACTIVITY_RESUMED -> {
-                    if (e.packageName != app) { closeApp(t); app = e.packageName; appSince = t }
+                    if (screenKnown && e.packageName != app) { closeApp(t); app = e.packageName; appSince = t }
                 }
                 UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED ->
                     if (e.packageName == app) closeApp(t)
@@ -129,12 +148,14 @@ object UsageSource {
         screenSince?.let { if (toMs > it) screen += Span(it, toMs) }
         closeApp(toMs)
         // Private apps are folded into "Other" here, before anything else sees their names.
+        // If a hidden list exists but can't be read, hide every app rather than risk showing one.
         val hidden = privateApps(context)
         val folded = HashMap<String, MutableList<Span>>()
         apps.forEach { (pkg, spans) ->
-            folded.getOrPut(if (pkg in hidden) DrainAnalysis.UNATTRIBUTED else pkg) { mutableListOf() } += spans
+            val hide = hidden == null || pkg in hidden
+            folded.getOrPut(if (hide) DrainAnalysis.UNATTRIBUTED else pkg) { mutableListOf() } += spans
         }
-        return screen to folded
+        return UsageWindow(screen, folded, coverage)
     }
 
     /**
@@ -142,9 +163,23 @@ object UsageSource {
      * file in the app's private storage on the phone (one package per line), never in the code,
      * the history database or any backup.
      */
-    private fun privateApps(context: Context): Set<String> = try {
-        java.io.File(context.filesDir, PRIVATE_APPS_FILE).readLines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-    } catch (_: Exception) { emptySet() }
+    private fun privateApps(context: Context): Set<String>? {
+        val file = java.io.File(context.filesDir, PRIVATE_APPS_FILE)
+        if (!file.exists()) return emptySet()
+        return try {
+            file.readLines().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        } catch (_: Exception) { null }
+    }
+
+    /** How many apps are hidden (never which), or null if the list can't be read. */
+    fun hiddenCount(context: Context): Int? = privateApps(context)?.size
+
+    fun hideApps(context: Context, packages: Collection<String>) {
+        val current = privateApps(context) ?: return
+        java.io.File(context.filesDir, PRIVATE_APPS_FILE).writeText((current + packages).joinToString("\n") + "\n")
+    }
+
+    fun unhideAll(context: Context) { java.io.File(context.filesDir, PRIVATE_APPS_FILE).delete() }
 
     const val PRIVATE_APPS_FILE = "private_apps.txt"
 

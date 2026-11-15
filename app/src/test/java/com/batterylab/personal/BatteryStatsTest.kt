@@ -82,4 +82,26 @@ class BatteryStatsTest {
     private val H = 3_600_000L
     private fun rd(hours: Double, pct: Int, charging: Boolean? = false) =
         Reading("phone", (hours * H).toLong(), pct, charging, "android")
+
+    // A wearable full in its case loses the widget's bolt at 100%; that time is not drain time.
+    private fun w(hours: Double, pct: Int, charging: Boolean? = false) =
+        Reading("ring", (hours * H).toLong(), pct, charging, SamsungWidgetSource.SOURCE)
+
+    @Test fun fullHoldAfterChargeCountsAsCharging() {
+        val r = BatteryStats.fullHoldAsCharging(listOf(w(0.0, 89, true), w(1.0, 100), w(5.0, 100), w(14.0, 100), w(15.0, 99)))
+        org.junit.Assert.assertEquals(listOf(true, true, true, false, false), r.map { it.charging })
+    }
+
+    @Test fun fullHoldLeavesPhoneReadingsAlone() {
+        val r = BatteryStats.fullHoldAsCharging(listOf(rd(0.0, 90, true), rd(1.0, 100), rd(2.0, 100), rd(3.0, 99)))
+        org.junit.Assert.assertEquals(listOf(true, false, false, false), r.map { it.charging })
+    }
+
+    @Test fun drainClockStartsWhenTheWearableLeftTheCharger() {
+        val raw = listOf(w(0.0, 89, true)) + (1..14).map { w(it.toDouble(), 100) } +
+            listOf(w(15.0, 99), w(16.0, 98), w(17.0, 97), w(18.0, 96))
+        val points = BatteryStats.fullHoldAsCharging(raw).map { BatteryPoint(it.timeMs, it.percent, it.charging) }
+        val e = BatteryMath.estimate(points)!!
+        org.junit.Assert.assertEquals(1.0, e.percentPerHour, 1e-9)   // 4% over 4 h, not over 17 h
+    }
 }

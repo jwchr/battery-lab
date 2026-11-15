@@ -18,6 +18,7 @@ object PollScheduler {
     const val RING_ENABLED = "ring_monitoring_enabled"
 
     fun schedule(context: Context) {
+        PowerConnectionReceiver.ensureRegistered(context)
         val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
         // Re-scheduling an existing job replaces it, and Android then runs it right away.
         // That made every app open trigger an extra sample (and, with Ring monitoring on,
@@ -61,6 +62,7 @@ object PollScheduler {
 }
 
 private const val KEY_LAST_BUCKET = "last_standby_bucket"
+private const val KEY_LAST_CAPABILITY = "last_capability_probe"
 
 /** One background worker for database, analysis and file work, so the main thread never waits on it. */
 object Background {
@@ -69,6 +71,7 @@ object Background {
     }
     private val main = android.os.Handler(android.os.Looper.getMainLooper())
     fun onMain(block: () -> Unit) { main.post(block) }
+    fun onMainDelayed(delayMs: Long, block: () -> Unit) { main.postDelayed(block, delayMs) }
 }
 
 class BatteryPollService : JobService() {
@@ -82,7 +85,10 @@ class BatteryPollService : JobService() {
      */
     override fun onStartJob(params: JobParameters): Boolean {
         stopped = false
+        PowerConnectionReceiver.ensureRegistered(this)
         val store = BatteryStore.get(this)
+        val startedMs = android.os.SystemClock.elapsedRealtime()
+        val startedCpu = android.os.Process.getElapsedCpuTime()
         val snapshot = try { SamsungWidgetSource.snapshot(this, includeIcons = false) to null } catch (e: Exception) { null to e }
         Background.io.execute {
             try {
@@ -90,11 +96,19 @@ class BatteryPollService : JobService() {
                 PhoneBattery.read(this, "job")?.let(store::append)
                 snapshot.first?.let { SamsungWidgetSource.record(this, store, it) }
                 snapshot.second?.let { store.logProbe(SamsungWidgetSource.SOURCE, "Widget read failed: ${it.javaClass.simpleName}: ${it.message}") }
+                // Database-only analysis: update journal, score/issue forecasts, refresh capabilities daily.
+                ContextWatcher.check(this, store)
+                ForecastKeeper.tick(this, store, listOf("phone", SamsungWidgetSource.WATCH_DEVICE, BatteryStore.RING_ID))
+                refreshCapabilitiesIfDue(store)
                 // Phone-side only: writes the backup file (at most every 12 h); the Drive app uploads it.
                 if (!stopped) DriveBackup.maybeBackup(this, store)
             } catch (e: Exception) {
                 store.logProbe("job", "Background work failed: ${e.javaClass.simpleName}")
             }
+            try {
+                Overhead.logPoll(this, store, android.os.SystemClock.elapsedRealtime() - startedMs,
+                    android.os.Process.getElapsedCpuTime() - startedCpu)
+            } catch (_: Exception) { }
             Background.onMain { readRingOrFinish(params, store) }
         }
         return true
@@ -107,14 +121,24 @@ class BatteryPollService : JobService() {
             jobFinished(params, false)
             return
         }
+        val bleStart = android.os.SystemClock.elapsedRealtime()
         reader = RingReader(applicationContext, address) { reading, error ->
             reader = null
             Background.io.execute {
+                Overhead.logBle(store, android.os.SystemClock.elapsedRealtime() - bleStart, reading != null)
                 if (reading != null) store.append(reading)
                 if (error != null) store.logProbe(BatteryStore.RING_ID, error)
                 Background.onMain { if (!stopped) jobFinished(params, false) }
             }
         }.also { it.start() }
+    }
+
+    private fun refreshCapabilitiesIfDue(store: BatteryStore) {
+        val prefs = PollScheduler.prefs(this)
+        val now = System.currentTimeMillis()
+        if (now - prefs.getLong(KEY_LAST_CAPABILITY, 0L) < 24 * 3_600_000L) return
+        CapabilityProbe.refresh(this, store)
+        prefs.edit().putLong(KEY_LAST_CAPABILITY, now).apply()
     }
 
     /**

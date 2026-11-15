@@ -1,0 +1,419 @@
+package com.batterylab.personal
+
+import kotlin.math.abs
+import kotlin.math.sqrt
+
+// ================================================================================================
+// F3 — charge bands
+// ================================================================================================
+
+/** How one observed charge moved through a standard band (for example 20→50%). */
+data class BandTiming(val fromPct: Int, val toPct: Int, val minutes: Double, val watts: Double?) {
+    val pctPerMinute: Double get() = (toPct - fromPct) / minutes
+}
+
+/** One charge that was actually seen charging, with its band timings and conditions. */
+data class ObservedCharge(
+    val startMs: Long, val endMs: Long, val fromPct: Int, val toPct: Int,
+    val bands: List<BandTiming>,
+    /** Most common BatteryManager.EXTRA_PLUGGED value during the charge, if recorded. */
+    val pluggedType: Int?,
+    val tempRiseC: Double?,
+    val peakTempC: Double?
+)
+
+object ChargeCurves {
+    val BANDS = listOf(20 to 50, 50 to 80, 80 to 100)
+
+    /** Charges built only from readings flagged charging; inferred jumps never count. */
+    fun observedCharges(readings: List<Reading>, gaps: GapLimits = GapLimits()): List<ObservedCharge> {
+        val r = readings.sortedBy { it.timeMs }
+        val out = mutableListOf<ObservedCharge>()
+        var run = mutableListOf<Reading>()
+        fun close() {
+            if (run.size >= 2 && run.last().percent > run.first().percent) out += build(run)
+            run = mutableListOf()
+        }
+        for (x in r) {
+            if (x.charging != true) { close(); continue }
+            if (run.isNotEmpty() && x.timeMs - run.last().timeMs > gaps.stepMs) close()
+            run += x
+        }
+        close()
+        return out
+    }
+
+    private fun build(run: List<Reading>): ObservedCharge {
+        fun firstAtOrAbove(p: Int) = run.firstOrNull { it.percent >= p }
+        val bands = BANDS.mapNotNull { (lo, hi) ->
+            // The band must start at or below its low edge to be timed fairly.
+            if (run.first().percent > lo) return@mapNotNull null
+            val a = firstAtOrAbove(lo) ?: return@mapNotNull null
+            val b = firstAtOrAbove(hi) ?: return@mapNotNull null
+            val minutes = (b.timeMs - a.timeMs) / 60_000.0
+            if (minutes <= 0) return@mapNotNull null
+            val ra = a.remainingUah; val rb = b.remainingUah
+            val mv = run.filter { it.timeMs in a.timeMs..b.timeMs }.mapNotNull { it.voltageMv }.takeIf { it.isNotEmpty() }?.average()
+            val watts = if (ra != null && rb != null && rb > ra && mv != null)
+                (rb - ra) / 1000.0 * mv / 1000.0 / (minutes / 60.0) / 1000.0 else null
+            BandTiming(lo, hi, minutes, watts)
+        }
+        val plugged = run.mapNotNull { it.detail?.plugged }.filter { it > 0 }.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
+        val temps = run.mapNotNull { it.tempTenthsC?.div(10.0) }
+        return ObservedCharge(run.first().timeMs, run.last().timeMs, run.first().percent, run.last().percent, bands, plugged,
+            if (temps.size >= 2) temps.max() - temps.first() else null, temps.maxOrNull())
+    }
+
+    /** Median minutes per band across charges, optionally for one plug type. */
+    fun bandMedians(charges: List<ObservedCharge>, plugged: Int? = null): Map<Pair<Int, Int>, Double> =
+        BANDS.mapNotNull { band ->
+            BatteryMath.median(charges.filter { plugged == null || it.pluggedType == plugged }
+                .flatMap { it.bands }.filter { it.fromPct == band.first && it.toPct == band.second }.map { it.minutes })
+                ?.let { band to it }
+        }.toMap()
+
+    /** Percent gained in [minutes] starting from 20%, from the median 20→50% speed. */
+    fun topUpPercent(charges: List<ObservedCharge>, minutes: Double = 15.0, plugged: Int? = null): Double? =
+        bandMedians(charges, plugged)[20 to 50]?.let { 30.0 / it * minutes }?.coerceAtMost(80.0)
+
+    fun plugName(type: Int?) = when (type) {
+        1 -> "Wired (AC)"; 2 -> "USB"; 4 -> "Wireless"; 8 -> "Dock"; else -> "Unknown"
+    }
+}
+
+// ================================================================================================
+// F4 — idle / overnight stretches and anomalies
+// ================================================================================================
+
+data class IdleStretch(
+    val startMs: Long, val endMs: Long, val fromPct: Int, val toPct: Int,
+    val screenOnFraction: Double?,
+    val cellularShare: Double?, val aodShare: Double?, val dozeShare: Double?, val avgTempC: Double?
+) {
+    val hours: Double get() = (endMs - startMs) / 3_600_000.0
+    val rate: Double get() = (fromPct - toPct) / hours
+}
+
+data class IdleReport(
+    val stretches: List<IdleStretch>,
+    val medianRate: Double?,
+    val mad: Double?,
+    val unusual: List<IdleStretch>
+)
+
+object IdleAnalysis {
+    /**
+     * Uninterrupted screen-off discharges of at least [minHours]. Screen state comes from
+     * [screenOn] spans when given, otherwise from recorded display state. A stretch's end is pulled
+     * back to the last reading that showed a change, so a cached widget value repeating with no
+     * fresh data can't make a stretch look flat.
+     */
+    fun stretches(readings: List<Reading>, screenOn: List<Span>? = null, minHours: Double = 4.0,
+                  gaps: GapLimits = GapLimits()): List<IdleStretch> {
+        val idx = screenOn?.let { SpanIndex(it) }
+        return HonestyAuditor.dischargeRuns(readings.sortedBy { it.timeMs }, gaps).mapNotNull { run0 ->
+            var end = run0.size - 1
+            while (end > 0 && QualityFlags.has(run0[end].detail?.qualityFlags, QualityFlags.UNCHANGED_REPEAT) &&
+                run0[end].percent == run0[end - 1].percent) end--
+            val run = run0.subList(0, end + 1)
+            if (run.size < 2) return@mapNotNull null
+            val a = run.first(); val b = run.last()
+            val hours = (b.timeMs - a.timeMs) / 3_600_000.0
+            if (hours < minHours) return@mapNotNull null
+            val onFraction = when {
+                idx != null -> idx.overlap(a.timeMs, b.timeMs).toDouble() / (b.timeMs - a.timeMs)
+                else -> run.mapNotNull { it.detail?.displayState }.takeIf { it.size >= run.size / 2 }
+                    ?.let { s -> s.count { it == 2 }.toDouble() / s.size }
+            }
+            if (onFraction == null || onFraction > 0.05) return@mapNotNull null
+            fun share(pred: (ReadingDetail) -> Boolean?): Double? =
+                run.mapNotNull { r -> r.detail?.let(pred) }.takeIf { it.isNotEmpty() }?.let { v -> v.count { it }.toDouble() / v.size }
+            IdleStretch(a.timeMs, b.timeMs, a.percent, b.percent, onFraction,
+                share { d -> d.transport?.let { it.startsWith("cellular") } },
+                share { d -> d.displayState?.let { it == 3 || it == 4 } },
+                share { d -> d.deviceIdle },
+                run.mapNotNull { it.tempTenthsC?.div(10.0) }.takeIf { it.isNotEmpty() }?.average())
+        }
+    }
+
+    /** Flags stretches draining faster than median + 3 MAD (and at least 0.5 %/h above it). */
+    fun report(stretches: List<IdleStretch>): IdleReport {
+        if (stretches.size < 5) return IdleReport(stretches, BatteryMath.median(stretches.map { it.rate }), null, emptyList())
+        val rates = stretches.map { it.rate }
+        val m = BatteryMath.median(rates)!!
+        val mad = BatteryMath.median(rates.map { abs(it - m) })!!
+        val unusual = stretches.filter { it.rate > m + 3 * mad && it.rate >= m + 0.5 }
+        return IdleReport(stretches, m, mad, unusual)
+    }
+}
+
+// ================================================================================================
+// F7 — heat × charge exposure
+// ================================================================================================
+
+object HeatExposure {
+    val TEMP_BANDS = listOf("<30°C", "30–38°C", ">38°C")
+    val CHARGE_BANDS = listOf("<20%", "20–80%", "80–100%")
+
+    /** Hours observed in each [temperature band][charge band] cell, time-weighted by step. */
+    fun matrix(readings: List<Reading>, gaps: GapLimits = GapLimits()): Array<DoubleArray> {
+        val m = Array(3) { DoubleArray(3) }
+        for ((a, b) in HonestyAuditor.steps(readings, gaps)) {
+            val t = a.tempTenthsC ?: continue
+            val ti = when { t < 300 -> 0; t <= 380 -> 1; else -> 2 }
+            val ci = when { a.percent < 20 -> 0; a.percent <= 80 -> 1; else -> 2 }
+            m[ti][ci] += (b.timeMs - a.timeMs) / 3_600_000.0
+        }
+        return m
+    }
+}
+
+// ================================================================================================
+// F5 — readiness planner
+// ================================================================================================
+
+data class DeviceReadiness(
+    val name: String,
+    val percent: Int,
+    /** Hours until [reservePct] at the typical (median) rate, and at the 25th/75th percentile rates. */
+    val hoursToReserve: Double?,
+    val hoursToReserveFast: Double?,
+    val hoursToReserveSlow: Double?,
+    val meetsTarget: Boolean?,
+    /** Minutes on the charger needed to last the window, from learned charge speed. */
+    val topUpMinutes: Double?
+)
+
+object ReadinessPlanner {
+    /**
+     * Per-device survival over [targetHours] keeping [reservePct]. Devices are never averaged
+     * together; [drainRates] are each device's historical stretch rates (%/h) and [chargeRate]
+     * its median charge speed (%/min).
+     */
+    fun assess(name: String, percent: Int, drainRates: List<Double>, chargeRate: Double?,
+               targetHours: Double, reservePct: Int): DeviceReadiness {
+        val sorted = drainRates.filter { it > 0 }.sorted()
+        if (sorted.isEmpty()) return DeviceReadiness(name, percent, null, null, null, null, null)
+        val typical = HonestyAuditor.quantile(sorted, 0.5)
+        val fast = HonestyAuditor.quantile(sorted, 0.75)
+        val slow = HonestyAuditor.quantile(sorted, 0.25)
+        val usable = (percent - reservePct).coerceAtLeast(0)
+        fun h(rate: Double) = usable / rate
+        val needed = (typical * targetHours + reservePct - percent).coerceAtLeast(0.0)
+        val minutes = if (needed <= 0) 0.0 else chargeRate?.takeIf { it > 0 }?.let { minOf(needed, 100.0 - percent) / it }
+        return DeviceReadiness(name, percent, h(typical), h(fast), h(slow), h(typical) >= targetHours, minutes)
+    }
+
+    /** Charging order with one charger: the device that falls short soonest goes first. */
+    fun order(devices: List<DeviceReadiness>): List<DeviceReadiness> =
+        devices.filter { it.meetsTarget == false }.sortedBy { it.hoursToReserve ?: Double.MAX_VALUE }
+}
+
+// ================================================================================================
+// F2 — forecast scoring
+// ================================================================================================
+
+data class ForecastScore(val actual2h: Double?, val actual4h: Double?, val actual8h: Double?, val status: String)
+
+data class HorizonStats(val hours: Int, val n: Int, val labMae: Double?, val labBias: Double?,
+                        val androidN: Int, val androidMae: Double?, val androidBias: Double?)
+
+object ForecastScoring {
+    const val MODEL_VERSION = "estimate-1"
+    val HORIZONS = listOf(2, 4, 8)
+
+    /**
+     * The percentage actually seen at issue + 2, 4 and 8 hours, interpolated between the two
+     * readings around each horizon (each within 30 min of it). Only readings after the forecast
+     * are used, so nothing it couldn't have known leaks in. A charge (or a rise over 2 points)
+     * before a horizon censors that horizon and the later ones; a horizon with no nearby readings
+     * is censored as a gap. Stays PENDING until 8 h have passed (or everything is censored).
+     */
+    fun score(f: Forecast, readingsAfter: List<Reading>, nowMs: Long): ForecastScore {
+        val r = readingsAfter.filter { it.timeMs >= f.issuedMs }.sortedBy { it.timeMs }
+        val actual = arrayOfNulls<Double>(3)
+        var charged = false; var gap = false
+        for ((i, h) in HORIZONS.withIndex()) {
+            val target = f.issuedMs + h * 3_600_000L
+            if (nowMs < target + 30 * 60_000L) return ForecastScore(actual[0], actual[1], actual[2], "PENDING")
+            val before = r.filter { it.timeMs <= target }
+            if (before.any { it.charging == true } || rose(before, f.startPct)) { charged = true; break }
+            val prev = before.lastOrNull { target - it.timeMs <= 30 * 60_000L }
+            val next = r.firstOrNull { it.timeMs >= target && it.timeMs - target <= 30 * 60_000L && it.charging != true }
+            actual[i] = when {
+                prev != null && next != null && next.timeMs > prev.timeMs ->
+                    prev.percent + (next.percent - prev.percent) * (target - prev.timeMs).toDouble() / (next.timeMs - prev.timeMs)
+                prev != null && prev.timeMs == target -> prev.percent.toDouble()
+                next != null && next.timeMs == target -> next.percent.toDouble()
+                else -> { gap = true; null }
+            }
+        }
+        val any = actual.any { it != null }
+        val status = when {
+            any -> "SCORED"
+            charged -> "CENSORED_CHARGED"
+            gap -> "CENSORED_GAP"
+            else -> "CENSORED_GAP"
+        }
+        return ForecastScore(actual[0], actual[1], actual[2], status)
+    }
+
+    /** True if the percentage ever climbs more than 2 points above its lowest value so far. */
+    private fun rose(r: List<Reading>, startPct: Int): Boolean {
+        var low = startPct
+        for (x in r) { if (x.percent > low + 2) return true; low = minOf(low, x.percent) }
+        return false
+    }
+
+    /** Mean absolute error and signed bias (predicted − actual; positive = optimistic) per horizon. */
+    fun reportCard(forecasts: List<Forecast>): List<HorizonStats> = HORIZONS.mapIndexed { i, h ->
+        fun actualOf(f: Forecast) = when (i) { 0 -> f.actual2h; 1 -> f.actual4h; else -> f.actual8h }
+        val scored = forecasts.filter { actualOf(it) != null }
+        val labErr = scored.map { it.labPredicted(h.toDouble()).coerceAtLeast(0.0) - actualOf(it)!! }
+        val andErr = scored.mapNotNull { f -> f.androidPredicted(h.toDouble())?.coerceAtLeast(0.0)?.let { it - actualOf(f)!! } }
+        HorizonStats(h, labErr.size,
+            labErr.takeIf { it.isNotEmpty() }?.map { abs(it) }?.average(), labErr.takeIf { it.isNotEmpty() }?.average(),
+            andErr.size, andErr.takeIf { it.isNotEmpty() }?.map { abs(it) }?.average(), andErr.takeIf { it.isNotEmpty() }?.average())
+    }
+}
+
+// ================================================================================================
+// F6 — experiment statistics
+// ================================================================================================
+
+data class ExperimentResult(
+    val experiment: Experiment,
+    /** Drain rate (%/h) from the start and end readings alone. */
+    val endpointRate: Double?,
+    /** Drain rate from a least-squares fit over genuine percentage changes, when there are enough. */
+    val regressionRate: Double?,
+    val transitions: Int,
+    /** Why the run can't be trusted, or null. */
+    val quarantine: String?
+) {
+    val rate: Double? get() = if (quarantine != null) null else regressionRate ?: endpointRate
+}
+
+data class Interval(val estimate: Double, val low: Double, val high: Double, val n: Int)
+
+data class ExperimentComparison(
+    val armA: String, val armB: String,
+    val meanA: Double?, val meanB: Double?, val nA: Int, val nB: Int,
+    /** B − A drain-rate difference over runs done in chronological pairs. */
+    val paired: Interval?,
+    /** B − A difference treating runs as independent (Welch). */
+    val welch: Interval?
+) {
+    /** Implied runtime change of B relative to A (+30% means B lasts 30% longer). */
+    val runtimeChange: Double? get() = if (meanA != null && meanB != null && meanB > 0) meanA / meanB - 1 else null
+}
+
+object ExperimentStats {
+    fun result(e: Experiment, readings: List<Reading>): ExperimentResult {
+        val end = e.endMs
+        val endpoint = BatteryMath.experimentDrain(e.startMs, e.endMs, e.startPct, e.endPct)
+        if (end == null) return ExperimentResult(e, null, null, 0, "Still running")
+        val inRun = readings.filter { it.timeMs in e.startMs..end }.sortedBy { it.timeMs }
+        if (inRun.any { it.charging == true }) return ExperimentResult(e, endpoint, null, 0, "Charged during the run")
+        if (inRun.zipWithNext().any { (a, b) -> b.percent > a.percent + 2 }) return ExperimentResult(e, endpoint, null, 0, "Percentage rose mid-run")
+        // Only real changes count: a cached value repeating every check is one observation, not many.
+        val changes = inRun.filterIndexed { i, r -> i == 0 || r.percent != inRun[i - 1].percent }
+        val pts = (listOf(BatteryPoint(e.startMs, e.startPct, false)) + changes.map { BatteryPoint.of(it) } +
+            listOf(BatteryPoint(end, e.endPct ?: inRun.lastOrNull()?.percent ?: e.startPct, false))).distinctBy { it.timeMs }
+        val fit = if (pts.map { it.percent }.distinct().size >= 4)
+            HonestyAuditor.ols(pts.map { (it.timeMs - e.startMs) / 3_600_000.0 }, pts.map { it.percent.toDouble() }) else null
+        return ExperimentResult(e, endpoint, fit?.first?.let { -it }?.takeIf { it >= 0 }, changes.size, null)
+    }
+
+    /**
+     * Compares arm [b] against arm [a]. Runs are paired in time order (the i-th of each arm); with
+     * at least 2 pairs a paired-difference 95% interval is given. Welch's interval needs 2+ runs
+     * per arm.
+     */
+    fun compare(results: List<ExperimentResult>, a: String, b: String): ExperimentComparison {
+        val ra = results.filter { it.experiment.mode == a }.sortedBy { it.experiment.startMs }.mapNotNull { it.rate }
+        val rb = results.filter { it.experiment.mode == b }.sortedBy { it.experiment.startMs }.mapNotNull { it.rate }
+        val pairs = minOf(ra.size, rb.size)
+        val paired = if (pairs >= 2) {
+            val d = (0 until pairs).map { rb[it] - ra[it] }
+            val mean = d.average(); val sd = sd(d)
+            val half = tCrit(pairs - 1.0) * sd / sqrt(pairs.toDouble())
+            Interval(mean, mean - half, mean + half, pairs)
+        } else null
+        val welch = if (ra.size >= 2 && rb.size >= 2) {
+            val va = sd(ra).let { it * it } / ra.size; val vb = sd(rb).let { it * it } / rb.size
+            val diff = rb.average() - ra.average()
+            val df = if (va + vb == 0.0) (ra.size + rb.size - 2.0)
+                else (va + vb) * (va + vb) / (va * va / (ra.size - 1) + vb * vb / (rb.size - 1))
+            val half = tCrit(df) * sqrt(va + vb)
+            Interval(diff, diff - half, diff + half, ra.size + rb.size)
+        } else null
+        return ExperimentComparison(a, b, ra.takeIf { it.isNotEmpty() }?.average(), rb.takeIf { it.isNotEmpty() }?.average(),
+            ra.size, rb.size, paired, welch)
+    }
+
+    private fun sd(x: List<Double>): Double {
+        if (x.size < 2) return 0.0
+        val m = x.average()
+        return sqrt(x.sumOf { (it - m) * (it - m) } / (x.size - 1))
+    }
+
+    /** Two-sided 95% Student-t critical value (interpolated table; normal beyond 120 df). */
+    fun tCrit(df: Double): Double {
+        val table = listOf(1.0 to 12.706, 2.0 to 4.303, 3.0 to 3.182, 4.0 to 2.776, 5.0 to 2.571, 6.0 to 2.447,
+            7.0 to 2.365, 8.0 to 2.306, 9.0 to 2.262, 10.0 to 2.228, 12.0 to 2.179, 15.0 to 2.131, 20.0 to 2.086,
+            25.0 to 2.060, 30.0 to 2.042, 40.0 to 2.021, 60.0 to 2.000, 120.0 to 1.980)
+        if (df <= 1.0) return table.first().second
+        if (df >= 120.0) return 1.96
+        val hi = table.indexOfFirst { it.first >= df }
+        val (x0, y0) = table[hi - 1]; val (x1, y1) = table[hi]
+        return y0 + (y1 - y0) * (df - x0) / (x1 - x0)
+    }
+}
+
+// ================================================================================================
+// F1 — before/after a change
+// ================================================================================================
+
+data class UpdateImpact(
+    val entry: JournalEntry,
+    val before: List<IdleStretch>,
+    val after: List<IdleStretch>,
+    val delta: Interval?,
+    /** "Preliminary" with 3–6 sessions per side, "Established" with 7+, else null. */
+    val strength: String?,
+    val confounder: String?
+)
+
+object UpdateImpactAnalysis {
+    /** Hours after an OS update treated as background re-indexing and left out. */
+    const val SETTLE_HOURS = 6
+
+    fun assess(entry: JournalEntry, stretches: List<IdleStretch>): UpdateImpact {
+        val changeStart = entry.windowStartMs ?: entry.timeMs
+        val settle = if (entry.category == "os_update") SETTLE_HOURS * 3_600_000L else 0L
+        val before = stretches.filter { it.endMs <= changeStart }.takeLast(14)
+        val after = stretches.filter { it.startMs >= entry.timeMs + settle }.take(14)
+        val strength = when {
+            before.size >= 7 && after.size >= 7 -> "Established"
+            before.size >= 3 && after.size >= 3 -> "Preliminary"
+            else -> null
+        }
+        val delta = if (strength == null) null else {
+            val fake = before.map { ExperimentResult(Experiment(0, "", "before", it.startMs, it.fromPct, it.endMs, it.toPct), it.rate, null, 0, null) } +
+                after.map { ExperimentResult(Experiment(0, "", "after", it.startMs, it.fromPct, it.endMs, it.toPct), it.rate, null, 0, null) }
+            ExperimentStats.compare(fake, "before", "after").welch
+        }
+        fun mean(list: List<IdleStretch>, f: (IdleStretch) -> Double?) = list.mapNotNull(f).takeIf { it.isNotEmpty() }?.average()
+        val cellB = mean(before) { it.cellularShare }; val cellA = mean(after) { it.cellularShare }
+        val aodB = mean(before) { it.aodShare }; val aodA = mean(after) { it.aodShare }
+        val confounder = when {
+            cellB != null && cellA != null && abs(cellA - cellB) >= 0.25 ->
+                "Confounded: cellular time went from ${(cellB * 100).toInt()}% to ${(cellA * 100).toInt()}%"
+            aodB != null && aodA != null && abs(aodA - aodB) >= 0.25 ->
+                "Confounded: Always-On Display time went from ${(aodB * 100).toInt()}% to ${(aodA * 100).toInt()}%"
+            else -> null
+        }
+        return UpdateImpact(entry, before, after, delta, strength, confounder)
+    }
+}

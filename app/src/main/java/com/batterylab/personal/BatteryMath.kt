@@ -6,8 +6,15 @@ import kotlin.math.roundToInt
 data class BatteryPoint(
     val timeMs: Long,
     val percent: Int,
-    val charging: Boolean?
-)
+    val charging: Boolean?,
+    /** Charge counter (µAh) and terminal voltage, when the source reports them. */
+    val remainingUah: Int? = null,
+    val voltageMv: Int? = null
+) {
+    companion object {
+        fun of(r: Reading) = BatteryPoint(r.timeMs, r.percent, r.charging, r.remainingUah, r.voltageMv)
+    }
+}
 
 data class RuntimeEstimate(
     val percentPerHour: Double,
@@ -77,6 +84,16 @@ object BatteryMath {
      * of more than 2 points (an unseen charge), or a gap longer than [GapLimits.stretchMs] (8 hours at the default interval). Stretches shorter than
      * [minHours] or dropping less than [minDrop] points are too noisy to project and are skipped.
      */
+    /**
+     * Weighted drain rate (% per hour) over finished discharge stretches: total drop over total
+     * hours, so long stretches count for more. Null without at least 1 hour and a 4-point drop.
+     */
+    fun historicalRate(stretches: List<DischargeStretch>): Double? {
+        val hours = stretches.sumOf { it.hours }
+        val drop = stretches.sumOf { it.drop }
+        return if (hours >= 1.0 && drop >= 4) drop / hours else null
+    }
+
     fun dischargeStretches(points: List<BatteryPoint>, minHours: Double = 1.0, minDrop: Int = 4,
                            gaps: GapLimits = GapLimits()): List<DischargeStretch> {
         val out = mutableListOf<DischargeStretch>()

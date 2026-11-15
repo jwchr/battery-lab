@@ -37,6 +37,7 @@ class MainActivity : StyledActivity() {
     private val REQUEST_BLUETOOTH = 108
     private val EXPORT_CSV = 109
     private val BIND_WIDGET = 110
+    private val RESTORE_CSV = 111
     private val CONFIGURE_WIDGET = 111
     private val PICK_BACKUP = 112
     private var pendingWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID
@@ -114,9 +115,36 @@ class MainActivity : StyledActivity() {
 
         section("Last 48 hours", "How the last two days went.").apply {
             addView(chipRow(chip("Phone", colors[0]), chip("Watch", colors[1]), chip("Ring", colors[2])))
-            addView(BatteryGraph(this@MainActivity, devices.map { (id, _) -> store.since(id, System.currentTimeMillis() - 48 * 3_600_000L) }, colors),
-                LinearLayout.LayoutParams(-1, dp(190)))
-            addView(label("Gaps mean Android delayed a check, not that a battery stopped.", 11.5f, Palette.quiet))
+            val series = devices.map { (id, _) -> store.since(id, System.currentTimeMillis() - 48 * 3_600_000L) }
+            val units = HonestyAuditor.currentUnitsPerMa(store.since("phone", System.currentTimeMillis() - 7 * 86_400_000L),
+                PollScheduler.gapLimits(this@MainActivity))
+            val graph = BatteryGraph(this@MainActivity, series, colors, devices.map { it.second }, units)
+            val readout = label("Drag across the graph to see each reading.", 11.5f, Palette.quiet)
+            graph.onScrub = { text -> readout.text = text; readout.setTextColor(ink) }
+            val metricChips = mutableListOf<TextView>()
+            fun paintChips() = metricChips.forEach { c ->
+                val on = c.tag == graph.metric
+                c.background = rounded(if (on) Palette.tint else Color.TRANSPARENT, 14, Palette.cardStroke)
+                c.setTextColor(if (on) Palette.tintInk else Palette.quiet)
+            }
+            val metricRow = LinearLayout(this@MainActivity).apply { setPadding(0, dp(6), 0, dp(2)) }
+            for (m in BatteryGraph.Metric.values()) {
+                if (m != BatteryGraph.Metric.PERCENT && !graph.available(m)) continue
+                metricRow.addView(TextView(this@MainActivity).apply {
+                    text = m.label; tag = m; textSize = 12f; typeface = medium
+                    setPadding(dp(10), dp(5), dp(10), dp(5))
+                    setOnClickListener { graph.metric = m; paintChips() }
+                }.also { metricChips += it }, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(6) })
+            }
+            paintChips()
+            addView(android.widget.HorizontalScrollView(this@MainActivity).apply {
+                isHorizontalScrollBarEnabled = false; addView(metricRow)
+            })
+            addView(graph, LinearLayout.LayoutParams(-1, dp(190)))
+            addView(readout.apply { setPadding(0, dp(4), 0, 0) })
+            addView(label(if (units == null) "Current and power appear once the counter's units are verified. " +
+                "Gaps mean Android delayed a check, not that a battery stopped."
+                else "Gaps mean Android delayed a check, not that a battery stopped.", 11.5f, Palette.quiet))
         }
 
         renderBatteryLifeSection(devices, colors)
@@ -185,41 +213,55 @@ class MainActivity : StyledActivity() {
             if (event != null) addView(label("Last BLE diagnostic: $event", 12f, quiet))
         }
 
-        section("Experiment", "Does Ring monitoring cost battery?", "Run baseline and monitored periods for similar " +
-            "durations, ideally starting near the same charge. Repeat in alternating order.").apply {
+        section("Experiment", "What costs the Ring battery?", "Run each arm for similar durations, ideally starting " +
+            "near the same charge, and alternate the order. Only Ring monitoring polls Bluetooth; the others keep it off.").apply {
             val active = store.activeExperiment()
             if (active != null) {
-                addView(label("ACTIVE: ${active.mode.uppercase(Locale.US)} · " +
+                addView(label("ACTIVE: ${modeName(active.mode).uppercase(Locale.US)} · " +
                     "started ${BatteryStore.format(active.startMs)} at ${active.startPct}%", 14f, ink, true))
                 addView(label("Elapsed: ${f((System.currentTimeMillis() - active.startMs) / 3_600_000.0)}h · Target 12h", 13f, quiet))
                 button("Finish active test") { finishTest() }
             } else {
                 button("Start 12h baseline · monitoring OFF") { startTest("baseline") }
                 button("Start 12h monitored · monitoring ON") { startTest("monitoring") }
+                button("Start Ring alone · watch off your wrist") { startTest("ring_alone") }
+                button("Start Ring + Watch · both worn") { startTest("ring_with_watch") }
             }
-            val results = store.experiments(20).filter { it.device == ringId }
-            if (results.isEmpty()) addView(label("No completed tests yet", 13f, quiet))
-            for (e in results) {
-                val rate = BatteryMath.experimentDrain(e.startMs, e.endMs, e.startPct, e.endPct)
-                addView(label("${e.mode.replaceFirstChar { it.uppercase() }} · ${BatteryStore.format(e.startMs)} · " +
+            val runs = store.experiments(40).filter { it.device == ringId }
+            if (runs.isEmpty()) addView(label("No completed tests yet", 13f, quiet))
+            val ringReadings = if (runs.isEmpty()) emptyList() else store.since(ringId, runs.minOf { it.startMs })
+            val results = runs.map { e ->
+                ExperimentStats.result(e, ringReadings.filter { it.timeMs >= e.startMs && it.timeMs <= (e.endMs ?: Long.MAX_VALUE) })
+            }
+            for (r in results.take(8)) {
+                val e = r.experiment
+                addView(label("${modeName(e.mode)} · ${BatteryStore.format(e.startMs)} · " +
                     "${e.startPct}% → ${e.endPct?.let { "$it%" } ?: "running"} " +
-                    (rate?.let { "(${f(it)} pp/hour)" } ?: ""), 13f, quiet))
+                    (r.rate?.let { "(${f(it)} pp/hour)" } ?: r.quarantine?.let { "(set aside: $it)" } ?: ""), 13f, quiet))
             }
-            val baseline = results.filter { it.mode == "baseline" }.mapNotNull {
-                BatteryMath.experimentDrain(it.startMs, it.endMs, it.startPct, it.endPct)
-            }
-            val monitored = results.filter { it.mode == "monitoring" }.mapNotNull {
-                BatteryMath.experimentDrain(it.startMs, it.endMs, it.startPct, it.endPct)
-            }
-            if (baseline.isNotEmpty() && monitored.isNotEmpty()) {
-                val difference = monitored.average() - baseline.average()
-                addView(label("Observed monitored − baseline: ${if (difference > 0) "+" else ""}${f(difference)} pp/hour", 15f, ink, true))
-                addView(label("Not a causal estimate until conditions and starting charge are matched and runs repeated.", 12f, quiet))
+            for ((armA, armB) in listOf("baseline" to "monitoring", "ring_alone" to "ring_with_watch")) {
+                val c = ExperimentStats.compare(results, armA, armB)
+                if (c.meanA == null || c.meanB == null) continue
+                val ci = c.paired ?: c.welch
+                addView(label("${modeName(armB)} − ${modeName(armA)}: ${if (c.meanB - c.meanA > 0) "+" else ""}" +
+                    "${f(c.meanB - c.meanA)} pp/hour", 15f, ink, true))
+                addView(label(buildString {
+                    append("${c.nA} vs ${c.nB} runs. ")
+                    if (ci != null) append("95% range ${f(ci.low)} to ${f(ci.high)} (${if (c.paired != null) "paired" else "Welch"}). ")
+                    c.runtimeChange?.let { append("${modeName(armB)} lasts ${if (it >= 0) "${f(it * 100)}% longer" else "${f(-it * 100)}% shorter"}. ") }
+                    if (ci == null) append("Needs at least 2 runs of each before there's a range.")
+                    else if (ci.low <= 0 && ci.high >= 0) append("The range includes zero, so no clear difference yet.")
+                }, 12f, quiet))
             }
         }
 
         section("Your data", "Stays on this phone", "No account and no server. Export it any time.").apply {
             button("Export timestamped readings and tests · CSV") { export() }
+            button("Restore from a backup or export (.csv / .csv.gz)") {
+                startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE); type = "*/*"
+                }, RESTORE_CSV)
+            }
             button("Record current phone battery now") {
                 PhoneBattery.read(this@MainActivity, "manual")?.let(store::append)
                 render()
@@ -249,7 +291,7 @@ class MainActivity : StyledActivity() {
         val day = java.text.SimpleDateFormat("EEE HH:mm", Locale.getDefault())
         val weekFmt = java.text.SimpleDateFormat("MMM d", Locale.getDefault())
         val perDevice = devices.map { (id, _) ->
-            val readings = store.since(id, from)
+            val readings = BatteryStats.fullHoldAsCharging(store.since(id, from))
             readings to BatteryMath.dischargeStretches(readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = PollScheduler.gapLimits(this))
         }
         // One scale for every bar so devices compare at a glance.
@@ -352,7 +394,7 @@ class MainActivity : StyledActivity() {
 
     /** One device: color gauge, name with a status pill, hours left on the right, a quiet meta line. */
     private fun deviceBoard(id: String, name: String, color: Int): View {
-        val recent = store.recent(id, 1000)
+        val recent = BatteryStats.fullHoldAsCharging(store.recent(id, 1000))
         val last = recent.lastOrNull()
         val now = System.currentTimeMillis()
         // The phone's own job can sleep for hours in Doze, so it gets a long allowance. A wearable
@@ -362,7 +404,11 @@ class MainActivity : StyledActivity() {
             else maxOf(45 * 60_000L, 3L * PollScheduler.intervalMinutes(this) * 60_000L)
         val dropped = last?.source == SamsungWidgetSource.SOURCE && id in SamsungWidgetSource.missingDevices(this)
         val fresh = last != null && !dropped && now - last.timeMs <= staleAfter
-        val projection = if (fresh) BatteryMath.estimate(recent.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, PollScheduler.gapLimits(this)) else null
+        val points = recent.map { BatteryPoint(it.timeMs, it.percent, it.charging) }
+        val projection = if (fresh) BatteryMath.estimate(points, PollScheduler.gapLimits(this)) else null
+        // While the current stretch is too short to time, fall back on this device's past drain.
+        val historyRate = if (fresh && projection == null && last?.charging != true) BatteryMath.historicalRate(
+            BatteryMath.dischargeStretches(points, gaps = PollScheduler.gapLimits(this)).filter { it.endMs < last!!.timeMs }) else null
         val time = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT)
         val seenAt = last?.let {
             android.text.format.DateUtils.formatDateTime(this, it.timeMs, android.text.format.DateUtils.FORMAT_SHOW_TIME or
@@ -389,13 +435,15 @@ class MainActivity : StyledActivity() {
         fun span(ms: Long) = BatteryMath.timeLeftLabel(ms / 3_600_000.0).let { (v, u) -> "$v ${u.removeSuffix(" left")}" }
         val androidLine = when {
             androidEstimate == null -> null
-            last?.charging == true -> androidEstimate.chargeMs?.let { "Android: full in ${span(it)}" }
+            last?.charging == true -> null   // shown as the big number on the right instead
             else -> androidEstimate.dischargeMs?.let { "Android: ${span(it)} left" }
         }
         val (status, statusColor) = when {
             last == null -> "No data yet" to Palette.quiet
             !fresh -> "Offline" to Palette.amberInk
             last.charging == true -> "Charging" to Palette.green
+            // Widget shows a full wearable without a bolt whether or not it is still on the charger.
+            last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> "Full" to Palette.green
             else -> "On battery" to Palette.tintInk
         }
         return LinearLayout(this).apply {
@@ -424,6 +472,8 @@ class MainActivity : StyledActivity() {
                     text = if (last != null && !fresh) "Last seen $seenAt at ${last.percent}%" else buildList {
                         if (last != null) add("Updated ${time.format(java.util.Date(last.timeMs))}")
                         if (projection != null) add("about ${f1(projection.percentPerHour)}% an hour")
+                        else if (last != null && last.charging != true && status != "Full")
+                            add(if (historyRate != null) "this stretch still calibrating" else "needs 4% drop")
                     }.joinToString(" · ").ifEmpty { "Waiting for the first reading" }
                     textSize = 11.5f; setTextColor(Palette.quiet)
                 })
@@ -440,9 +490,23 @@ class MainActivity : StyledActivity() {
                 orientation = LinearLayout.VERTICAL
                 gravity = android.view.Gravity.END
                 // Count down from the reading's time, not from now: an old reading means less left.
-                val (value, unit) = if (projection != null && last != null) BatteryMath.timeLeftLabel(
-                    BatteryMath.timeLeftNow(projection.hoursRemaining, last.timeMs, System.currentTimeMillis()))
-                else "—" to "hours left"
+                val chargeMs = if (last?.charging == true) androidEstimate?.chargeMs else null
+                val (value, unit) = when {
+                    projection != null && last != null -> BatteryMath.timeLeftLabel(
+                        BatteryMath.timeLeftNow(projection.hoursRemaining, last.timeMs, System.currentTimeMillis()))
+                    chargeMs != null -> BatteryMath.timeLeftLabel(chargeMs / 3_600_000.0).let { (v, u) -> v to u.replace("left", "to full") }
+                    last?.charging == true && last.percent == 100 -> "Full" to "on charger"
+                    // No live estimate: say why instead of a bare dash.
+                    last == null -> "—" to "waiting"
+                    !fresh -> "—" to "stale signal"
+                    last.charging == true -> "—" to "charging"
+                    // A full wearable may still be in its case; don't count down yet.
+                    last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> "—" to "full"
+                    historyRate != null -> BatteryMath.timeLeftLabel(
+                        BatteryMath.timeLeftNow(last.percent / historyRate, last.timeMs, System.currentTimeMillis()))
+                        .first to "est. (history)"
+                    else -> "—" to "calibrating"
+                }
                 addView(TextView(this@MainActivity).apply {
                     text = value
                     textSize = 28f; typeface = medium; setTextColor(ink)
@@ -451,8 +515,8 @@ class MainActivity : StyledActivity() {
                     text = unit
                     textSize = 11f; setTextColor(Palette.quiet)
                 })
-                if (projection != null) addView(TextView(this@MainActivity).apply {
-                    text = "Battery Lab"
+                if (projection != null || chargeMs != null || unit == "est. (history)") addView(TextView(this@MainActivity).apply {
+                    text = if (chargeMs != null && projection == null) "Android" else "Battery Lab"
                     textSize = 9.5f; setTextColor(Palette.quiet)
                 })
             })
@@ -645,6 +709,11 @@ class MainActivity : StyledActivity() {
         }
     }
 
+    private fun modeName(mode: String) = when (mode) {
+        "baseline" -> "Baseline"; "monitoring" -> "Monitored"; "ring_alone" -> "Ring alone"; "ring_with_watch" -> "Ring + Watch"
+        else -> mode
+    }
+
     private fun startTest(mode: String) {
         if (store.activeExperiment() != null) { toast("Finish current test first"); return }
         if (mode == "monitoring" && PollScheduler.ringAddress(this) == null) {
@@ -666,9 +735,11 @@ class MainActivity : StyledActivity() {
             toast("Original Ring no longer selected")
             return
         }
-        PollScheduler.setRingEnabled(this, false)
+        // Monitoring is switched off only once the final reading is saved; if the read fails the
+        // test and its settings stay exactly as they were.
         freshRingReading { reading ->
             store.finishExperiment(reading)
+            PollScheduler.setRingEnabled(this, false)
             toast("Experiment finished")
             render()
         }
@@ -717,6 +788,23 @@ class MainActivity : StyledActivity() {
             render()
             return
         }
+        if (requestCode == RESTORE_CSV && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            toast("Restoring\u2026")
+            Background.io.execute {
+                val message = try {
+                    val raw = contentResolver.openInputStream(uri) ?: error("the file couldn't be opened")
+                    val input = java.io.BufferedInputStream(raw).apply { mark(2) }
+                    val gz = input.read() == 0x1f && input.read() == 0x8b
+                    input.reset()
+                    val stream = if (gz) java.util.zip.GZIPInputStream(input) else input
+                    val (rows, tests) = stream.bufferedReader().use(store::importCsv)
+                    "Restored $rows readings and $tests tests (duplicates skipped)"
+                } catch (e: Exception) { "Restore failed: ${e.message ?: e.javaClass.simpleName}" }
+                Background.onMain { if (!isDestroyed) { toast(message); render() } }
+            }
+            return
+        }
         if (requestCode == EXPORT_CSV && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             Background.io.execute {
@@ -742,49 +830,151 @@ class MainActivity : StyledActivity() {
 
 /** Simple timestamp-proportional history visualization. No invented or interpolated readings. */
 /** 48-hour line chart on a light card: hairline grid, device-colored lines, emphasized latest point. */
+/**
+ * The 48-hour graph. Shows one metric at a time (percent, voltage, current, power or
+ * temperature) and can be scrubbed: drag a finger across it and [onScrub] gets a readout of the
+ * nearest reading on each line.
+ */
 class BatteryGraph(context: android.content.Context, private val series: List<List<Reading>>,
-                   private val colors: List<Int>) : View(context) {
+                   private val colors: List<Int>, private val names: List<String> = emptyList(),
+                   /** Raw current-counter units per mA, when verified; current and power need it. */
+                   private val unitsPerMa: Double? = null) : View(context) {
+    enum class Metric(val label: String, val unit: String) {
+        PERCENT("Charge", "%"), VOLTAGE("Voltage", "mV"), CURRENT("Current", "mA"), POWER("Power", "W"), TEMP("Temp", "\u00b0C")
+    }
+
+    var metric = Metric.PERCENT
+        set(value) { field = value; invalidate() }
+    var onScrub: ((String?) -> Unit)? = null
+    private var cursorMs: Long? = null
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val end = System.currentTimeMillis()
+    private val start = end - 48L * 3_600_000L
+    private val d = resources.displayMetrics.density
+    private val left get() = 34f * d
+    private val right get() = width - 6f * d
+
+    fun value(r: Reading, m: Metric = metric): Double? = when (m) {
+        Metric.PERCENT -> r.percent.toDouble()
+        Metric.VOLTAGE -> r.voltageMv?.toDouble()
+        Metric.CURRENT -> unitsPerMa?.let { u -> r.detail?.currentNowRaw?.let { it / u } }
+        Metric.POWER -> value(r, Metric.CURRENT)?.let { ma -> r.voltageMv?.let { kotlin.math.abs(ma) * it / 1_000_000.0 } }
+        Metric.TEMP -> r.tempTenthsC?.let { it / 10.0 }
+    }
+
+    fun available(m: Metric) = series.any { s -> s.any { it.timeMs >= start && value(it, m) != null } }
+
+    @android.annotation.SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        when (event.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> { downX = event.x; downY = event.y; scrubbing = false }
+            android.view.MotionEvent.ACTION_MOVE -> {
+                val dx = kotlin.math.abs(event.x - downX); val dy = kotlin.math.abs(event.y - downY)
+                // Only a sideways drag scrubs; an up-or-down swipe is left to the page so it scrolls.
+                if (!scrubbing && dx > slop && dx > dy) { scrubbing = true; parent?.requestDisallowInterceptTouchEvent(true) }
+                if (scrubbing) scrubTo(event.x)
+            }
+            android.view.MotionEvent.ACTION_UP -> {
+                if (!scrubbing) scrubTo(event.x)    // a tap shows the readout at that spot
+                parent?.requestDisallowInterceptTouchEvent(false)
+            }
+            android.view.MotionEvent.ACTION_CANCEL -> parent?.requestDisallowInterceptTouchEvent(false)
+        }
+        return true
+    }
+
+    private var downX = 0f
+    private var downY = 0f
+    private var scrubbing = false
+    private val slop = android.view.ViewConfiguration.get(context).scaledTouchSlop
+
+    private fun scrubTo(px: Float) {
+        val frac = ((px - left) / (right - left)).coerceIn(0f, 1f)
+        val t = start + ((end - start) * frac).toLong()
+        cursorMs = t
+        onScrub?.invoke(readout(t))
+        invalidate()
+    }
+
+    private fun nearest(data: List<Reading>, t: Long) =
+        data.minByOrNull { kotlin.math.abs(it.timeMs - t) }?.takeIf { kotlin.math.abs(it.timeMs - t) <= 45 * 60_000L }
+
+    private fun readout(t: Long): String {
+        val time = java.text.SimpleDateFormat("EEE h:mm a", Locale.getDefault()).format(java.util.Date(t))
+        val lines = series.mapIndexedNotNull { i, data ->
+            val r = nearest(data, t) ?: return@mapIndexedNotNull null
+            val parts = mutableListOf("${r.percent}%")
+            r.voltageMv?.let { parts += "$it mV" }
+            value(r, Metric.CURRENT)?.let { parts += "${it.roundToInt()} mA" }
+            value(r, Metric.POWER)?.let { parts += String.format(Locale.US, "%.2f W", it) }
+            r.tempTenthsC?.let { parts += String.format(Locale.US, "%.1f\u00b0C", it / 10.0) }
+            r.detail?.transport?.let { parts += it }
+            parts += r.source
+            "${names.getOrElse(i) { "Line ${i + 1}" }}: ${parts.joinToString(" \u00b7 ")}"
+        }
+        return if (lines.isEmpty()) "$time \u00b7 no reading nearby" else "$time\n${lines.joinToString("\n")}"
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        val d = resources.displayMetrics.density
-        val w = width.toFloat()
         val h = height.toFloat()
-        val left = 30f * d
-        val right = w - 6f * d
         val top = 8f * d
         val bottom = h - 22f * d
-        val end = System.currentTimeMillis()
-        val start = end - 48L * 3_600_000L
-        fun x(t: Long) = left + (right - left) * (t - start).toFloat() / (end - start)
-        fun y(pct: Int) = bottom - (bottom - top) * pct / 100f
-        paint.textSize = 10.5f * d
-        for (pct in listOf(0, 50, 100)) {
-            paint.style = Paint.Style.STROKE; paint.strokeWidth = 1f; paint.color = Palette.hairline
-            canvas.drawLine(left, y(pct), right, y(pct), paint)
-            paint.style = Paint.Style.FILL; paint.color = Palette.quiet
-            canvas.drawText("$pct%", 0f, y(pct) + 4f * d, paint)
+        val visible = series.map { s -> s.filter { it.timeMs in start..end }.mapNotNull { r -> value(r)?.let { r.timeMs to it } } }
+        val all = visible.flatten().map { it.second }
+        val (lo, hi) = if (metric == Metric.PERCENT || all.isEmpty()) 0.0 to 100.0 else {
+            val mn = all.minOrNull()!!; val mx = all.maxOrNull()!!
+            val pad = ((mx - mn) * 0.08).coerceAtLeast(if (metric == Metric.VOLTAGE) 20.0 else 0.5)
+            (mn - pad) to (mx + pad)
         }
-        series.forEachIndexed { index, data ->
-            val recent = data.filter { it.timeMs in start..end }
-            if (recent.isEmpty()) return@forEachIndexed
+        fun x(t: Long) = left + (right - left) * (t - start).toFloat() / (end - start)
+        fun y(v: Double) = (bottom - (bottom - top) * ((v - lo) / (hi - lo))).toFloat()
+        fun tick(v: Double) = when (metric) {
+            Metric.PERCENT -> "${v.roundToInt()}%"
+            Metric.POWER -> String.format(Locale.US, "%.1f", v)
+            Metric.TEMP -> String.format(Locale.US, "%.0f\u00b0", v)
+            else -> "${v.roundToInt()}"
+        }
+        paint.textSize = 10f * d
+        for (v in listOf(lo, (lo + hi) / 2, hi)) {
+            paint.style = Paint.Style.STROKE; paint.strokeWidth = 1f; paint.color = Palette.hairline
+            canvas.drawLine(left, y(v), right, y(v), paint)
+            paint.style = Paint.Style.FILL; paint.color = Palette.quiet
+            canvas.drawText(tick(v), 0f, y(v) + 4f * d, paint)
+        }
+        if (metric == Metric.CURRENT && lo < 0 && hi > 0) {
+            paint.style = Paint.Style.STROKE; paint.color = Palette.quiet
+            canvas.drawLine(left, y(0.0), right, y(0.0), paint)
+        }
+        visible.forEachIndexed { index, pts ->
+            if (pts.isEmpty()) return@forEachIndexed
             paint.color = colors[index % colors.size]
             paint.strokeWidth = 2.5f * d
             paint.strokeCap = Paint.Cap.ROUND
             paint.strokeJoin = Paint.Join.ROUND
             paint.style = Paint.Style.STROKE
             val path = Path()
-            recent.forEachIndexed { i, r ->
-                if (i == 0 || r.timeMs - recent[i - 1].timeMs > 8 * 3_600_000L) path.moveTo(x(r.timeMs), y(r.percent))
-                else path.lineTo(x(r.timeMs), y(r.percent))
+            pts.forEachIndexed { i, (t, v) ->
+                if (i == 0 || t - pts[i - 1].first > 8 * 3_600_000L) path.moveTo(x(t), y(v)) else path.lineTo(x(t), y(v))
             }
             canvas.drawPath(path, paint)
-            val lastR = recent.last()
+            val (lt, lv) = pts.last()
             paint.style = Paint.Style.FILL
             paint.color = Color.WHITE
-            canvas.drawCircle(x(lastR.timeMs), y(lastR.percent), 5f * d, paint)
+            canvas.drawCircle(x(lt), y(lv), 5f * d, paint)
             paint.color = colors[index % colors.size]
-            canvas.drawCircle(x(lastR.timeMs), y(lastR.percent), 3.5f * d, paint)
+            canvas.drawCircle(x(lt), y(lv), 3.5f * d, paint)
+        }
+        cursorMs?.let { t ->
+            paint.style = Paint.Style.STROKE; paint.strokeWidth = 1.5f * d; paint.color = Palette.ink
+            canvas.drawLine(x(t), top, x(t), bottom, paint)
+            paint.style = Paint.Style.FILL
+            series.forEachIndexed { i, data ->
+                val r = nearest(data, t) ?: return@forEachIndexed
+                val v = value(r) ?: return@forEachIndexed
+                paint.color = colors[i % colors.size]
+                canvas.drawCircle(x(r.timeMs), y(v), 4.5f * d, paint)
+            }
         }
         paint.style = Paint.Style.FILL
         paint.color = Palette.quiet

@@ -57,7 +57,8 @@ abstract class StyledActivity : Activity() {
             clipToPadding = true
             setOnApplyWindowInsetsListener { v, insets ->
                 @Suppress("DEPRECATION")
-                v.setPadding(0, insets.systemWindowInsetTop, 0, 0)
+                // Sides too: in landscape the navigation buttons (and camera cutout) sit left or right.
+                v.setPadding(insets.systemWindowInsetLeft, insets.systemWindowInsetTop, insets.systemWindowInsetRight, 0)
                 @Suppress("DEPRECATION")
                 body.setPadding(dp(16), dp(14), dp(16), insets.systemWindowInsetBottom + dp(28))
                 insets
@@ -207,6 +208,53 @@ abstract class StyledActivity : Activity() {
     protected fun chipRow(vararg chips: View) = LinearLayout(this).apply {
         setPadding(0, dp(10), 0, dp(6))
         chips.forEach { addView(it, LinearLayout.LayoutParams(-2, -2).apply { rightMargin = dp(8) }) }
+    }
+
+    /** Two-column grid of stat tiles: big value, small label, optional caption. */
+    protected fun LinearLayout.addTiles(tiles: List<Triple<String, String, String?>>) {
+        tiles.chunked(2).forEach { row ->
+            addView(LinearLayout(this@StyledActivity).apply {
+                row.forEachIndexed { i, (value, labelText, caption) ->
+                    addView(LinearLayout(this@StyledActivity).apply {
+                        orientation = LinearLayout.VERTICAL
+                        setPadding(dp(12), dp(9), dp(10), dp(9))
+                        background = rounded(Color.argb(150, 255, 255, 255), 14, Palette.hairline)
+                        // Value and label share a baseline: "76%  used by apps on screen".
+                        // One TextView with two sizes, so a long label wraps cleanly instead of clipping.
+                        addView(TextView(this@StyledActivity).apply {
+                            val s = android.text.SpannableStringBuilder(value)
+                            s.setSpan(android.text.style.AbsoluteSizeSpan(20, true), 0, value.length, 0)
+                            s.setSpan(android.text.style.ForegroundColorSpan(ink), 0, value.length, 0)
+                            s.setSpan(android.text.style.TypefaceSpan(medium), 0, value.length, 0)
+                            s.append("  ").append(labelText)
+                            text = s; textSize = 12.5f; setTextColor(Palette.body)
+                            setLineSpacing(0f, 0.95f)
+                        })
+                        if (caption != null) addView(TextView(this@StyledActivity).apply {
+                            text = caption; textSize = 11f; setTextColor(Palette.quiet)
+                        })
+                    }, LinearLayout.LayoutParams(0, if (row.size == 1) -2 else -1, 1f).apply { if (i == 0) rightMargin = dp(8) })
+                }
+                if (row.size == 1) addView(View(this@StyledActivity), LinearLayout.LayoutParams(0, 0, 1f))
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
+        }
+    }
+
+    /**
+     * Evidence inspector: a small link at the end of a card that explains where its numbers come
+     * from, the formula, and what was included or left out.
+     */
+    protected fun LinearLayout.evidence(source: String, formula: String, coverage: String) {
+        addView(TextView(this@StyledActivity).apply {
+            text = "\u24d8  How this is worked out"
+            textSize = 12f; typeface = medium; setTextColor(Palette.tintInk)
+            setPadding(0, dp(12), 0, 0)
+            setOnClickListener {
+                android.app.AlertDialog.Builder(this@StyledActivity).setTitle("How this is worked out")
+                    .setMessage("SOURCE\n$source\n\nFORMULA\n$formula\n\nCOVERAGE\n$coverage")
+                    .setPositiveButton("OK", null).show()
+            }
+        })
     }
 
     protected fun hairline() = View(this).apply { setBackgroundColor(Palette.hairline) }

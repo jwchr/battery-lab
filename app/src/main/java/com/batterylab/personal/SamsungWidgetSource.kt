@@ -153,7 +153,11 @@ object SamsungWidgetSource {
                 LABEL_PHONE -> PHONE_WIDGET_DEVICE
                 else -> null
             } ?: continue
-            val reading = Reading(device, snapshot.timeMs, slot.percent, slot.chargingIcon, SOURCE, detail = clock)
+            // Keep the progress arc's own value next to the number shown, and flag loose icon matches.
+            val loose = (match(context, slot.fingerprint)?.second ?: 0) > MATCH_DISTANCE * 3 / 4
+            val reading = Reading(device, snapshot.timeMs, slot.percent, slot.chargingIcon, SOURCE,
+                detail = clock.copy(rawExtra = slot.progress?.let { "arc_progress=$it" },
+                    qualityFlags = if (loose) QualityFlags.AMBIGUOUS_WIDGET_SLOT else null))
             val last = store.latest(device)
             if (last != null && last.source == SOURCE && last.percent == reading.percent &&
                 last.charging == reading.charging && reading.timeMs - last.timeMs < DUPLICATE_WINDOW_MS) {
@@ -219,7 +223,10 @@ object SamsungWidgetSource {
         emptyList()
     }
 
-    fun labelFor(context: Context, fingerprint: String?): String? {
+    fun labelFor(context: Context, fingerprint: String?): String? = match(context, fingerprint)?.first
+
+    /** Best label and its fingerprint distance, or null when nothing is close enough. */
+    fun match(context: Context, fingerprint: String?): Pair<String, Int>? {
         if (fingerprint == null) return null
         val labels = labels(context)
         var best: String? = null
@@ -228,7 +235,7 @@ object SamsungWidgetSource {
             val d = distance(fingerprint, key)
             if (d < bestDistance) { bestDistance = d; best = labels.optString(key) }
         }
-        return if (bestDistance <= MATCH_DISTANCE) best else null
+        return if (bestDistance <= MATCH_DISTANCE && best != null) best to bestDistance else null
     }
 
     fun setLabel(context: Context, fingerprint: String, label: String) {

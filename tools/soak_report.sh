@@ -3,7 +3,9 @@
 #
 # Prints counts, timing gaps and percent CHANGES only. It never prints device
 # labels, serials or raw battery percentages, so the output is safe to paste
-# into an issue.
+# into an issue. The last section (fuel gauge) prints the phone's current level,
+# voltage and temperature from a fixed list of dumpsys keys; trim it before
+# pasting if you'd rather not share those.
 #
 # Usage:
 #   tools/soak_report.sh            # pull the database from the phone over adb
@@ -101,4 +103,13 @@ if $have_phone; then
     | awk -v pkg="$PKG/" '/JOB #/ { p = index($0, pkg) > 0 } p' \
     | grep -E 'JOB #|PERIODIC:|Last successful run|Ready:' | sed 's/^ *//' || true
   echo "App foreground starts logged: $(wc -l <"$WORK/fg.txt" | tr -d ' ')"
+fi
+
+if $have_phone; then
+  echo
+  echo "== Samsung kernel fuel gauge (dumpsys battery, selected keys only) =="
+  # Only these keys are printed, so nothing identifying (serials, addresses) can appear.
+  "$ADB" shell dumpsys battery 2>/dev/null \
+    | grep -E '^ *(level|scale|voltage|temperature|status|Charge counter|mSavedBatteryAsoc|mSavedBatteryUsage):' \
+    | sed 's/^ *//' || true
 fi

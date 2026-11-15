@@ -47,6 +47,27 @@ object BatteryStats {
     private const val HOUR = 3_600_000.0
     private const val HOUR_MS = 3_600_000L
 
+    /**
+     * Samsung's widget drops a wearable's charging bolt once it reaches 100%, even while it sits on
+     * the charger. So a run of widget readings at 100% right after a charging reading counts as still
+     * charging, except the last one: the device came off somewhere between it and the first lower
+     * reading, so the drain clock starts there. Only the analysis sees this; stored history and the
+     * CSV export keep exactly what was read.
+     */
+    fun fullHoldAsCharging(readings: List<Reading>): List<Reading> {
+        val r = readings.sortedBy { it.timeMs }
+        val out = r.toMutableList()
+        var i = 0
+        while (i < r.size) {
+            if (r[i].charging != true) { i++; continue }
+            var j = i + 1
+            while (j < r.size && r[j].percent == 100 && r[j].charging != true && r[j].source == SamsungWidgetSource.SOURCE) j++
+            for (k in i + 1 until j - 1) out[k] = r[k].copy(charging = true)
+            i = maxOf(j, i + 1)
+        }
+        return out
+    }
+
     /** [hourOf] maps a time to its local hour of day (0..23); injected so tests are timezone-free. */
     /** Steps longer than [GapLimits.stepMs] are gaps (phone off, job deferred) and are not counted as time. */
     fun device(readings: List<Reading>, hourOf: (Long) -> Int, gaps: GapLimits = GapLimits()): DeviceStats {

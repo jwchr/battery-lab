@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Read-only: is the phone on Wi-Fi or cellular at each check. Not internet access. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Hosting Samsung's Battery widget. Not grantable to third-party apps; Android falls
          back to the ACTION_APPWIDGET_BIND consent dialog. Declared per the host docs. -->
     <uses-permission android:name="android.permission.BIND_APPWIDGET"

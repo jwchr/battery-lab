@@ -7,7 +7,7 @@ Last updated 2026-11-17. This replaces the Nov 13 note in issue #2. For the arch
 - **PR #6** (the redesign, the Stats "lab engine", the audit #4 fixes, cloud backup and two review passes): merged into `main` on 2026-11-17, after PR #3. Both branches are deleted.
 - **New work goes on a branch off `main`.** Every merge still needs the owner's OK.
 - **Phone:** has the newest debug build (the code now on `main`), installed over the old app with history kept. The background job runs every 15 minutes, and the app is exempt from battery optimization (Unrestricted).
-- **Watch app:** never installed on the watch (no watch-app readings have ever arrived). It is optional: a cross-check on Samsung's widget, every 2 hours. Installing it needs wireless debugging on the watch.
+- **Watch app:** installed on the watch 2026-11-17 (Wear OS 6); checks every 2 hours as a cross-check on Samsung's widget. To reinstall: pair over Wireless debugging from **Terminal.app** with a separate helper (`adb -P 5041 pair <ip>:<pairing-pop-up port>`, then `connect` to the main screen's port). The Claude-launched helper on 5040 is blocked from the local network by macOS.
 
 ## Audit #4 status
 For the full table, see the triage comment on issue #4. That comment predates A1, the A3 glitch/week fixes, A6 and B4.

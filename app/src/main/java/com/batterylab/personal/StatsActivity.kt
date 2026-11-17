@@ -161,6 +161,7 @@ class StatsActivity : StyledActivity() {
         timed("planner") { renderPlanner(devices, data, gaps) }
         timed("drain") { renderDrain(l.drain) }
         timed("nights") { renderNights(idle) }
+        timed("charge times") { renderChargeTimes(devices, data, gaps) }
         timed("charging") { renderCharging(phone, gaps) }
         timed("audit") { renderAudit(phone, l.phoneWidget, (data[1] + l.watchCompanion).sortedBy { it.timeMs }, data[2], capacity, gaps) }
         timed("forecasts") { renderForecasts(l.forecasts, l.devices) }
@@ -595,6 +596,60 @@ class StatsActivity : StyledActivity() {
         }
     }
 
+    /** "1 h 05 min" style for longer times, "42 min" for shorter. */
+    private fun mins(m: Double): String {
+        val total = m.roundToInt()
+        return if (total < 90) "$total min" else "${total / 60} h ${String.format(Locale.US, "%02d", total % 60)} min"
+    }
+
+    private fun estimateTile(e: ChargeEstimate?, label: String, icon: String): Tile? = e?.let {
+        Tile(mins(it.minutes), label, when {
+            it.samples > 0 -> "measured · ${it.samples} charge${if (it.samples == 1) "" else "s"}"
+            it.measured -> "added up from 10% steps"
+            else -> "estimate · low end not seen yet"
+        }, icon)
+    }
+
+    private fun renderChargeTimes(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>, gaps: GapLimits) {
+        val times = data.map { ChargeTimes.analyze(it, gaps) }
+        if (times.all { it == null }) {
+            section("How long to charge", "Collecting…", "Needs a charge watched while the device is on its charger.")
+            return
+        }
+        section("How long to charge", "From empty to full, and every 10% in between.",
+            "Timed from the moment each device's battery crossed one level to the moment it crossed the next.").apply {
+            devices.forEachIndexed { i, (_, name, color) ->
+                val t = times[i] ?: return@forEachIndexed
+                addView(deviceBanner(name, color))
+                addTileList(listOfNotNull(
+                    estimateTile(t.zeroToFull, "0 → 100%", "🔋"),
+                    estimateTile(t.twentyToEighty, "20 → 80%", "⚡"),
+                    estimateTile(t.eightyToFull, "80 → 100%", "🐢"),
+                    t.usualPlugIn?.takeIf { it in 1..90 }?.let { estimateTile(t.fromUsualToFull, "$it → 100%", "🔌")
+                        ?.copy(label = "from your usual $it%") },
+                ))
+                val longest = t.steps.values.maxOrNull() ?: 1.0
+                for (lo in ChargeTimes.STEPS) t.steps[lo]?.let {
+                    addView(barRow("$lo→${lo + 10}%", it / longest, mins(it), color,
+                        "${t.stepSamples[lo] ?: 0} charge${if (t.stepSamples[lo] == 1) "" else "s"}"))
+                }
+                val notes = listOfNotNull(
+                    t.last?.let { (from, to, m) -> "Last charge: $from% → $to% in ${mins(m)}." },
+                    if (t.fastest2080 != null && t.slowest2080 != null && t.slowest2080 > t.fastest2080)
+                        "20 → 80% ranged from ${mins(t.fastest2080)} to ${mins(t.slowest2080)}." else null,
+                )
+                if (notes.isNotEmpty()) addView(label(notes.joinToString(" "), 12f, Palette.body).apply { setPadding(0, dp(6), 0, 0) })
+            }
+            evidence("Readings taken while each device showed as charging: Android's own for the phone, the charging bolt " +
+                    "on Samsung's widget for the Ring and Watch.",
+                "Each crossing time is interpolated between the readings either side, then the median per 10% step is taken. " +
+                    "Spans like 0 → 100% are measured directly when a charge covered them, otherwise added up from the steps; " +
+                    "steps below the lowest one seen borrow its time.",
+                "${times.filterNotNull().sumOf { it.charges }} charges in all. Readings come every 15 minutes, so a " +
+                    "fast-charging Ring may cross several steps between two readings; those steps share the time evenly.")
+        }
+    }
+
     private fun renderCharging(phone: List<Reading>, gaps: GapLimits) {
         val charges = ChargeCurves.observedCharges(phone, gaps)
         if (charges.isEmpty()) {
@@ -881,7 +936,7 @@ class StatsActivity : StyledActivity() {
             "Temperature" to "\uD83C\uDF21\uFE0F", "What it costs" to "\uD83D\uDCB5",
             "Where it comes from" to "\uD83C\uDFED", "Just for fun" to "\uD83C\uDF89",
             "What's draining it" to "\uD83D\uDD0D", "Honesty audit" to "\uD83E\uDDD0",
-            "Prediction report card" to "\uD83D\uDCDD", "Charging speed" to "\u26A1",
+            "Prediction report card" to "\uD83D\uDCDD", "Charging speed" to "\u26A1", "How long to charge" to "\u23F3",
             "Asleep and idle" to "\uD83D\uDE34", "Will it last?" to "\uD83E\uDDED",
             "Heat and charge level" to "\uD83D\uDD25", "Change journal" to "\uD83D\uDCD3",
             "What Battery Lab costs" to "\uD83E\uDDEA", "What each device can report" to "\uD83D\uDCE1",

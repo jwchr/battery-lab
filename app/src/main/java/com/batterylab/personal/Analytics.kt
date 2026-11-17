@@ -4,6 +4,74 @@ import kotlin.math.abs
 import kotlin.math.sqrt
 
 // ================================================================================================
+// Charge times — how long each device takes to charge, for the Stats page
+// ================================================================================================
+
+/** Minutes for a stretch of a charge; [measured] false when part of it was filled in from a neighbouring 10%. */
+data class ChargeEstimate(val minutes: Double, val measured: Boolean, val samples: Int)
+
+data class DeviceChargeTimes(
+    val charges: Int,
+    /** Median minutes for each 10% step (0→10 … 90→100) that some charge fully covered. */
+    val steps: Map<Int, Double>,
+    val stepSamples: Map<Int, Int>,
+    val zeroToFull: ChargeEstimate?,
+    val twentyToEighty: ChargeEstimate?,
+    val eightyToFull: ChargeEstimate?,
+    val usualPlugIn: Int?,
+    val fromUsualToFull: ChargeEstimate?,
+    val fastest2080: Double?,
+    val slowest2080: Double?,
+    /** The most recent charge: start %, end %, minutes until it first reached the end. */
+    val last: Triple<Int, Int, Double>?,
+)
+
+object ChargeTimes {
+    /** Lower edges of the 10% steps: 0, 10, … 90. */
+    val STEPS = (0..90 step 10).toList()
+
+    fun analyze(readings: List<Reading>, gaps: GapLimits = GapLimits()): DeviceChargeTimes? {
+        val runs = ChargeCurves.chargeRuns(readings, gaps)
+        if (runs.isEmpty()) return null
+        val perStep = STEPS.associateWith { lo -> runs.mapNotNull { ChargeCurves.bandMinutes(it, lo, lo + 10) } }
+        val steps = perStep.mapNotNull { (lo, v) -> BatteryMath.median(v)?.let { lo to it } }.toMap()
+        fun direct(lo: Int, hi: Int): ChargeEstimate? {
+            val v = runs.mapNotNull { ChargeCurves.bandMinutes(it, lo, hi) }
+            return BatteryMath.median(v)?.let { ChargeEstimate(it, true, v.size) }
+        }
+        fun bestOf(lo: Int, hi: Int) = direct(lo, hi) ?: estimate(steps, lo, hi)
+        val starts = runs.map { it.first().percent }
+        val usual = BatteryMath.median(starts.map { it.toDouble() })?.let { Math.round(it).toInt() }
+        val d2080 = runs.mapNotNull { ChargeCurves.bandMinutes(it, 20, 80) }
+        val lastRun = runs.last()
+        val top = lastRun.maxOf { it.percent }
+        val lastMinutes = (lastRun.first { it.percent >= top }.timeMs - lastRun.first().timeMs) / 60_000.0
+        return DeviceChargeTimes(runs.size, steps, perStep.mapValues { it.value.size }.filterValues { it > 0 },
+            bestOf(0, 100), bestOf(20, 80), bestOf(80, 100), usual, usual?.let { bestOf(it, 100) },
+            d2080.minOrNull(), d2080.maxOrNull(), Triple(lastRun.first().percent, top, lastMinutes))
+    }
+
+    /**
+     * Minutes from [from]% to [to]% by adding up the median 10% steps (a partial step counts
+     * pro rata). Missing steps below the lowest measured one borrow its time, since a battery
+     * charges at least as fast low down; any other missing step means no estimate, because the
+     * slow top of a charge can't be guessed from the fast middle.
+     */
+    fun estimate(steps: Map<Int, Double>, from: Int, to: Int): ChargeEstimate? {
+        if (steps.isEmpty() || to <= from) return null
+        val lowest = steps.keys.min()
+        var total = 0.0; var measured = true
+        for (lo in STEPS) {
+            val overlap = (minOf(to, lo + 10) - maxOf(from, lo)).coerceAtLeast(0)
+            if (overlap == 0) continue
+            val t = steps[lo] ?: if (lo < lowest) { measured = false; steps.getValue(lowest) } else return null
+            total += t * overlap / 10.0
+        }
+        return ChargeEstimate(total, measured, 0)
+    }
+}
+
+// ================================================================================================
 // F3 — charge bands
 // ================================================================================================
 
@@ -28,12 +96,16 @@ object ChargeCurves {
     val BANDS = listOf(20 to 50, 50 to 80, 80 to 100)
 
     /** Charges built only from readings flagged charging; inferred jumps never count. */
-    fun observedCharges(readings: List<Reading>, gaps: GapLimits = GapLimits()): List<ObservedCharge> {
+    fun observedCharges(readings: List<Reading>, gaps: GapLimits = GapLimits()): List<ObservedCharge> =
+        chargeRuns(readings, gaps).map(::build)
+
+    /** The readings of each watched charge, in time order: a run of charging readings without gaps. */
+    fun chargeRuns(readings: List<Reading>, gaps: GapLimits = GapLimits()): List<List<Reading>> {
         val r = readings.sortedBy { it.timeMs }
-        val out = mutableListOf<ObservedCharge>()
+        val out = mutableListOf<List<Reading>>()
         var run = mutableListOf<Reading>()
         fun close() {
-            if (run.size >= 2 && run.last().percent > run.first().percent) out += build(run)
+            if (run.size >= 2 && run.last().percent > run.first().percent) out += run
             run = mutableListOf()
         }
         for (x in r) {
@@ -49,21 +121,9 @@ object ChargeCurves {
 
     private fun build(run: List<Reading>): ObservedCharge {
         fun firstAtOrAbove(p: Int) = run.indexOfFirst { it.percent >= p }.takeIf { it >= 0 }
-        // When the percentage crossed [p], interpolated between the readings either side. With
-        // 15-minute checks, timing from the readings alone snaps every band to 15-minute steps.
-        fun crossedMs(i: Int, p: Int): Double {
-            val x = run[i]; val y = run.getOrNull(i - 1) ?: return x.timeMs.toDouble()
-            if (x.percent <= y.percent) return x.timeMs.toDouble()
-            return y.timeMs + (p - y.percent).coerceAtLeast(0).toDouble() / (x.percent - y.percent) * (x.timeMs - y.timeMs)
-        }
         val bands = BANDS.mapNotNull { (lo, hi) ->
-            // The band must start at or below its low edge to be timed fairly.
-            if (run.first().percent > lo) return@mapNotNull null
-            val ia = firstAtOrAbove(lo) ?: return@mapNotNull null
-            val ib = firstAtOrAbove(hi) ?: return@mapNotNull null
-            val a = run[ia]; val b = run[ib]
-            val minutes = (crossedMs(ib, hi) - crossedMs(ia, lo)) / 60_000.0
-            if (minutes <= 0) return@mapNotNull null
+            val minutes = bandMinutes(run, lo, hi) ?: return@mapNotNull null
+            val a = run[firstAtOrAbove(lo)!!]; val b = run[firstAtOrAbove(hi)!!]
             val ra = a.remainingUah; val rb = b.remainingUah
             val readingHours = (b.timeMs - a.timeMs) / 3_600_000.0
             val mv = run.filter { it.timeMs in a.timeMs..b.timeMs }.mapNotNull { it.voltageMv }.takeIf { it.isNotEmpty() }?.average()
@@ -77,6 +137,24 @@ object ChargeCurves {
         return ObservedCharge(run.first().timeMs, run.last().timeMs, run.first().percent, top, bands, plugged,
             if (temps.size >= 2) temps.max() - temps.first() else null, temps.maxOrNull(),
             peakMs = run.first { it.percent >= top }.timeMs)
+    }
+
+    /**
+     * Minutes one charge took from [lo]% to [hi]%, or null if it didn't cover the whole band. Each
+     * crossing is interpolated between the readings either side: with 15-minute checks, timing
+     * from the readings alone would snap every band to 15-minute steps.
+     */
+    fun bandMinutes(run: List<Reading>, lo: Int, hi: Int): Double? {
+        // The band must start at or below its low edge to be timed fairly.
+        if (run.isEmpty() || run.first().percent > lo) return null
+        fun crossedMs(p: Int): Double? {
+            val i = run.indexOfFirst { it.percent >= p }.takeIf { it >= 0 } ?: return null
+            val x = run[i]; val y = run.getOrNull(i - 1) ?: return x.timeMs.toDouble()
+            if (x.percent <= y.percent) return x.timeMs.toDouble()
+            return y.timeMs + (p - y.percent).coerceAtLeast(0).toDouble() / (x.percent - y.percent) * (x.timeMs - y.timeMs)
+        }
+        val a = crossedMs(lo) ?: return null; val b = crossedMs(hi) ?: return null
+        return ((b - a) / 60_000.0).takeIf { it > 0 }
     }
 
     /** Median minutes per band across charges, optionally for one plug type. */

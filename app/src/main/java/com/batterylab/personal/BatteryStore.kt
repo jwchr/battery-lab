@@ -575,6 +575,7 @@ class BatteryStore private constructor(context: Context) :
         }
         val existingExp = experiments(100_000).map { "${it.device}|${it.mode}|${it.startMs}" }.toHashSet()
         var added = 0; var addedExp = 0
+        val parseTime = CsvCodec.utcParser()
         val db = writableDatabase
         db.beginTransaction()
         try {
@@ -583,8 +584,9 @@ class BatteryStore private constructor(context: Context) :
                 if (line.isBlank()) continue
                 val f = CsvCodec.parseLine(line)
                 fun get(name: String): String? = col[name]?.let { f.getOrNull(it) }?.takeIf { it.isNotEmpty() }
-                val time = get("timestamp_utc")?.let(CsvCodec::parseUtc) ?: continue
-                val device = get("device") ?: continue
+                val time = get("timestamp_utc")?.let(parseTime) ?: continue
+                // Old exports may carry "ring:<address>"; v2 folded those into one Ring history.
+                val device = get("device")?.let { if (it.startsWith("ring:")) RING_ID else it } ?: continue
                 val pct = get("percentage")?.toIntOrNull()?.takeIf { it in 0..100 } ?: continue
                 when (get("kind")) {
                     "reading" -> {
@@ -602,13 +604,15 @@ class BatteryStore private constructor(context: Context) :
                             }
                         }
                         db.insertOrThrow("readings", null, v); added++
+                        // A long restore shouldn't lock out the 15-minute job.
+                        if (added % 2000 == 0) db.yieldIfContendedSafely()
                     }
                     "experiment" -> {
                         val mode = get("mode_or_source") ?: continue
                         if (!existingExp.add("$device|$mode|$time")) continue
                         db.insertOrThrow("experiments", null, ContentValues().apply {
                             put("device", device); put("mode", mode); put("start_ms", time); put("start_pct", pct)
-                            get("end_timestamp_utc")?.let(CsvCodec::parseUtc)?.let { put("end_ms", it) }
+                            get("end_timestamp_utc")?.let(parseTime)?.let { put("end_ms", it) }
                             get("end_percentage")?.toIntOrNull()?.let { put("end_pct", it) }
                         }); addedExp++
                     }
@@ -690,9 +694,13 @@ object CsvCodec {
     private fun finish(v: String, wasQuoted: Boolean) =
         if (wasQuoted && v.length >= 2 && v[0] == '\'' && v[1] in "=+-@\t\r") v.substring(1) else v
 
-    fun parseUtc(s: String): Long? = try {
-        SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.parse(s)?.time
-    } catch (e: Exception) { null }
+    fun parseUtc(s: String): Long? = utcParser()(s)
+
+    /** One reusable parser for loops; not thread-safe, so make one per caller. */
+    fun utcParser(): (String) -> Long? {
+        val f = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
+        return { s -> try { f.parse(s)?.time } catch (e: Exception) { null } }
+    }
 }
 
 /**

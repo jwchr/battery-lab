@@ -37,7 +37,7 @@ class MainActivity : StyledActivity() {
     private val REQUEST_BLUETOOTH = 108
     private val EXPORT_CSV = 109
     private val BIND_WIDGET = 110
-    private val RESTORE_CSV = 111
+    private val RESTORE_CSV = 113
     private val CONFIGURE_WIDGET = 111
     private val PICK_BACKUP = 112
     private var pendingWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID

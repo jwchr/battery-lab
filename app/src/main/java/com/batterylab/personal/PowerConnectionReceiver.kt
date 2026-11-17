@@ -31,8 +31,8 @@ class PowerConnectionReceiver : BroadcastReceiver() {
     private fun record(context: Context, trigger: String) {
         try {
             PhoneBattery.read(context, trigger)?.let(BatteryStore.get(context)::append)
-        } catch (e: Exception) {
-            BatteryStore.get(context).logProbe("power", "Plug read failed: ${e.javaClass.simpleName}")
+        } catch (e: Throwable) {
+            try { BatteryStore.get(context).logProbe("power", "Plug read failed: ${e.javaClass.simpleName}") } catch (_: Throwable) { }
         }
     }
 

@@ -14,6 +14,9 @@ import java.util.zip.GZIPOutputStream
 object DriveBackup {
     private const val KEY_URI = "backup_uri"
     private const val KEY_LAST = "backup_last_ms"
+    private const val KEY_TRY = "backup_try_ms"
+    /** After a failed try, wait this long: a revoked or missing file would otherwise cost a full export every 15 minutes. */
+    private const val RETRY_MS = 3_600_000L
     const val INTERVAL_MS = 12 * 3_600_000L
 
     fun uri(context: Context): Uri? = PollScheduler.prefs(context).getString(KEY_URI, null)?.let(Uri::parse)
@@ -22,12 +25,12 @@ object DriveBackup {
     fun enable(context: Context, uri: Uri) {
         context.contentResolver.takePersistableUriPermission(uri,
             Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        PollScheduler.prefs(context).edit().putString(KEY_URI, uri.toString()).remove(KEY_LAST).apply()
+        PollScheduler.prefs(context).edit().putString(KEY_URI, uri.toString()).remove(KEY_LAST).remove(KEY_TRY).apply()
     }
 
     fun disable(context: Context) {
         val uri = uri(context)
-        PollScheduler.prefs(context).edit().remove(KEY_URI).remove(KEY_LAST).apply()
+        PollScheduler.prefs(context).edit().remove(KEY_URI).remove(KEY_LAST).remove(KEY_TRY).apply()
         if (uri != null) try {
             context.contentResolver.releasePersistableUriPermission(uri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
@@ -45,6 +48,9 @@ object DriveBackup {
         val last = lastBackupMs(context) ?: 0L
         val now = System.currentTimeMillis()
         if (!force && now - last < INTERVAL_MS) return false
+        val prefs = PollScheduler.prefs(context)
+        if (!force && now - prefs.getLong(KEY_TRY, 0L) in 0 until RETRY_MS) return false
+        prefs.edit().putLong(KEY_TRY, now).apply()
         val staged = java.io.File(context.cacheDir, "backup-staging.csv.gz")
         return try {
             GZIPOutputStream(staged.outputStream()).bufferedWriter().use(store::exportCsv)

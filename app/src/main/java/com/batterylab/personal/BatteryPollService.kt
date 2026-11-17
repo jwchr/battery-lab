@@ -102,13 +102,14 @@ class BatteryPollService : JobService() {
                 refreshCapabilitiesIfDue(store)
                 // Phone-side only: writes the backup file (at most every 12 h); the Drive app uploads it.
                 if (!stopped) DriveBackup.maybeBackup(this, store)
-            } catch (e: Exception) {
-                store.logProbe("job", "Background work failed: ${e.javaClass.simpleName}")
+            } catch (e: Throwable) {
+                // Throwable, not Exception: an Error here would kill the single io thread's process.
+                try { store.logProbe("job", "Background work failed: ${e.javaClass.simpleName}") } catch (_: Throwable) { }
             }
             try {
                 Overhead.logPoll(this, store, android.os.SystemClock.elapsedRealtime() - startedMs,
                     android.os.Process.getElapsedCpuTime() - startedCpu)
-            } catch (_: Exception) { }
+            } catch (_: Throwable) { }
             Background.onMain { readRingOrFinish(params, store) }
         }
         return true
@@ -125,9 +126,12 @@ class BatteryPollService : JobService() {
         reader = RingReader(applicationContext, address) { reading, error ->
             reader = null
             Background.io.execute {
-                Overhead.logBle(store, android.os.SystemClock.elapsedRealtime() - bleStart, reading != null)
-                if (reading != null) store.append(reading)
-                if (error != null) store.logProbe(BatteryStore.RING_ID, error)
+                try {
+                    Overhead.logBle(store, android.os.SystemClock.elapsedRealtime() - bleStart, reading != null)
+                    if (reading != null) store.append(reading)
+                    if (error != null) store.logProbe(BatteryStore.RING_ID, error)
+                } catch (_: Throwable) { }
+                // Always finish, or the job holds its wakelock until the system stops it.
                 Background.onMain { if (!stopped) jobFinished(params, false) }
             }
         }.also { it.start() }

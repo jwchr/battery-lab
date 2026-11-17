@@ -45,8 +45,70 @@ class StatsActivity : StyledActivity() {
         super.onDestroy()
     }
 
+    /** Everything the page needs from the database and the heavy math, computed off the main thread. */
+    private class Loaded(
+        val devices: List<Triple<String, String, Int>>,
+        val data: List<List<Reading>>,
+        val gaps: GapLimits,
+        val stats: List<DeviceStats>,
+        val capacity: CapacityEstimate,
+        val usage: UsageWindow?,
+        val idle: List<IdleStretch>,
+        val phoneWidget: List<Reading>,
+    )
+
+    private var renderGeneration = 0
+
+    /**
+     * Audit #4 A6: loading every reading and running the stats math used to block the main thread,
+     * which grows with history. It now runs on [Background.io]; only view building stays here.
+     * A newer render (resume, journal edit) supersedes an older one still loading.
+     */
     private fun render() {
-        body.removeAllViews()
+        val generation = ++renderGeneration
+        if (body.childCount == 0) {
+            renderTitle()
+            body.addView(label("Crunching your history…", 13f, Palette.quiet).apply { setPadding(dp(6), dp(4), dp(6), 0) })
+        }
+        Background.io.execute {
+            val started = android.os.SystemClock.elapsedRealtime()
+            val loaded = try { load() } catch (e: Exception) {
+                android.util.Log.w(TAG, "Stats load failed", e); null
+            }
+            val loadMs = android.os.SystemClock.elapsedRealtime() - started
+            Background.onMain {
+                if (isDestroyed || generation != renderGeneration) return@onMain
+                val shown = android.os.SystemClock.elapsedRealtime()
+                if (loaded == null) {
+                    body.removeAllViews(); renderTitle()
+                    body.addView(label("Couldn't read the stored history. Try again in a moment.", 13f, Palette.quiet))
+                    return@onMain
+                }
+                show(loaded)
+                android.util.Log.i(TAG, "Stats: ${loaded.data.sumOf { it.size }} readings, load ${loadMs} ms (background), " +
+                    "views ${android.os.SystemClock.elapsedRealtime() - shown} ms (main)")
+            }
+        }
+    }
+
+    private fun load(): Loaded {
+        val ringId = PollScheduler.ringDeviceId(this)
+        val watchId = store.deviceIds().filter { it.startsWith("watch:") }.maxByOrNull { store.latest(it)?.timeMs ?: 0L }
+        val devices = listOf(Triple("phone", "Phone", Palette.phone),
+            Triple(watchId ?: "watch:unknown", "Galaxy Watch8", Palette.watch), Triple(ringId, "Galaxy Ring", Palette.ring))
+        val hourOf = { ms: Long -> Calendar.getInstance().apply { timeInMillis = ms }.get(Calendar.HOUR_OF_DAY) }
+        val data = devices.map { (id, _, _) -> BatteryStats.fullHoldAsCharging(store.since(id, 0L)) }
+        val gaps = PollScheduler.gapLimits(this)
+        val stats = data.map { BatteryStats.device(it, hourOf, gaps) }
+        val phone = data[0]
+        val capacity = HonestyAuditor.estimatePhoneCapacity(phone, gaps)
+        val now = System.currentTimeMillis()
+        val usage = if (UsageSource.granted(this)) UsageSource.load(this, now - 7 * 86_400_000L, now) else null
+        val idle = IdleAnalysis.stretches(phone, usage?.screenOn, gaps = gaps)
+        return Loaded(devices, data, gaps, stats, capacity, usage, idle, store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L))
+    }
+
+    private fun renderTitle() {
         body.addView(TextView(this).apply {
             text = "←  Back"
             textSize = 14f; typeface = medium; setTextColor(ink)
@@ -59,28 +121,21 @@ class StatsActivity : StyledActivity() {
             textSize = 28f; typeface = Typeface.create("sans-serif", Typeface.BOLD); letterSpacing = -0.02f
             setTextColor(ink); setPadding(dp(4), 0, 0, dp(14))
         })
+    }
 
-        val ringId = PollScheduler.ringDeviceId(this)
-        val watchId = store.deviceIds().filter { it.startsWith("watch:") }.maxByOrNull { store.latest(it)?.timeMs ?: 0L }
-        val devices = listOf(Triple("phone", "Phone", Palette.phone),
-            Triple(watchId ?: "watch:unknown", "Galaxy Watch8", Palette.watch), Triple(ringId, "Galaxy Ring", Palette.ring))
-        val hourOf = { ms: Long -> Calendar.getInstance().apply { timeInMillis = ms }.get(Calendar.HOUR_OF_DAY) }
-        val data = devices.map { (id, _, _) -> BatteryStats.fullHoldAsCharging(store.since(id, 0L)) }
-        val gaps = PollScheduler.gapLimits(this)
-        val stats = data.map { BatteryStats.device(it, hourOf, gaps) }
-        val phone = data[0]
-
-        val capacity = HonestyAuditor.estimatePhoneCapacity(phone, gaps)
-        val now = System.currentTimeMillis()
-        val usage = if (UsageSource.granted(this)) UsageSource.load(this, now - 7 * 86_400_000L, now) else null
-        val idle = IdleAnalysis.stretches(phone, usage?.screenOn, gaps = gaps)
+    private fun show(l: Loaded) {
+        val oldScroll = scroll.scrollY
+        body.removeAllViews()
+        renderTitle()
+        val devices = l.devices; val data = l.data; val gaps = l.gaps; val stats = l.stats
+        val capacity = l.capacity; val usage = l.usage; val idle = l.idle; val phone = data[0]
 
         renderPhoneHealth(phone, capacity)
         renderPlanner(devices, data, gaps)
         renderDrain(phone, gaps, usage, capacity.combinedMah)
         renderNights(idle)
         renderCharging(phone, gaps)
-        renderAudit(phone, store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), data[1], data[2], capacity, gaps)
+        renderAudit(phone, l.phoneWidget, data[1], data[2], capacity, gaps)
         renderForecasts()
         renderJournal(idle)
         renderHeat(phone, gaps)
@@ -95,6 +150,7 @@ class StatsActivity : StyledActivity() {
         renderCapabilities()
         body.addView(label("All numbers come from readings stored on this phone. Estimates, not lab measurements.",
             11.5f, Palette.body).apply { setPadding(dp(6), dp(4), dp(6), 0) })
+        scroll.post { scroll.scrollTo(0, oldScroll) }
     }
 
     /**
@@ -695,6 +751,7 @@ class StatsActivity : StyledActivity() {
     }
 
     private companion object {
+        const val TAG = "BatteryLabStats"
         /** Shown until the user sets their own rate; their rate lives only in the phone's settings. */
         const val DEFAULT_CENTS_PER_KWH = 18.0
         const val KEY_CENTS_PER_KWH = "cents_per_kwh"

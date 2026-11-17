@@ -55,7 +55,8 @@ class MainActivity : StyledActivity() {
             != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), REQUEST_BLUETOOTH)
         }
-        render()
+        // No render here: onResume always follows and renders with a fresh widget read. Rendering
+        // in both built the whole page twice on every open (~280 + ~115 ms on the main thread).
     }
 
     override fun onResume() {

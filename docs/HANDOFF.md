@@ -63,13 +63,13 @@ For the full table, see the triage comment on issue #4. That comment predates A1
 ```bash
 JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=/opt/homebrew/share/android-commandlinetools /opt/homebrew/opt/gradle@8/bin/gradle --no-daemon :app:assembleDebug :app:testDebugUnitTest :wear:assembleDebug
 ```
-88 unit tests pass as of this note. The repo's only workflow is manual (`workflow_dispatch`).
+92 unit tests pass as of this note. The repo's only workflow is manual (`workflow_dispatch`).
 
 ## Rules that still apply
 - **Not allowed:**
   - rooting
   - modifying, decompiling or analysing Samsung's apps
   - accessibility services
-  - unnecessary Ring BLE wakeups
+- **Ring Bluetooth connections** (owner's rule, reworded 2026-11-17): connect to the Ring only when the user starts something that needs it, such as monitoring they turned on, an A/B test they started, or a "connect now" button. Never connect on a background schedule by default. Listening for the Ring's own broadcasts (the locator) doesn't connect to it and is fine.
 - **Nothing identifying in commits, issues or PRs:** no serials, Bluetooth addresses, device names or raw readings. Use counts and trends.
 - **Keep the Ring protocol code and the A/B features.**

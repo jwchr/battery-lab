@@ -16,7 +16,11 @@ object PhoneBattery {
         if (level < 0 || scale <= 0) return null
         val percent = (level.toDouble() / scale * 100).toInt().coerceIn(0, 100)
         val state = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-        val charging = state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL
+        // Plugged in counts as on the charger even when the status says otherwise: Samsung's
+        // battery protection can hold the level (Adaptive mode pauses at 80% overnight), and that
+        // hold is not drain.
+        val charging = state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL ||
+            intent.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) > 0
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         val rawCharge = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
         // Int.MIN_VALUE / Long.MIN_VALUE mean "not supported"; a real 0 is kept as 0.

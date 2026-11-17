@@ -99,7 +99,7 @@ class BatteryPollService : JobService() {
                 snapshot.second?.let { store.logProbe(SamsungWidgetSource.SOURCE, "Widget read failed: ${it.javaClass.simpleName}: ${it.message}") }
                 // Database-only analysis: update journal, score/issue forecasts, refresh capabilities daily.
                 ContextWatcher.check(this, store)
-                ForecastKeeper.tick(this, store, listOf("phone", SamsungWidgetSource.WATCH_DEVICE, BatteryStore.RING_ID))
+                ForecastKeeper.tick(this, store, listOfNotNull("phone", store.primaryWatchId(), BatteryStore.RING_ID))
                 refreshCapabilitiesIfDue(store)
                 // Phone-side only: writes the backup file (at most every 12 h); the Drive app uploads it.
                 if (!stopped) DriveBackup.maybeBackup(this, store)

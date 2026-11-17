@@ -48,7 +48,7 @@ class MainActivity : StyledActivity() {
         super.onCreate(savedInstanceState)
         store = BatteryStore.get(this)
         pendingWidgetId = savedInstanceState?.getInt("pendingWidgetId", pendingWidgetId) ?: pendingWidgetId
-        PhoneBattery.read(this, "app")?.let(store::append)
+        if (savedInstanceState == null) PhoneBattery.read(this, "app")?.let(store::append)
         PollScheduler.schedule(this)
         Background.io.execute { CloudBackupAgent.importPending(applicationContext) }
 
@@ -112,8 +112,7 @@ class MainActivity : StyledActivity() {
 
         val ringAddress = PollScheduler.ringAddress(this)
         val ringId = PollScheduler.ringDeviceId(this)
-        val watchId = store.deviceIds().filter { it.startsWith("watch:") }
-            .maxByOrNull { store.latest(it)?.timeMs ?: 0L }
+        val watchId = store.primaryWatchId()
         val devices = listOf("phone" to "Phone", (watchId ?: "watch:unknown") to "Galaxy Watch8",
             ringId to "Galaxy Ring")
         if (!exempt) section("Heads up", "Background checks may pause for hours",
@@ -293,7 +292,7 @@ class MainActivity : StyledActivity() {
                 render()
             }
             addView(label("For Watch8 data, install the included Wear OS companion and open it once. " +
-                "Watch sampling is scheduled approximately every 30 minutes.", 12f, quiet))
+                "The optional watch app checks about every 2 hours, as a cross-check on Samsung's widget.", 12f, quiet))
         }
         mark("rest+lab tools"); logRender()
         scroll.post { scroll.scrollTo(0, oldScroll) }

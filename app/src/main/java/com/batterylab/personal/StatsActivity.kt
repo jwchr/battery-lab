@@ -56,12 +56,15 @@ class StatsActivity : StyledActivity() {
         val idle: List<IdleStretch>,
         val phoneWidget: List<Reading>,
         val drain: DrainPrep?,
+        val forecasts: List<Forecast>,
+        /** Watch-app readings, compared against the widget's in the audit. */
+        val watchCompanion: List<Reading>,
     )
 
     /** The drain breakdown and the app names it shows, prepared off the main thread. */
     private class DrainPrep(val recent: List<Reading>, val d: DrainBreakdown, val labels: Map<String, String>, val hidden: Int?)
 
-    private var renderGeneration = 0
+    @Volatile private var renderGeneration = 0
 
     override fun iconFor(eyebrow: String): String? = SECTION_ICONS[eyebrow]
 
@@ -77,6 +80,8 @@ class StatsActivity : StyledActivity() {
             body.addView(label("Crunching your history…", 13f, Palette.quiet).apply { setPadding(dp(6), dp(4), dp(6), 0) })
         }
         Background.io.execute {
+            // A newer render or a closed screen makes this load pointless; skip it before the work.
+            if (isDestroyed || generation != renderGeneration) return@execute
             val started = android.os.SystemClock.elapsedRealtime()
             val loaded = try { load() } catch (e: Exception) {
                 android.util.Log.w(TAG, "Stats load failed", e); null
@@ -99,7 +104,7 @@ class StatsActivity : StyledActivity() {
 
     private fun load(): Loaded {
         val ringId = PollScheduler.ringDeviceId(this)
-        val watchId = store.deviceIds().filter { it.startsWith("watch:") }.maxByOrNull { store.latest(it)?.timeMs ?: 0L }
+        val watchId = store.primaryWatchId()
         val devices = listOf(Triple("phone", "Phone", Palette.phone),
             Triple(watchId ?: "watch:unknown", "Galaxy Watch8", Palette.watch), Triple(ringId, "Galaxy Ring", Palette.ring))
         val hourOf = { ms: Long -> Calendar.getInstance().apply { timeInMillis = ms }.get(Calendar.HOUR_OF_DAY) }
@@ -121,7 +126,8 @@ class StatsActivity : StyledActivity() {
                 UsageSource.hiddenCount(this))
         }
         return Loaded(devices, data, gaps, stats, capacity, usage, idle,
-            store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain)
+            store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain, store.forecasts(),
+            if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList())
     }
 
     private fun renderTitle() {
@@ -156,8 +162,8 @@ class StatsActivity : StyledActivity() {
         timed("drain") { renderDrain(l.drain) }
         timed("nights") { renderNights(idle) }
         timed("charging") { renderCharging(phone, gaps) }
-        timed("audit") { renderAudit(phone, l.phoneWidget, data[1], data[2], capacity, gaps) }
-        timed("forecasts") { renderForecasts() }
+        timed("audit") { renderAudit(phone, l.phoneWidget, (data[1] + l.watchCompanion).sortedBy { it.timeMs }, data[2], capacity, gaps) }
+        timed("forecasts") { renderForecasts(l.forecasts, l.devices) }
         timed("journal") { renderJournal(idle) }
         timed("heat") { renderHeat(phone, gaps) }
         timed("numbers") { renderNumbers(devices, stats) }
@@ -192,7 +198,8 @@ class StatsActivity : StyledActivity() {
 
     private fun renderPhoneHealth(phone: List<Reading>, lab: CapacityEstimate) {
         val estimate = phoneCapacity(phone)
-        val capacity = lab.combinedMah ?: estimate?.first
+        // The recent (30-day) estimate first, so the headline and its caption describe one figure.
+        val capacity = estimate?.first ?: lab.combinedMah
         val spec = PhoneSpecs.forModel(Build.MODEL)
         val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val cycles = if (Build.VERSION.SDK_INT >= 34) sticky?.getIntExtra(BatteryManager.EXTRA_CYCLE_COUNT, -1)?.takeIf { it > 0 } else null
@@ -219,10 +226,11 @@ class StatsActivity : StyledActivity() {
                     if (spec != null) append(" (${fmt(spec.ratedMah)} mAh rated minimum).")
                     if (estimate != null) append("\nEstimated from Android's charge counter, ${shortWhen(estimate.second)}. " +
                         "A rough guide, not a measured health test.")
+                    else if (capacity != null) append("\nNo reading in the last 30 days; estimated from older charge-counter readings.")
                 }, 13f, Palette.body).apply { setPadding(dp(14), 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
             })
             val tiles = mutableListOf<Triple<String, String, String?>>()
-            if (cycles != null) tiles += Triple("$cycles", "charge cycles", "as counted by Android")
+            if (cycles != null) tiles += Triple("$cycles", if (cycles == 1) "charge cycle" else "charge cycles", "as counted by Android")
             sticky?.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY)?.let { tiles += Triple(it, "chemistry", null) }
             sticky?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)?.takeIf { it > 0 }?.let {
                 tiles += Triple(String.format(Locale.US, "%.2f V", it / 1000.0), "voltage now", null)
@@ -257,7 +265,7 @@ class StatsActivity : StyledActivity() {
                 addView(deviceBanner(name, color))
                 addTileList(listOfNotNull(
                     Tile(f1(s.fullBatteriesUsed), "full batteries used", "${s.percentUsed} points in all", "\uD83D\uDD0B"),
-                    Tile("${s.charges.size}", "charges spotted", null, "\uD83D\uDD0C"),
+                    Tile("${s.charges.size}", if (s.charges.size == 1) "charge spotted" else "charges spotted", null, "\uD83D\uDD0C"),
                     s.lowest?.let { Tile("${it.first}%", "lowest seen", "closest call · ${shortWhen(it.second)}", "\uD83E\uDEAB") },
                     Tile("${f1(s.longestOnBatteryHours)} h", "longest unplugged", null, "\u23F1\uFE0F"),
                 ))
@@ -288,8 +296,8 @@ class StatsActivity : StyledActivity() {
                 addView(deviceBanner(name, color))
                 addView(HourBars(this@StatsActivity, s.drainByHour, color), LinearLayout.LayoutParams(-1, dp(70)))
                 val hungry = s.hungriestHour; val calm = s.calmestHour
-                if (hungry != null && calm != null) addView(label("Hungriest at ${hourName(hungry)} (${f1(s.drainByHour[hungry]!!)}%/h) · " +
-                    "calmest at ${hourName(calm)} (${f1(s.drainByHour[calm]!!)}%/h)", 12f, Palette.quiet))
+                if (hungry != null && calm != null) addView(label("Hungriest at ${hourName(hungry)} (${f1(s.drainByHour[hungry]!!)}%/h)" +
+                    (if (calm != hungry) " · calmest at ${hourName(calm)} (${f1(s.drainByHour[calm]!!)}%/h)" else ""), 12f, Palette.quiet))
             }
         }
     }
@@ -391,12 +399,13 @@ class StatsActivity : StyledActivity() {
         val fullCharge = BatteryStats.wattHours(100, cap)
         section("What it costs", "${money(cents)} of electricity so far.",
             if (rateIsSet()) "At ${f1(rate)}\u00a2 per kWh, the rate you set." else
-                "At ${f1(rate)}\u00a2 per kWh, a rough US average. Set your own rate from your bill.").apply {
+                "At ${f1(rate)}\u00a2 per kWh, a rough US average. Set your own rate from your bill." +
+                    " Battery side only; charger losses add roughly 15\u201320% at the wall.").apply {
             addTileList(listOfNotNull(
                 Tile(money(fullCharge / 1000 * rate), "per full charge", "${f1(fullCharge)} Wh", "\uD83D\uDCB5"),
                 if (days >= 1.0) Tile(money(cents / days * 365), "a year at this pace", "for the phone", "\uD83D\uDCC6") else null,
-                Tile("${fmt(wh / 1000 / FRIDGE_KWH_PER_DAY * 24 * 60)} min", "of a fridge", "a typical fridge uses about 1.5 kWh a day", "\uD83E\uDDCA"),
-                Tile("${fmt(wh / EV_WH_PER_METER)} m", "in an electric car", "at about 300 Wh per mile", "\uD83D\uDE97"),
+                Tile(hoursOrMinutes(wh / 1000 / FRIDGE_KWH_PER_DAY * 24), "of a fridge", "a typical fridge uses about 1.5 kWh a day", "\uD83E\uDDCA"),
+                Tile(distance(wh / EV_WH_PER_METER), "in an electric car", "at about 300 Wh per mile", "\uD83D\uDE97"),
             ))
             addView(makeButton(if (rateIsSet()) "Change your rate" else "Set your rate") { askRate() },
                 LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
@@ -428,8 +437,8 @@ class StatsActivity : StyledActivity() {
             ))
             eyebrowRow("Muscle power")
             addTileList(listOf(
-                Tile("${fmt(wh * 3600 / (7 * G))} m", "bowling-ball lift", "how high it could lift a 7 kg ball", "\uD83C\uDFB3"),
-                Tile("${fmt(wh * 3600 / (CAR_KG * G))} m", "car lift", "raising a 1,500 kg car straight up", "\uD83D\uDE99"),
+                Tile(distance(wh * 3600 / (7 * G)), "bowling-ball lift", "how high it could lift a 7 kg ball", "\uD83C\uDFB3"),
+                Tile(distance(wh * 3600 / (CAR_KG * G)), "car lift", "raising a 1,500 kg car straight up", "\uD83D\uDE99"),
                 Tile(fmt(wh * 3600 / (PERSON_KG * G * FLOOR_M)), "flights of stairs", "a 75 kg person, 3 m a floor, pure lifting work", "\uD83E\uDE9C"),
                 Tile(f1(wh / BANANA_WH), "bananas", "of food energy, 105 Calories each", "\uD83C\uDF4C"),
             ))
@@ -473,8 +482,11 @@ class StatsActivity : StyledActivity() {
             addTileList(listOfNotNull(
                 Tile("$appsPct%", "used by apps on screen", "${f1(d.screenOnHours)} h of screen time", "\uD83D\uDCF2"),
                 Tile("${100 - appsPct}%", "idle drain", "what the phone uses on its own", "\uD83D\uDCA4"),
-                d.screenOnRate?.let { Tile("${f1(it)}%", "an hour, screen on", "about ${fmt(100 / it.coerceAtLeast(0.1))} h of use from full", "\u2600\uFE0F") },
-                d.screenOffRate?.let { Tile("${f1(it)}%", "an hour, screen off", "about ${fmt(100 / it.coerceAtLeast(0.1))} h asleep from full", "\uD83C\uDF19") },
+                d.screenOnRate?.let { Tile("${f1(it)}%", "an hour, screen on",
+                    if (it < 0.1) "barely any drain" else "about ${fmt(100 / it)} h of use from full", "\u2600\uFE0F") },
+                // This week's screen history; the "Asleep and idle" figure is over all quiet stretches, so they can differ.
+                d.screenOffRate?.let { Tile("${f1(it)}%", "an hour, screen off",
+                    if (it < 0.1) "barely any drain this week" else "this week · about ${fmt(100 / it)} h asleep from full", "\uD83C\uDF19") },
             ))
             val top = d.apps.take(8)
             val most = (top.firstOrNull()?.percent ?: 0.0).takeIf { it > 0 } ?: 1.0
@@ -532,13 +544,14 @@ class StatsActivity : StyledActivity() {
             })
             auditRow("E · Cycle counter", listOf(
                 "Android reports ${a.reportedCycleDelta?.toString() ?: "unknown"} new cycles",
-                "Charge counter says ${na(a.coulombThroughputCycles, "", 2)}; percent steps say ${na(a.pctPointThroughputCycles, "", 2)}"))
+                "Charge counter says ${na(a.coulombThroughputCycles, "", 2)}; measured percent steps say ${na(a.pctPointThroughputCycles, "", 2)}"))
             auditRow("F · Samsung widget vs. direct readings", listOf(
-                "Phone: ${a.phoneWidgetPairs} pairs, off by ${na(a.phoneWidgetMeanErrorPp, " pts")} on average" +
+                "Phone: ${a.phoneWidgetPairs} pairs, off by ${na(a.phoneWidgetMeanAbsErrorPp, " pts")} on average" +
+                    (a.phoneWidgetMeanErrorPp?.let { " (bias ${f1(it)})" } ?: "") +
                     (a.phoneWidgetMaxAbsErrorPp?.let { ", worst $it" } ?: "") +
                     (a.phoneWidgetLagMinutesP50?.let { ", lags ${fmt(it)} min" } ?: ""),
-                "Watch: ${a.watchWidgetVsCompanionPairs} pairs, ${na(a.watchWidgetMeanErrorPp, " pts")}",
-                "Ring: ${a.ringWidgetVsBlePairs} pairs, ${na(a.ringWidgetMeanErrorPp, " pts")}"))
+                "Watch: ${a.watchWidgetVsCompanionPairs} pairs, off by ${na(a.watchWidgetMeanAbsErrorPp, " pts")}",
+                "Ring: ${a.ringWidgetVsBlePairs} pairs, off by ${na(a.ringWidgetMeanAbsErrorPp, " pts")}"))
             evidence("Phone readings from Android's BatteryManager (percent, charge counter, voltage, current), " +
                     "the Samsung battery widget, the watch companion app and the Ring's own Bluetooth reports.",
                 "A: counter gained after 99% and the 100% plateau after unplugging. B: total counter drop ÷ total percent drop in each band. " +
@@ -550,19 +563,30 @@ class StatsActivity : StyledActivity() {
         }
     }
 
-    private fun renderForecasts() {
-        val all = store.forecasts()
-        val card = ForecastScoring.reportCard(all)
+    private fun renderForecasts(all: List<Forecast>, devices: List<Triple<String, String, Int>>) {
         val pending = all.count { it.status == "PENDING" }
-        val scored = card.sumOf { it.n }
+        // Graded per device: a slow-draining Ring is easy to predict and would flatter the phone's
+        // numbers, and Android only predicts the phone.
+        val byDevice = all.groupBy { it.device }.map { (id, list) ->
+            val name = devices.firstOrNull { it.first == id }?.second ?: when {
+                id.startsWith("watch") -> "Watch"; id.startsWith("ring") -> "Ring"; else -> "Phone"
+            }
+            Triple(id, name, ForecastScoring.reportCard(list))
+        }.sortedBy { if (it.first == "phone") 0 else 1 }
+        val scored = byDevice.sumOf { (_, _, card) -> card.sumOf { it.n } }
         section("Prediction report card", if (scored == 0) "Grading predictions…" else "How close each estimate came.",
             if (scored == 0) "Every hour Battery Lab freezes its own time-left estimate and Android's, then checks them 2, 4 and 8 hours later. " +
                 "$pending waiting to be graded." else null).apply {
-            for (h in card) {
-                if (h.n == 0 && h.androidN == 0) continue
-                addView(label("${h.hours} hours ahead", 13f, ink, bold = true).apply { setPadding(0, dp(10), 0, dp(2)) })
-                addView(label("Battery Lab: off by ${na(h.labMae, " pts")} (bias ${na(h.labBias, "")}, n=${h.n})\n" +
-                    "Android: off by ${na(h.androidMae, " pts")} (bias ${na(h.androidBias, "")}, n=${h.androidN})", 12.5f, Palette.body))
+            for ((_, name, card) in byDevice) {
+                if (card.all { it.n == 0 && it.androidN == 0 }) continue
+                addView(eyebrow(name).apply { setPadding(0, dp(12), 0, 0) })
+                for (h in card) {
+                    if (h.n == 0 && h.androidN == 0) continue
+                    addView(label("${h.hours} hours ahead", 13f, ink, bold = true).apply { setPadding(0, dp(6), 0, dp(2)) })
+                    addView(label("Battery Lab: off by ${na(h.labMae, " pts")} (bias ${na(h.labBias, "")}, n=${h.n})" +
+                        (if (h.androidN > 0) "\nAndroid: off by ${na(h.androidMae, " pts")} (bias ${na(h.androidBias, "")}, n=${h.androidN})" else ""),
+                        12.5f, Palette.body))
+                }
             }
             evidence("Forecasts stored on this phone, frozen when made, model ${ForecastScoring.MODEL_VERSION}.",
                 "Error = predicted % − actual % at each horizon, interpolated between the readings around it. " +
@@ -594,7 +618,7 @@ class StatsActivity : StyledActivity() {
             }
             evidence("Phone readings while Android said it was charging, with the plug type it reported.",
                 "For each charge: time between first reaching each band's start and end. Median per band and plug type. " +
-                    "Top-up = 30 ÷ median 20→50% minutes × 15.",
+                    "Top-up walks the median 20→50, 50→80 and 80→100% band times in order for 15 minutes.",
                 "${charges.size} observed charges. Charges with gaps over the polling allowance are skipped.")
         }
     }
@@ -605,7 +629,7 @@ class StatsActivity : StyledActivity() {
             section("Asleep and idle", "Collecting…", "Needs at least 4 hours with the screen off and the phone unplugged.")
             return
         }
-        section("Asleep and idle", rep.medianRate?.let { "Typically ${f1(it)}% an hour with the screen off." } ?: "Idle drain").apply {
+        section("Asleep and idle", rep.medianRate?.let { "Typically ${f1(it)}% an hour with the screen off, across every quiet stretch so far." } ?: "Idle drain").apply {
             val best = stretches.minByOrNull { it.rate }!!
             val worst = stretches.maxByOrNull { it.rate }!!
             addTiles(listOf(
@@ -704,7 +728,7 @@ class StatsActivity : StyledActivity() {
             addView(row(cell("", null), *HeatExposure.CHARGE_BANDS.map { cell(it, null, true) }.toTypedArray()))
             HeatExposure.TEMP_BANDS.forEachIndexed { t, name ->
                 addView(row(cell(name, null, true), *m[t].map { h ->
-                    cell(if (h <= 0) "–" else "${f1(h)} h", (25 + 200 * h / most).toInt())
+                    cell(if (h <= 0) "–" else if (h < 0.1) "<0.1 h" else "${f1(h)} h", (25 + 200 * h / most).toInt())
                 }.toTypedArray()))
             }
             evidence("Phone temperature and percent from Android's BatteryManager.",
@@ -961,7 +985,11 @@ class StatsActivity : StyledActivity() {
 
     private fun fmt(v: Double) = String.format(Locale.getDefault(), "%,d", v.roundToInt())
     private fun pctOf(part: Double, whole: Double) = if (whole <= 0) 0 else (part / whole * 100).roundToInt()
-    private fun shortWhen(ms: Long) = java.text.SimpleDateFormat("EEE h:mm a", Locale.getDefault()).format(Date(ms))
+    /** Weekday and time for the past week; older events get their date, or "Tue 3:15 PM" could be months ago. */
+    private fun shortWhen(ms: Long) = java.text.SimpleDateFormat(
+        if (System.currentTimeMillis() - ms > 6 * 86_400_000L) "MMM d, h:mm a" else "EEE h:mm a", Locale.getDefault()).format(Date(ms))
+    private fun distance(m: Double) = if (m >= 1000) "${f1(m / 1000)} km" else "${fmt(m)} m"
+    private fun hoursOrMinutes(h: Double) = if (h < 1.5) "${fmt(h * 60)} min" else durationHours(h)
     private fun hourName(h: Int) = when (h) { 0 -> "midnight"; 12 -> "noon"; in 1..11 -> "$h AM"; else -> "${h - 12} PM" }
 }
 

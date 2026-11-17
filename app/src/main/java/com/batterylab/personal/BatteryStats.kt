@@ -103,7 +103,8 @@ object BatteryStats {
                     if (prev.percent < 20) below20 += h
                     if (prev.percent == 100 && prevCharging) at100 += h
                     if (prevCharging) charging += h else onBattery += h
-                    if (!prevCharging && !isCharging && h > 0) {
+                    // Rising steps (a wobble's up-leg, an unseen charge) aren't drain time.
+                    if (!prevCharging && !isCharging && h > 0 && cur.percent <= prev.percent) {
                         // Share the drop across the clock hours the interval spans, by time in each.
                         var t = prev.timeMs
                         while (t < cur.timeMs) {
@@ -117,7 +118,8 @@ object BatteryStats {
                 }
                 // Charges: watched (charging flag) or inferred (a jump up of more than 2 points).
                 if (isCharging && !prevCharging) { closeCharge(); chargeStart = prev; chargePeak = cur }
-                else if (isCharging) { if (cur.percent >= (chargePeak?.percent ?: -1)) chargePeak = cur }
+                // ">" not ">=": time parked at the peak afterwards isn't charging speed.
+                else if (isCharging) { if (cur.percent > (chargePeak?.percent ?: -1)) chargePeak = cur }
                 else if (prevCharging) closeCharge()
                 else if (cur.percent > prev.percent + 2) charges += ChargeSession(prev.timeMs, cur.timeMs, prev.percent, cur.percent, observed = false)
                 // Longest unbroken time on battery: ends at a charge, a jump up, or a gap.

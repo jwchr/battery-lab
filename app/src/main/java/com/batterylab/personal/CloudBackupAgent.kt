@@ -77,12 +77,14 @@ class CloudBackupAgent : BackupAgent() {
                 if (tries >= MAX_TRIES) store.logProbe("backup", "Cloud restore gave up after $tries tries")
                 return
             }
-            marker.writeText((tries + 1).toString())
+            // Only a failure counts as a try: a process killed mid-import keeps its committed
+            // progress and simply carries on next time.
             try {
                 val (readings, experiments) = GZIPInputStream(file.inputStream()).bufferedReader().use(store::importCsv)
                 marker.delete()
                 store.logProbe("backup", "Cloud restore imported $readings readings, $experiments experiments")
             } catch (e: Throwable) {
+                marker.writeText((tries + 1).toString())
                 store.logProbe("backup", "Cloud restore failed: ${e.javaClass.simpleName}")
             }
         }

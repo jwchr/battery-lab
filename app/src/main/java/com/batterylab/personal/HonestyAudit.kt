@@ -60,7 +60,11 @@ data class HonestyAudit(
     val watchWidgetVsCompanionPairs: Int,
     val watchWidgetMeanErrorPp: Double?,
     val ringWidgetVsBlePairs: Int,
-    val ringWidgetMeanErrorPp: Double?
+    val ringWidgetMeanErrorPp: Double?,
+    /** Average size of the widget's difference, ignoring sign (the signed means above are bias). */
+    val phoneWidgetMeanAbsErrorPp: Double? = null,
+    val watchWidgetMeanAbsErrorPp: Double? = null,
+    val ringWidgetMeanAbsErrorPp: Double? = null
 )
 
 object HonestyAuditor {
@@ -262,7 +266,10 @@ object HonestyAuditor {
             watchWidgetVsCompanionPairs = watchPairs.size,
             watchWidgetMeanErrorPp = watchPairs.takeIf { it.isNotEmpty() }?.map { it.toDouble() }?.average(),
             ringWidgetVsBlePairs = ringPairs.size,
-            ringWidgetMeanErrorPp = ringPairs.takeIf { it.isNotEmpty() }?.map { it.toDouble() }?.average()
+            ringWidgetMeanErrorPp = ringPairs.takeIf { it.isNotEmpty() }?.map { it.toDouble() }?.average(),
+            phoneWidgetMeanAbsErrorPp = phonePairs.takeIf { it.isNotEmpty() }?.map { abs(it).toDouble() }?.average(),
+            watchWidgetMeanAbsErrorPp = watchPairs.takeIf { it.isNotEmpty() }?.map { abs(it).toDouble() }?.average(),
+            ringWidgetMeanAbsErrorPp = ringPairs.takeIf { it.isNotEmpty() }?.map { abs(it).toDouble() }?.average()
         )
     }
 

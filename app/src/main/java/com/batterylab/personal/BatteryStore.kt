@@ -300,6 +300,24 @@ class BatteryStore private constructor(context: Context) :
      * watch-app reading is dropped, since the watch app measured it directly. Each source's own
      * rows stay separate in the database for the widget-lag scorecard.
      */
+    /**
+     * The one Watch history the screens and forecasts use: Samsung's widget when it has ever
+     * reported, else the watch app. Picking whichever id wrote last made the Watch card and its
+     * stats flip between two separate histories from one check to the next.
+     */
+    fun primaryWatchId(): String? {
+        val ids = deviceIds().filter { it.startsWith("watch:") }
+        return if (SamsungWidgetSource.WATCH_DEVICE in ids) SamsungWidgetSource.WATCH_DEVICE else ids.firstOrNull()
+    }
+
+    /** Watch-app readings kept beside the widget's, for the audit's widget-vs-watch comparison. */
+    fun companionWatchReadings(fromMs: Long): List<Reading> =
+        deviceIds().filter { it.startsWith("watch:") && it != SamsungWidgetSource.WATCH_DEVICE }.flatMap { since(it, fromMs) }
+
+    fun has(device: String, source: String, timeMs: Long): Boolean =
+        readableDatabase.rawQuery("SELECT 1 FROM readings WHERE device=? AND source=? AND time_ms=? LIMIT 1",
+            arrayOf(device, source, timeMs.toString())).use { it.moveToFirst() }
+
     fun mergedWatchReadings(fromMs: Long): List<Reading> {
         val ids = deviceIds().filter { it.startsWith("watch:") }
         return mergeWatch(ids.flatMap { since(it, fromMs) })
@@ -336,7 +354,8 @@ class BatteryStore private constructor(context: Context) :
         return Reading(c.getString(c.getColumnIndexOrThrow("device")),
             c.getLong(c.getColumnIndexOrThrow("time_ms")),
             c.getInt(c.getColumnIndexOrThrow("percent")),
-            int("charging")?.let { it == 1 },
+            // Plugged in counts as on the charger, for old readings too (see PhoneBattery.read).
+            int("charging")?.let { it == 1 || (detail?.plugged ?: 0) > 0 },
             c.getString(c.getColumnIndexOrThrow("source")),
             int("temp_tenths_c"), int("voltage_mv"), int("remaining_uah"), detail)
     }
@@ -625,8 +644,9 @@ class BatteryStore private constructor(context: Context) :
                             }
                         }
                         db.insertOrThrow("readings", null, v); added++
-                        // A long restore shouldn't lock out the 15-minute job.
-                        if (added % 2000 == 0) db.yieldIfContendedSafely()
+                        // Commit in chunks: a long restore doesn't lock out the 15-minute job, and if
+                        // the process dies part way, what was imported stays (the import skips it next time).
+                        if (added % 2000 == 0) { db.setTransactionSuccessful(); db.endTransaction(); db.beginTransaction() }
                     }
                     "experiment" -> {
                         val mode = get("mode_or_source") ?: continue

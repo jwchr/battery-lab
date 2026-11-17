@@ -16,14 +16,19 @@ import com.google.android.gms.wearable.Wearable
 /** Samples locally, then sends an update via the Wear OS Data Layer. No phone polling. */
 object WatchReporter {
     private const val JOB_ID = 44008
-    private const val THIRTY_MINUTES = 30L * 60L * 1000L
+    /**
+     * Every 2 hours. The watch app only cross-checks Samsung's widget, and about 12 samples a day
+     * (roughly 8 that land within 5 minutes of a widget read) is plenty for that; every 30 minutes
+     * cost the watch four times the wakeups and Bluetooth syncs for no better answer.
+     */
+    private const val INTERVAL_MS = 2 * 60L * 60L * 1000L
     fun schedule(context: Context) {
         val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
-        // Rescheduling restarts the 30-minute clock, so opening the app often would delay every read.
-        if (scheduler.getPendingJob(JOB_ID)?.intervalMillis == THIRTY_MINUTES) return
+        // Rescheduling restarts the 2-hour clock, so opening the app often would delay every read.
+        if (scheduler.getPendingJob(JOB_ID)?.intervalMillis == INTERVAL_MS) return
         scheduler.schedule(
             JobInfo.Builder(JOB_ID, ComponentName(context, WatchBatteryJob::class.java))
-                .setPeriodic(THIRTY_MINUTES)
+                .setPeriodic(INTERVAL_MS)
                 .setPersisted(true)
                 .build())
     }
@@ -47,8 +52,11 @@ object WatchReporter {
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val state = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
         val charging = state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL
-        val request = PutDataMapRequest.create("/batterylab/watch").apply {
-            dataMap.putLong("time_ms", System.currentTimeMillis())
+        // One item per sample: with a single shared path, every sample taken while the phone was
+        // out of range overwrote the last, and only the newest ever reached it.
+        val now = System.currentTimeMillis()
+        val request = PutDataMapRequest.create("/batterylab/watch/$now").apply {
+            dataMap.putLong("time_ms", now)
             dataMap.putInt("percent", percent)
             dataMap.putBoolean("charging", charging)
             dataMap.putString("model", Build.MODEL)

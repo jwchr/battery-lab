@@ -136,6 +136,8 @@ object ContextWatcher {
             Triple("app", "app_update", packageVersion(context, context.packageName)),
             Triple("samsung_widget", "app_update", packageVersion(context, SAMSUNG_WIDGET_PKG))
         )
+        // One write per check instead of one per key: this runs every 15 minutes.
+        val edit = prefs.edit()
         for ((key, category, value) in versions) {
             if (value == null) continue
             val stored = prefs.getString("ctx_version_$key", null)
@@ -149,8 +151,9 @@ object ContextWatcher {
                 store.addJournal("phone", category, title, now, lastSeen.takeIf { it > 0 },
                     JSONObject().put("from", stored).put("to", value).toString())
             }
-            prefs.edit().putString("ctx_version_$key", value).putLong("ctx_seen_$key", now).apply()
+            edit.putString("ctx_version_$key", value).putLong("ctx_seen_$key", now)
         }
+        edit.apply()
     }
 
     private fun packageVersion(context: Context, pkg: String): String? = try {

@@ -37,7 +37,9 @@ object ChargeCurves {
             run = mutableListOf()
         }
         for (x in r) {
-            if (x.charging != true) { close(); continue }
+            // A plugged-in hold (status NOT_CHARGING = 4, e.g. Samsung's battery protection pausing
+            // at 80%) ends the timed charge: hours of holding aren't charging speed.
+            if (x.charging != true || x.detail?.status == 4) { close(); continue }
             if (run.isNotEmpty() && x.timeMs - run.last().timeMs > gaps.stepMs) close()
             run += x
         }
@@ -291,9 +293,10 @@ object ForecastScoring {
             val prev = before.lastOrNull { target - it.timeMs <= 30 * 60_000L }
             // The first reading at or after the horizon, and only if no charge came before it:
             // skipping a charging reading would score the forecast against a topped-up value.
-            val next = r.firstOrNull { it.timeMs >= target }?.takeIf {
-                it.timeMs - target <= 30 * 60_000L && it.charging != true && (prev == null || it.percent <= prev.percent + 2)
-            }
+            val after = r.firstOrNull { it.timeMs >= target }?.takeIf { it.timeMs - target <= 30 * 60_000L }
+            val next = after?.takeIf { it.charging != true && (prev == null || it.percent <= prev.percent + 2) }
+            // A charge right after the horizon censors it as charged, not as a gap.
+            if (after != null && next == null) { charged = true; break }
             actual[i] = when {
                 prev != null && next != null && next.timeMs > prev.timeMs ->
                     prev.percent + (next.percent - prev.percent) * (target - prev.timeMs).toDouble() / (next.timeMs - prev.timeMs)

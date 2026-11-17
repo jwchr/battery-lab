@@ -747,7 +747,9 @@ class StatsActivity : StyledActivity() {
             "Battery Lab notes software updates by itself. Add your own changes so their effect on idle drain can be checked.").apply {
             if (entries.isEmpty()) addView(label("Nothing yet.", 12.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
             entries.take(12).forEach { e ->
-                val verdict = if (e.category == "note") null else UpdateImpactAnalysis.assess(e, stretches).let { im ->
+                val verdict = if (e.category == "note") null
+                else if (!UpdateImpactAnalysis.measures(e)) "Effect not measured: only the phone's idle drain is analysed so far."
+                else UpdateImpactAnalysis.assess(e, stretches).let { im ->
                     val d = im.delta
                     when {
                         im.strength == null || d == null -> "Needs 3 idle stretches before and after (${im.before.size} / ${im.after.size})."

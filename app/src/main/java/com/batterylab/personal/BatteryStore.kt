@@ -606,21 +606,21 @@ class BatteryStore private constructor(context: Context) :
      */
     fun importCsv(input: Reader): Pair<Int, Int> {
         val lines = input.buffered()
-        val head = CsvCodec.parseLine(lines.readLine() ?: return 0 to 0)
+        val head = CsvCodec.parseLine(CsvCodec.readRecord(lines) ?: return 0 to 0)
         val col = head.withIndex().associate { (i, n) -> n to i }
         require("kind" in col && "timestamp_utc" in col && "percentage" in col) { "Not a Battery Lab export" }
         val existing = HashSet<String>()
         readableDatabase.rawQuery("SELECT device, source, time_ms FROM readings", null).use { c ->
             while (c.moveToNext()) existing += "${c.getString(0)}|${c.getString(1)}|${c.getLong(2)}"
         }
-        val existingExp = experiments(100_000).map { "${it.device}|${it.mode}|${it.startMs}" }.toHashSet()
+        val existingExp = experiments(100_000).associateBy { "${it.device}|${it.mode}|${it.startMs}" }.toMutableMap()
         var added = 0; var addedExp = 0
         val parseTime = CsvCodec.utcParser()
         val db = writableDatabase
         db.beginTransaction()
         try {
             while (true) {
-                val line = lines.readLine() ?: break
+                val line = CsvCodec.readRecord(lines) ?: break
                 if (line.isBlank()) continue
                 val f = CsvCodec.parseLine(line)
                 fun get(name: String): String? = col[name]?.let { f.getOrNull(it) }?.takeIf { it.isNotEmpty() }
@@ -650,12 +650,24 @@ class BatteryStore private constructor(context: Context) :
                     }
                     "experiment" -> {
                         val mode = get("mode_or_source") ?: continue
-                        if (!existingExp.add("$device|$mode|$time")) continue
-                        db.insertOrThrow("experiments", null, ContentValues().apply {
+                        val endMs = get("end_timestamp_utc")?.let(parseTime)
+                        val endPct = get("end_percentage")?.toIntOrNull()?.takeIf { it in 0..100 }
+                        val known = existingExp["$device|$mode|$time"]
+                        if (known != null) {
+                            // A later backup can finish a test that was restored while still running.
+                            if (ExperimentEndpoint.importCompletes(known.endMs, time, endMs, endPct)) {
+                                db.update("experiments", ContentValues().apply { put("end_ms", endMs); put("end_pct", endPct) },
+                                    "id = ? AND end_ms IS NULL", arrayOf(known.id.toString()))
+                                existingExp["$device|$mode|$time"] = known.copy(endMs = endMs, endPct = endPct); addedExp++
+                            }
+                            continue
+                        }
+                        val id = db.insertOrThrow("experiments", null, ContentValues().apply {
                             put("device", device); put("mode", mode); put("start_ms", time); put("start_pct", pct)
-                            get("end_timestamp_utc")?.let(parseTime)?.let { put("end_ms", it) }
-                            get("end_percentage")?.toIntOrNull()?.let { put("end_pct", it) }
+                            endMs?.let { put("end_ms", it) }
+                            endPct?.let { put("end_pct", it) }
                         }); addedExp++
+                        existingExp["$device|$mode|$time"] = Experiment(id, device, mode, time, pct, endMs, endPct)
                     }
                 }
             }
@@ -710,7 +722,8 @@ class BatteryStore private constructor(context: Context) :
 /** CSV helpers shared by export and restore; pure so they can be tested. */
 object CsvCodec {
     fun quote(value: String): String {
-        val safe = if (value.isNotEmpty() && value[0] in "=+-@\t\r") "'$value" else value
+        // A leading apostrophe is escaped too, so a real "'=x" survives the round trip.
+        val safe = if (value.isNotEmpty() && value[0] in DEFUSE) "'$value" else value
         return "\"${safe.replace("\"", "\"\"")}\""
     }
 
@@ -734,7 +747,22 @@ object CsvCodec {
     }
 
     private fun finish(v: String, wasQuoted: Boolean) =
-        if (wasQuoted && v.length >= 2 && v[0] == '\'' && v[1] in "=+-@\t\r") v.substring(1) else v
+        if (wasQuoted && v.length >= 2 && v[0] == '\'' && v[1] in DEFUSE) v.substring(1) else v
+
+    private const val DEFUSE = "=+-@\t\r'"
+
+    /** One CSV record, which may span lines when a quoted value holds a newline; null at the end. */
+    fun readRecord(reader: java.io.BufferedReader): String? {
+        val first = reader.readLine() ?: return null
+        if (first.count { it == '"' } % 2 == 0) return first
+        val sb = StringBuilder(first)
+        var quotes = first.count { it == '"' }
+        while (quotes % 2 == 1) {
+            val next = reader.readLine() ?: break
+            sb.append('\n').append(next); quotes += next.count { it == '"' }
+        }
+        return sb.toString()
+    }
 
     fun parseUtc(s: String): Long? = utcParser()(s)
 

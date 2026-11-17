@@ -73,8 +73,16 @@ Android's `ACTION_APPWIDGET_BIND` dialog.
   its last value.
 - **Background reads need the app exempt from battery optimization.** See the soak test below.
   The app shows a warning with a shortcut to App info when it is not exempt.
-- **Charging is inferred** from the presence of a second icon in the slot. This was validated
-  for the phone slot only.
+- **Charging is inferred** from the presence of a second icon in the slot. First validated
+  for the phone slot. Checked for the Ring and Watch on 2026-11-16 against three days of
+  history (audit #4 A2, `tools/soak_report.sh`). It counts pairs of consecutive widget
+  readings at most 40 minutes apart:
+  - Pairs flagged charging always rose: Ring 9 of 9, Watch 23 of 23.
+  - Unflagged pairs almost never rose: Ring 2 of 317, Watch 0 of 282. Both Ring cases fit a
+    charge that began between polls.
+  - Samsung drops the bolt at 100% while the wearable is still on the charger. `BatteryStats`
+    already accounts for this.
+  The inference is kept for all three devices. Re-run that report section after a Samsung update.
 - **Samsung can change the widget layout in an update.** Parsing keys on the
   `arc_progress` / `list_progress_fg` ids and numeric text. If those disappear, the source
   logs a probe event and records nothing; it does not record guesses.

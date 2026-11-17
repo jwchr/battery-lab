@@ -31,7 +31,8 @@ data class WidgetSlot(
     val icon: Bitmap?
 )
 
-data class WidgetSnapshot(val timeMs: Long, val slots: List<WidgetSlot>)
+data class WidgetSnapshot(val timeMs: Long, val slots: List<WidgetSlot>,
+    val elapsedMs: Long = android.os.SystemClock.elapsedRealtime())
 
 /**
  * Reads battery percentages that Samsung's own Battery widget already displays.
@@ -53,6 +54,11 @@ object SamsungWidgetSource {
     const val HOST_ID = 0x424C
     const val SOURCE = "samsung_widget"
     const val WATCH_DEVICE = "watch:samsung_widget"
+    /**
+     * Samsung's own number for this phone, kept as a separate series only to compare against
+     * Android's reading. Never used for the phone's capacity, drain or charging stats.
+     */
+    const val PHONE_WIDGET_DEVICE = "phone:samsung_widget"
 
     const val LABEL_RING = "ring"
     const val LABEL_WATCH = "watch"
@@ -62,6 +68,7 @@ object SamsungWidgetSource {
     private const val KEY_WIDGET_ID = "samsung_widget_id"
     private const val KEY_LABELS = "samsung_widget_labels"
     private const val KEY_LAST_UNMATCHED = "samsung_widget_last_unmatched"
+    private const val KEY_LAST_MISSING = "samsung_widget_last_missing"
     private const val WIDTH_DP = 267f   // 4x2 size the Samsung launcher reports on the test phone
     private const val HEIGHT_DP = 173f
     private const val MATCH_DISTANCE = 64 // of 512 fingerprint bits
@@ -111,7 +118,7 @@ object SamsungWidgetSource {
      * Inflates the latest views Android holds for our hosted widget, offscreen.
      * Must run on the main thread. Returns null if no widget is bound.
      */
-    fun snapshot(context: Context): WidgetSnapshot? {
+    fun snapshot(context: Context, includeIcons: Boolean = true): WidgetSnapshot? {
         val id = widgetId(context) ?: return null
         val manager = AppWidgetManager.getInstance(context)
         val info = manager.getAppWidgetInfo(id) ?: return null
@@ -125,25 +132,41 @@ object SamsungWidgetSource {
                 View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY))
             view.layout(0, 0, w, h)
         }
-        return WidgetSnapshot(System.currentTimeMillis(), parse(view))
+        return WidgetSnapshot(System.currentTimeMillis(), parse(view, includeIcons))
     }
 
     /** Stores labeled Ring/Watch slots as readings. Phone slots are never stored (Android is authoritative). */
-    fun record(context: Context, store: BatteryStore, snapshot: WidgetSnapshot): List<Reading> {
+    // Synchronized: the screen and the background check both save widget reads, and each checks
+    // the last reading before inserting; unsynchronized, both could insert the same value.
+    @Synchronized
+    fun record(context: Context, store: BatteryStore, snapshot: WidgetSnapshot, trigger: String = "job"): List<Reading> {
         val saved = mutableListOf<Reading>()
         val seen = mutableSetOf<String>()
         val unmatched = mutableListOf<String>()
-        for (slot in snapshot.slots) {
-            val label = labelFor(context, slot.fingerprint)
+        val clock = ReadingDetail.clock(context, trigger).copy(elapsedMs = snapshot.elapsedMs)
+        recognizePhoneSlot(context, store, snapshot)
+        // Each label goes to its closest slot only. Two slots matching one label (two watches, or a
+        // Buds icon close to the Ring's) would otherwise save two values for one device at once.
+        val matches = snapshot.slots.map { match(context, it.fingerprint) }
+        val owner = matches.withIndex().filter { it.value != null }
+            .groupBy { it.value!!.first }.mapValues { (_, v) -> v.minByOrNull { it.value!!.second }!!.index }
+        for ((i, slot) in snapshot.slots.withIndex()) {
+            val m = matches[i]
+            val label = m?.first?.takeIf { owner[it] == i }
             if (label == null) {
-                unmatched += "${slot.index}:${if (slot.fingerprint == null) "unreadable" else "unrecognized"}"
+                unmatched += "${slot.index}:${when { slot.fingerprint == null -> "unreadable"; m != null -> "duplicate"; else -> "unrecognized" }}"
             } else seen += label
             val device = when (label) {
                 LABEL_RING -> PollScheduler.ringDeviceId(context)
                 LABEL_WATCH -> WATCH_DEVICE
+                LABEL_PHONE -> PHONE_WIDGET_DEVICE
                 else -> null
             } ?: continue
-            val reading = Reading(device, snapshot.timeMs, slot.percent, slot.chargingIcon, SOURCE)
+            // Keep the progress arc's own value next to the number shown, and flag loose icon matches.
+            val loose = (m?.second ?: 0) > MATCH_DISTANCE * 3 / 4
+            val reading = Reading(device, snapshot.timeMs, slot.percent, slot.chargingIcon, SOURCE,
+                detail = clock.copy(rawExtra = slot.progress?.let { "arc_progress=$it" },
+                    qualityFlags = if (loose) QualityFlags.AMBIGUOUS_WIDGET_SLOT else null))
             val last = store.latest(device)
             if (last != null && last.source == SOURCE && last.percent == reading.percent &&
                 last.charging == reading.charging && reading.timeMs - last.timeMs < DUPLICATE_WINDOW_MS) {
@@ -163,14 +186,43 @@ object SamsungWidgetSource {
         }
         // A labeled device that drops out of the widget (dead, disconnected, icon changed)
         // otherwise leaves only a silent gap in history.
+        // Logged when the set of missing devices changes, not on every poll.
         val known = labels(context).let { json -> json.keys().asSequence().map(json::optString).toSet() }
-        for (label in listOf(LABEL_RING, LABEL_WATCH)) {
-            if (label in known && label !in seen) {
-                store.logProbe(SOURCE, "$label not in widget (${snapshot.slots.size} slots shown)")
-            }
+        val missing = listOf(LABEL_RING, LABEL_WATCH).filter { it in known && it !in seen }
+        val missingKey = missing.joinToString(",")
+        if (prefs.getString(KEY_LAST_MISSING, null) != missingKey) {
+            prefs.edit().putString(KEY_LAST_MISSING, missingKey).apply()
+            store.logProbe(SOURCE, if (missing.isEmpty()) "All labeled devices back in widget"
+                else "${missing.joinToString(" and ")} not in widget (${snapshot.slots.size} slots shown)")
         }
         return saved
     }
+
+    /**
+     * One-time setup: if no slot is labeled as the phone yet and exactly one unlabeled slot shows
+     * Android's own percentage (within 1), label that slot's icon as the phone. From then on it is
+     * matched by icon, not by number, so later comparisons with Android aren't circular.
+     */
+    private fun recognizePhoneSlot(context: Context, store: BatteryStore, snapshot: WidgetSnapshot) {
+        val labels = snapshot.slots.map { labelFor(context, it.fingerprint) }
+        if (LABEL_PHONE in labels(context).let { json -> json.keys().asSequence().map(json::optString).toSet() }) return
+        val android = PhoneBattery.read(context, "widget_check")?.percent ?: return
+        val candidates = snapshot.slots.filterIndexed { i, s -> labels[i] == null && s.fingerprint != null }
+        val match = candidates.singleOrNull() ?: return
+        if (kotlin.math.abs(match.percent - android) > 1) return
+        setLabel(context, match.fingerprint!!, LABEL_PHONE)
+        store.logProbe(SOURCE, "Recognized the phone's widget slot; saving it for comparison")
+    }
+
+    /** Device ids that are labeled but were absent from the widget at the last read (dead, off, out of range). */
+    fun missingDevices(context: Context): Set<String> =
+        PollScheduler.prefs(context).getString(KEY_LAST_MISSING, null).orEmpty().split(',').mapNotNull {
+            when (it) {
+                LABEL_RING -> PollScheduler.ringDeviceId(context)
+                LABEL_WATCH -> WATCH_DEVICE
+                else -> null
+            }
+        }.toSet()
 
     /** Snapshot + record; logs and swallows failures so callers (jobs) never crash. */
     fun sample(context: Context, store: BatteryStore): List<Reading> = try {
@@ -180,7 +232,10 @@ object SamsungWidgetSource {
         emptyList()
     }
 
-    fun labelFor(context: Context, fingerprint: String?): String? {
+    fun labelFor(context: Context, fingerprint: String?): String? = match(context, fingerprint)?.first
+
+    /** Best label and its fingerprint distance, or null when nothing is close enough. */
+    fun match(context: Context, fingerprint: String?): Pair<String, Int>? {
         if (fingerprint == null) return null
         val labels = labels(context)
         var best: String? = null
@@ -189,7 +244,7 @@ object SamsungWidgetSource {
             val d = distance(fingerprint, key)
             if (d < bestDistance) { bestDistance = d; best = labels.optString(key) }
         }
-        return if (bestDistance <= MATCH_DISTANCE) best else null
+        return if (bestDistance <= MATCH_DISTANCE && best != null) best to bestDistance else null
     }
 
     fun setLabel(context: Context, fingerprint: String, label: String) {
@@ -208,7 +263,8 @@ object SamsungWidgetSource {
 
     // ---- view parsing -------------------------------------------------------------------
 
-    private fun parse(root: View): List<WidgetSlot> {
+    /** [includeIcons] draws a display copy of each icon; background reads only need the fingerprint. */
+    private fun parse(root: View, includeIcons: Boolean): List<WidgetSlot> {
         val bars = mutableListOf<ProgressBar>()
         walk(root) { v ->
             if (v is ProgressBar && v.isShown(root) && entryName(v) in PROGRESS_IDS) bars += v
@@ -226,8 +282,10 @@ object SamsungWidgetSource {
                 PERCENT_TEXT.find(it.text)?.groupValues?.get(1)?.toIntOrNull()
             }?.takeIf { it in 0..100 } ?: return@mapIndexedNotNull null // empty slot
             val icon = images.firstOrNull()?.drawable
+            // A second image is the charging bolt. Checked against real history for the phone,
+            // Ring and Watch (docs/ARCHITECTURE.md, "Known limits of the widget source").
             WidgetSlot(index, percent, bar.progress, images.size >= 2,
-                icon?.let(::fingerprint), icon?.let { render(it, 96) })
+                icon?.let(::fingerprint), if (includeIcons) icon?.let { render(it, 96) } else null)
         }
     }
 

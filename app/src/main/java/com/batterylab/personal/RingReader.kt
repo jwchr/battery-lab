@@ -28,10 +28,19 @@ class RingReader(
 ) {
     private val main = Handler(Looper.getMainLooper())
     private val finished = AtomicBoolean(false)
-    private var gatt: BluetoothGatt? = null
+    @Volatile private var gatt: BluetoothGatt? = null
     private val deadline = Runnable { complete(null, "Timed out after 20 seconds") }
+    private val closer = Runnable { closeGatt() }
+    @Volatile private var rssi: Int? = null
+    @Volatile private var holdsLock = false
 
     fun start() {
+        // One Ring connection at a time across the whole app (manual reads and background checks).
+        if (!inFlight.compareAndSet(false, true)) {
+            complete(null, "Another Ring read is already running")
+            return
+        }
+        holdsLock = true
         if (Build.VERSION.SDK_INT >= 31 &&
             context.checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             complete(null, "Nearby devices permission required")
@@ -55,15 +64,26 @@ class RingReader(
 
     private fun complete(reading: Reading?, error: String?) {
         if (!finished.compareAndSet(false, true)) return
+        if (holdsLock) { holdsLock = false; inFlight.set(false) }
         main.removeCallbacks(deadline)
+        // Hang up now, but release the connection only once Android reports the link is down
+        // (or after 2 s), so the Bluetooth stack isn't left holding a half-closed link.
         try { gatt?.disconnect() } catch (_: Exception) { }
-        try { gatt?.close() } catch (_: Exception) { }
-        gatt = null
+        main.postDelayed(closer, 2_000)
         main.post { completion(reading, error) }
+    }
+
+    /** Main thread only. */
+    private fun closeGatt() {
+        main.removeCallbacks(closer)
+        val g = gatt ?: return
+        gatt = null
+        try { g.close() } catch (_: Exception) { }
     }
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+            if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) main.post { if (finished.get()) closeGatt() }
             if (finished.get()) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 complete(null, "BLE connection failed (status $status)")
@@ -129,6 +149,7 @@ class RingReader(
                         BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
                     if (result != android.bluetooth.BluetoothStatusCodes.SUCCESS)
                         complete(null, "Battery request rejected ($result)")
+                    else g.readRemoteRssi()   // optional; kept only if it arrives before the reply
                 } else {
                     @Suppress("DEPRECATION")
                     characteristic.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
@@ -136,8 +157,13 @@ class RingReader(
                     characteristic.value = batteryRequest
                     @Suppress("DEPRECATION")
                     if (!g.writeCharacteristic(characteristic)) complete(null, "Battery request failed")
+                    else g.readRemoteRssi()
                 }
             } catch (e: SecurityException) { complete(null, "Bluetooth permission denied") }
+        }
+
+        override fun onReadRemoteRssi(g: BluetoothGatt, value: Int, status: Int) {
+            if (status == BluetoothGatt.GATT_SUCCESS) rssi = value
         }
 
         @Suppress("DEPRECATION")
@@ -152,17 +178,22 @@ class RingReader(
 
         private fun accept(uuid: UUID, value: ByteArray) {
             if (finished.get() || uuid != NOTIFY_UUID) return
-            val result = RingBatteryProtocol.parseBatteryReport(value) ?: return
-            complete(Reading("ring:$address", System.currentTimeMillis(), result.first,
-                result.second, "ring_ble"), null)
+            val report = RingBatteryProtocol.parseDetailedReport(value) ?: return
+            complete(Reading(BatteryStore.RING_ID, System.currentTimeMillis(), report.percent,
+                report.charging, "ring_ble", detail = ReadingDetail.clock(context, null)
+                    .copy(rssiDbm = rssi, rawExtra = report.rawExtra)), null)
         }
     }
 
     companion object {
+        private val inFlight = AtomicBoolean(false)
         private val DATA_SERVICE = UUID.fromString("00001b1b-0000-1000-8000-00805f9b34fb")
         private val NOTIFY_UUID = UUID.fromString("797ae4e9-2e58-4fe8-b48d-b5c79599fb9b")
         private val WRITE_UUID = UUID.fromString("63e30bad-4206-4596-839f-e47cbf7a4b5d")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
+
+        /** Name-only hint for sorting the picker; never used to decide a device's identity. */
+        fun looksLikeRing(name: String?): Boolean = name?.contains("ring", ignoreCase = true) == true
 
         fun pairedDevices(context: Context): List<BluetoothDevice> {
             if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(

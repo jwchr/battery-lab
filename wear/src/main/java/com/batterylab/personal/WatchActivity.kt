@@ -10,6 +10,18 @@ import android.widget.TextView
 import android.widget.Toast
 
 class WatchActivity : Activity() {
+    private lateinit var label: TextView
+
+    /** The percent shown is read fresh on open, on return, and on each send (audit #4 B4). */
+    private fun showPercent() {
+        label.text = "Battery Lab\nWatch ${WatchReporter.batteryPercent(this) ?: "?"}%"
+    }
+
+    override fun onResume() {
+        super.onResume()
+        showPercent()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WatchReporter.schedule(this)
@@ -19,15 +31,16 @@ class WatchActivity : Activity() {
             setPadding(25, 20, 25, 20)
             setBackgroundColor(Color.rgb(11, 20, 33))
         }
-        val label = TextView(this).apply {
+        label = TextView(this).apply {
             textSize = 21f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-            text = "Battery Lab\nWatch ${WatchReporter.batteryPercent(this@WatchActivity) ?: "?"}%"
         }
+        showPercent()
         val button = Button(this).apply {
             text = "Send reading"
             setOnClickListener {
+                showPercent()
                 WatchReporter.send(this@WatchActivity) { ok ->
                     runOnUiThread {
                         Toast.makeText(this@WatchActivity,

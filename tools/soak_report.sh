@@ -3,7 +3,9 @@
 #
 # Prints counts, timing gaps and percent CHANGES only. It never prints device
 # labels, serials or raw battery percentages, so the output is safe to paste
-# into an issue.
+# into an issue. The last section (fuel gauge) prints the phone's current level,
+# voltage and temperature from a fixed list of dumpsys keys; trim it before
+# pasting if you'd rather not share those.
 #
 # Usage:
 #   tools/soak_report.sh            # pull the database from the phone over adb
@@ -86,6 +88,22 @@ SELECT kind, COUNT(*) AS bg_reads, SUM(d_prev <> 0) AS changed_vs_prev
 FROM w WHERE how = 'bg' GROUP BY kind;
 
 .print ''
+.print '== Wearable charging flag vs percent movement (audit #4 A2) =='
+.print 'Pairs of consecutive widget readings at most 40 min apart, grouped by the charging'
+.print 'flag of the earlier reading. If the bolt means charging, flagged pairs should rise or'
+.print 'hold at 100, and unflagged pairs should almost never rise.'
+WITH p AS (
+  SELECT kind, charging AS flag, percent,
+    LEAD(percent) OVER (PARTITION BY kind ORDER BY time_ms) - percent AS d,
+    LEAD(time_ms) OVER (PARTITION BY kind ORDER BY time_ms) - time_ms AS gap
+  FROM r WHERE source = 'samsung_widget' AND kind IN ('ring', 'watch'))
+SELECT kind, CASE flag WHEN 1 THEN 'charging' WHEN 0 THEN 'not' ELSE 'unknown' END AS flagged,
+  COUNT(*) AS pairs, SUM(d > 0) AS rose, SUM(d = 0 AND percent = 100) AS held_100,
+  SUM(d = 0 AND percent < 100) AS flat, SUM(d < 0) AS fell
+FROM p WHERE d IS NOT NULL AND gap <= 40 * 60000
+GROUP BY kind, flag ORDER BY kind, flag;
+
+.print ''
 .print '== probe_events (errors) =='
 SELECT COUNT(*) AS n,
   datetime(MIN(time_ms)/1000, 'unixepoch', 'localtime') AS first,
@@ -101,4 +119,13 @@ if $have_phone; then
     | awk -v pkg="$PKG/" '/JOB #/ { p = index($0, pkg) > 0 } p' \
     | grep -E 'JOB #|PERIODIC:|Last successful run|Ready:' | sed 's/^ *//' || true
   echo "App foreground starts logged: $(wc -l <"$WORK/fg.txt" | tr -d ' ')"
+fi
+
+if $have_phone; then
+  echo
+  echo "== Samsung kernel fuel gauge (dumpsys battery, selected keys only) =="
+  # Only these keys are printed, so nothing identifying (serials, addresses) can appear.
+  "$ADB" shell dumpsys battery 2>/dev/null \
+    | grep -E '^ *(level|scale|voltage|temperature|status|Charge counter|mSavedBatteryAsoc|mSavedBatteryUsage):' \
+    | sed 's/^ *//' || true
 fi

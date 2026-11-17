@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 11 and older. Only the compressed history snapshot; see CloudBackupAgent. -->
+<full-backup-content>
+    <include domain="file" path="cloud/history.csv.gz" />
+</full-backup-content>

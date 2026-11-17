@@ -5,15 +5,30 @@
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Read-only: is the phone on Wi-Fi or cellular at each check. Not internet access. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Hosting Samsung's Battery widget. Not grantable to third-party apps; Android falls
          back to the ACTION_APPWIDGET_BIND consent dialog. Declared per the host docs. -->
     <uses-permission android:name="android.permission.BIND_APPWIDGET"
         tools:ignore="ProtectedPermissions" />
+    <!-- Usage access (user grants it in Settings): which apps were on screen while the battery
+         dropped. Read on the phone only; never exported. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
     <queries>
         <package android:name="com.android.settings.intelligence" />
+        <!-- Lets "What's draining it" show app names instead of package ids. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
     </queries>
     <application
-        android:allowBackup="false"
+        android:allowBackup="true"
+        android:backupAgent=".CloudBackupAgent"
+        android:fullBackupOnly="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/backup_rules_31"
         android:label="Battery Lab"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name=".MainActivity" android:exported="true">
@@ -22,6 +37,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".StatsActivity" android:exported="false" />
         <service android:name=".BatteryPollService"
             android:exported="true"
             android:permission="android.permission.BIND_JOB_SERVICE" />

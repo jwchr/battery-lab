@@ -57,4 +57,32 @@ class BatteryHistoryTest {
         assertNull(BatteryMath.impliedCapacityMah(50, null, false))
         assertEquals(2.5, BatteryMath.median(listOf(1.0, 4.0, 2.0, 3.0))!!, 1e-9)
     }
+
+    @Test fun timeLeftCountsDownAndReadsNaturally() {
+        // 2% at 3.8%/h is about 32 minutes when fresh.
+        assertEquals("30" to "min left", BatteryMath.timeLeftLabel(2 / 3.8))
+        // The same reading 2 hours later: nothing left.
+        assertEquals(0.0, BatteryMath.timeLeftNow(2 / 3.8, t, t + 2 * h), 1e-9)
+        assertEquals("0" to "probably empty", BatteryMath.timeLeftLabel(0.0))
+        assertEquals("5" to "min left", BatteryMath.timeLeftLabel(0.01))
+        assertEquals("1" to "hour left", BatteryMath.timeLeftLabel(1.02))
+        assertEquals("2.5" to "hours left", BatteryMath.timeLeftLabel(2.46))
+        assertEquals("19" to "hours left", BatteryMath.timeLeftLabel(18.6))
+        assertEquals(3.0, BatteryMath.timeLeftNow(4.0, t, t + h), 1e-9)
+    }
+
+    private fun r(hours: Double, pct: Int, charging: Boolean? = false) =
+        Reading("ring", t + (hours * h).toLong(), pct, charging, "samsung_widget")
+
+    @Test fun unchangedSinceFindsStartOfTrailingSameValueRun() {
+        assertNull(BatteryMath.unchangedSince(emptyList()))
+        // 71% read at 1 h, 2 h and 3 h after a drop: unchanged since 1 h, not since the last read.
+        val runs = listOf(r(0.0, 72), r(1.0, 71), r(2.0, 71), r(3.0, 71))
+        assertEquals(t + h, BatteryMath.unchangedSince(runs))
+        assertEquals(t + h, BatteryMath.unchangedSince(runs.reversed()))   // order-independent
+        // A charging-state change starts a new run even at the same percent.
+        assertEquals(t + 3 * h, BatteryMath.unchangedSince(listOf(r(2.0, 50), r(3.0, 50, true))))
+        // A single reading is its own run.
+        assertEquals(t, BatteryMath.unchangedSince(listOf(r(0.0, 40))))
+    }
 }

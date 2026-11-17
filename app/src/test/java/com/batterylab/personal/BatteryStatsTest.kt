@@ -32,7 +32,7 @@ class BatteryStatsTest {
     @Test fun gapsAreNotCountedAsTime() {
         val s = BatteryStats.device(listOf(r(0, 15), r(30, 12), r(600, 10)), hourOf)
         assertEquals(0.5, s.hoursBelow20, 1e-9)     // the 9.5-hour gap is skipped
-        assertEquals(3, s.percentUsed)               // only the 30-minute step counts; the gap is skipped
+        assertEquals(5, s.percentUsed)               // the drop across the gap is real battery use, so it counts
     }
 
     @Test fun drainByHourAndLongestStretch() {

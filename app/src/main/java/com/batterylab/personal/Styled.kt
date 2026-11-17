@@ -121,6 +121,16 @@ abstract class StyledActivity : Activity() {
         background = rounded(Color.TRANSPARENT, 6, Color.rgb(217, 210, 196))
     }
 
+    /** Emoji shown in a section's heading badge; pages override this to decorate their cards. */
+    protected open fun iconFor(eyebrow: String): String? = null
+
+    /** A small round badge holding one emoji, used beside section headings. */
+    protected fun iconBadge(emoji: String) = TextView(this).apply {
+        text = emoji; textSize = 15f; gravity = android.view.Gravity.CENTER
+        background = rounded(Color.argb(170, 255, 255, 255), 15, Palette.hairline)
+        includeFontPadding = false
+    }
+
     /** Cream card: small spaced eyebrow, friendly headline, optional corner tag. */
     protected fun section(eyebrow: String, title: String? = null, description: String? = null, tag: String? = null,
                         fill: Int = Palette.card, tagView: View? = null): LinearLayout {
@@ -132,6 +142,7 @@ abstract class StyledActivity : Activity() {
         }
         card.addView(LinearLayout(this).apply {
             gravity = android.view.Gravity.CENTER_VERTICAL
+            iconFor(eyebrow)?.let { addView(iconBadge(it), LinearLayout.LayoutParams(dp(30), dp(30)).apply { rightMargin = dp(10) }) }
             addView(eyebrow(eyebrow), LinearLayout.LayoutParams(0, -2, 1f))
             if (tagView != null) addView(tagView) else if (tag != null) addView(tag(tag))
         })
@@ -211,14 +222,23 @@ abstract class StyledActivity : Activity() {
     }
 
     /** Two-column grid of stat tiles: big value, small label, optional caption. */
-    protected fun LinearLayout.addTiles(tiles: List<Triple<String, String, String?>>) {
+    /** One stat tile: a big value, its label, an optional caption and an optional emoji on top. */
+    protected data class Tile(val value: String, val label: String, val caption: String? = null, val icon: String? = null)
+
+    protected fun LinearLayout.addTiles(tiles: List<Triple<String, String, String?>>) =
+        addTileList(tiles.map { (v, l, c) -> Tile(v, l, c) })
+
+    protected fun LinearLayout.addTileList(tiles: List<Tile>) {
         tiles.chunked(2).forEach { row ->
             addView(LinearLayout(this@StyledActivity).apply {
-                row.forEachIndexed { i, (value, labelText, caption) ->
+                row.forEachIndexed { i, (value, labelText, caption, icon) ->
                     addView(LinearLayout(this@StyledActivity).apply {
                         orientation = LinearLayout.VERTICAL
                         setPadding(dp(12), dp(9), dp(10), dp(9))
                         background = rounded(Color.argb(150, 255, 255, 255), 14, Palette.hairline)
+                        if (icon != null) addView(TextView(this@StyledActivity).apply {
+                            text = icon; textSize = 19f; includeFontPadding = false; setPadding(0, 0, 0, dp(4))
+                        })
                         // Value and label share a baseline: "76%  used by apps on screen".
                         // One TextView with two sizes, so a long label wraps cleanly instead of clipping.
                         addView(TextView(this@StyledActivity).apply {

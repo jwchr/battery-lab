@@ -2,6 +2,7 @@ package com.batterylab.personal
 
 import android.os.BatteryManager
 import kotlin.math.abs
+import kotlin.math.max
 import kotlin.math.sqrt
 
 /**
@@ -162,20 +163,25 @@ object HonestyAuditor {
         gaps: GapLimits = GapLimits()
     ): HonestyAudit {
         val r = phone.sortedBy { it.timeMs }
-        val transitions = steps(r, gaps).filter { (a, b) -> a.charging != true && b.charging != true && b.percent < a.percent }
+        // Every unplugged step that didn't rise, flat ones included. Dropping the flat steps (where
+        // time passed and the counter fell but the percent hadn't ticked yet) overstated drain
+        // rates and understated mAh per 1% (audit review, 2026-11-16).
+        val transitions = steps(r, gaps).filter { (a, b) -> a.charging != true && b.charging != true && b.percent <= a.percent }
 
-        // B: mAh per 1% by band, from counter drop over percent drop on each discharge step.
-        val perPct = transitions.mapNotNull { (a, b) ->
+        // B: mAh per 1% by band: total counter drop over total percent drop for steps in the band.
+        val perStep = transitions.mapNotNull { (a, b) ->
             val ra = a.remainingUah ?: return@mapNotNull null; val rb = b.remainingUah ?: return@mapNotNull null
-            val drop = a.percent - b.percent
-            val mah = (ra - rb) / 1000.0 / drop
-            if (mah <= 0 || mah > 500) null else (a.percent + b.percent) / 2.0 to mah
+            if (rb > ra + 1000) return@mapNotNull null   // counter reset or recalibration
+            Triple((a.percent + b.percent) / 2.0, max(0, ra - rb) / 1000.0, a.percent - b.percent)
         }
-        fun band(lo: Int, hi: Int) = BatteryMath.median(perPct.filter { it.first >= lo && it.first <= hi }.map { it.second })
+        fun ratio(sel: List<Triple<Double, Double, Int>>): Double? {
+            val pct = sel.sumOf { it.third }
+            if (pct < 3) return null
+            return (sel.sumOf { it.second } / pct).takeIf { it > 0 && it <= 500 }
+        }
+        fun band(lo: Int, hi: Int) = ratio(perStep.filter { it.first >= lo && it.first <= hi })
         val upper = band(70, 95); val mid = band(40, 70); val lower = band(15, 40)
-        val deciles = (1..9).mapNotNull { d ->
-            BatteryMath.median(perPct.filter { (it.first / 10).toInt() == d }.map { it.second })?.let { d * 10 to it }
-        }.toMap()
+        val deciles = (1..9).mapNotNull { d -> ratio(perStep.filter { (it.first / 10).toInt() == d })?.let { d * 10 to it } }.toMap()
 
         // A: what happens around 100%.
         val taper = cvTaper(r, gaps)

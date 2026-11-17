@@ -125,13 +125,15 @@ object BatteryMath {
      * neighbours agree within 3 points: no battery drains 75 points and recovers within one check.
      * Charging readings, and the first and last reading, are always kept. Input must be sorted.
      */
-    fun withoutSpikes(sorted: List<BatteryPoint>): List<BatteryPoint> {
+    fun withoutSpikes(sorted: List<BatteryPoint>): List<BatteryPoint> = withoutSpikes(sorted, { it.percent }, { it.charging })
+
+    /** [withoutSpikes] for any reading type. */
+    fun <T> withoutSpikes(sorted: List<T>, percent: (T) -> Int, charging: (T) -> Boolean?): List<T> {
         if (sorted.size < 3) return sorted
         return sorted.filterIndexed { i, p ->
-            if (i == 0 || i == sorted.lastIndex || p.charging == true) return@filterIndexed true
-            val a = sorted[i - 1]; val b = sorted[i + 1]
-            !(abs(a.percent - b.percent) <= 3 &&
-                abs(p.percent - a.percent) > SPIKE_POINTS && abs(p.percent - b.percent) > SPIKE_POINTS)
+            if (i == 0 || i == sorted.lastIndex || charging(p) == true) return@filterIndexed true
+            val a = percent(sorted[i - 1]); val b = percent(sorted[i + 1]); val x = percent(p)
+            !(abs(a - b) <= 3 && abs(x - a) > SPIKE_POINTS && abs(x - b) > SPIKE_POINTS)
         }
     }
 

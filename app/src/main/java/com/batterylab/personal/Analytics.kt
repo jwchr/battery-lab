@@ -19,7 +19,9 @@ data class ObservedCharge(
     /** Most common BatteryManager.EXTRA_PLUGGED value during the charge, if recorded. */
     val pluggedType: Int?,
     val tempRiseC: Double?,
-    val peakTempC: Double?
+    val peakTempC: Double?,
+    /** When the charge first reached [toPct]; time parked there afterwards is not charging speed. */
+    val peakMs: Long = endMs,
 )
 
 object ChargeCurves {
@@ -60,8 +62,10 @@ object ChargeCurves {
         }
         val plugged = run.mapNotNull { it.detail?.plugged }.filter { it > 0 }.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
         val temps = run.mapNotNull { it.tempTenthsC?.div(10.0) }
-        return ObservedCharge(run.first().timeMs, run.last().timeMs, run.first().percent, run.last().percent, bands, plugged,
-            if (temps.size >= 2) temps.max() - temps.first() else null, temps.maxOrNull())
+        val top = run.last().percent
+        return ObservedCharge(run.first().timeMs, run.last().timeMs, run.first().percent, top, bands, plugged,
+            if (temps.size >= 2) temps.max() - temps.first() else null, temps.maxOrNull(),
+            peakMs = run.first { it.percent >= top }.timeMs)
     }
 
     /** Median minutes per band across charges, optionally for one plug type. */
@@ -72,9 +76,22 @@ object ChargeCurves {
                 ?.let { band to it }
         }.toMap()
 
-    /** Percent gained in [minutes] starting from 20%, from the median 20→50% speed. */
-    fun topUpPercent(charges: List<ObservedCharge>, minutes: Double = 15.0, plugged: Int? = null): Double? =
-        bandMedians(charges, plugged)[20 to 50]?.let { 30.0 / it * minutes }?.coerceAtMost(80.0)
+    /**
+     * Percent gained in [minutes] starting from 20%, walking the median band times in order
+     * (20→50, 50→80, 80→100) so the slower top of the charge isn't priced at the fast start's speed.
+     * Stops at the first band with no timing.
+     */
+    fun topUpPercent(charges: List<ObservedCharge>, minutes: Double = 15.0, plugged: Int? = null): Double? {
+        val medians = bandMedians(charges, plugged)
+        if (medians[20 to 50] == null) return null
+        var left = minutes; var gained = 0.0
+        for (band in BANDS) {
+            val t = medians[band] ?: break
+            val size = (band.second - band.first).toDouble()
+            if (left >= t) { gained += size; left -= t } else { gained += size * left / t; left = 0.0; break }
+        }
+        return gained
+    }
 
     fun plugName(type: Int?) = when (type) {
         1 -> "Wired (AC)"; 2 -> "USB"; 4 -> "Wireless"; 8 -> "Dock"; else -> "Unknown"
@@ -109,7 +126,7 @@ object IdleAnalysis {
      * fresh data can't make a stretch look flat.
      */
     fun stretches(readings: List<Reading>, screenOn: List<Span>? = null, minHours: Double = 4.0,
-                  gaps: GapLimits = GapLimits()): List<IdleStretch> {
+                  gaps: GapLimits = GapLimits(), screenCoverageStartMs: Long? = null): List<IdleStretch> {
         val idx = screenOn?.let { SpanIndex(it) }
         return HonestyAuditor.dischargeRuns(readings.sortedBy { it.timeMs }, gaps).mapNotNull { run0 ->
             var end = run0.size - 1
@@ -120,8 +137,11 @@ object IdleAnalysis {
             val a = run.first(); val b = run.last()
             val hours = (b.timeMs - a.timeMs) / 3_600_000.0
             if (hours < minHours) return@mapNotNull null
+            // Android keeps about a week of screen history; before that, no spans means unknown,
+            // not "screen off", so older stretches fall back to the recorded display state.
+            val covered = idx != null && (screenCoverageStartMs == null || a.timeMs >= screenCoverageStartMs)
             val onFraction = when {
-                idx != null -> idx.overlap(a.timeMs, b.timeMs).toDouble() / (b.timeMs - a.timeMs)
+                covered -> idx!!.overlap(a.timeMs, b.timeMs).toDouble() / (b.timeMs - a.timeMs)
                 else -> run.mapNotNull { it.detail?.displayState }.takeIf { it.size >= run.size / 2 }
                     ?.let { s -> s.count { it == 2 }.toDouble() / s.size }
             }

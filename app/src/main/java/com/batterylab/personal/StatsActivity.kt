@@ -63,6 +63,8 @@ class StatsActivity : StyledActivity() {
 
     private var renderGeneration = 0
 
+    override fun iconFor(eyebrow: String): String? = SECTION_ICONS[eyebrow]
+
     /**
      * Audit #4 A6: loading every reading and running the stats math used to block the main thread,
      * which grows with history. It now runs on [Background.io]; only view building stays here.
@@ -108,7 +110,7 @@ class StatsActivity : StyledActivity() {
         val capacity = HonestyAuditor.estimatePhoneCapacity(phone, gaps)
         val now = System.currentTimeMillis()
         val usage = if (UsageSource.granted(this)) UsageSource.load(this, now - 7 * 86_400_000L, now) else null
-        val idle = IdleAnalysis.stretches(phone, usage?.screenOn, gaps = gaps)
+        val idle = IdleAnalysis.stretches(phone, usage?.screenOn, gaps = gaps, screenCoverageStartMs = usage?.coverageStartMs)
         // The drain analysis and package-manager label lookups took ~116 ms on the main thread.
         val drain = usage?.let { u ->
             val start = u.coverageStartMs
@@ -162,6 +164,7 @@ class StatsActivity : StyledActivity() {
         timed("habits") { renderHabits(stats[0]) }
         timed("hours") { renderHours(devices, stats) }
         timed("showdown") { renderShowdown(devices, data) }
+        timed("headtohead") { renderHeadToHead(devices, stats) }
         timed("rolling") { renderRolling(devices, data) }
         timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
         timed("fun") { renderFun(stats[0], capacity.combinedMah ?: phoneCapacity(phone)?.first, phone) }
@@ -210,7 +213,8 @@ class StatsActivity : StyledActivity() {
                 addView(GaugeView(this@StatsActivity, pct?.roundToInt()?.coerceAtMost(100), Palette.green),
                     LinearLayout.LayoutParams(dp(84), dp(84)))
                 addView(label(buildString {
-                    if (pct != null) append("Roughly ${String.format(Locale.US, "%.0f", pct)}% of the ${fmt(spec!!.typicalMah)} mAh advertised")
+                    if (pct != null) append("Roughly ${String.format(Locale.US, "%.0f", pct)}% of the ${fmt(spec!!.typicalMah)} mAh advertised" +
+                        if (pct > 100.5) ". New batteries often hold a little more than the label" else "")
                     else if (spec != null) append("Advertised: ${fmt(spec.typicalMah)} mAh")
                     if (spec != null) append(" (${fmt(spec.ratedMah)} mAh rated minimum).")
                     if (estimate != null) append("\nEstimated from Android's charge counter, ${shortWhen(estimate.second)}. " +
@@ -242,19 +246,20 @@ class StatsActivity : StyledActivity() {
         val first = stats.mapNotNull { it.firstMs }.minOrNull()
         val days = first?.let { (System.currentTimeMillis() - it) / 86_400_000.0 } ?: 0.0
         section("By the numbers", "Since Battery Lab started watching.").apply {
-            addTiles(listOf(
-                Triple(if (days < 2) "${(days * 24).roundToInt()} h" else "${f1(days)} days", "tracked", null),
-                Triple(fmt(stats.sumOf { it.readings }.toDouble()), "readings saved", "about ${fmt(stats.sumOf { it.readings } / maxOf(days, 1.0 / 24))} a day"),
+            addTileList(listOf(
+                Tile(if (days < 2) "${(days * 24).roundToInt()} h" else "${f1(days)} days", "tracked", null, "\uD83D\uDCC5"),
+                Tile(fmt(stats.sumOf { it.readings }.toDouble()), "readings saved",
+                    "about ${fmt(stats.sumOf { it.readings } / maxOf(days, 1.0 / 24))} a day", "\uD83D\uDCBE"),
             ))
             devices.forEachIndexed { i, (_, name, color) ->
                 val s = stats[i]
                 if (s.readings == 0) return@forEachIndexed
                 addView(deviceBanner(name, color))
-                addTiles(listOfNotNull(
-                    Triple(f1(s.fullBatteriesUsed), "full batteries used", "${s.percentUsed} points in all"),
-                    Triple("${s.charges.size}", "charges spotted", null),
-                    s.lowest?.let { Triple("${it.first}%", "lowest seen", "closest call · ${shortWhen(it.second)}") },
-                    Triple("${f1(s.longestOnBatteryHours)} h", "longest unplugged", null),
+                addTileList(listOfNotNull(
+                    Tile(f1(s.fullBatteriesUsed), "full batteries used", "${s.percentUsed} points in all", "\uD83D\uDD0B"),
+                    Tile("${s.charges.size}", "charges spotted", null, "\uD83D\uDD0C"),
+                    s.lowest?.let { Tile("${it.first}%", "lowest seen", "closest call · ${shortWhen(it.second)}", "\uD83E\uDEAB") },
+                    Tile("${f1(s.longestOnBatteryHours)} h", "longest unplugged", null, "\u23F1\uFE0F"),
                 ))
             }
         }
@@ -264,13 +269,13 @@ class StatsActivity : StyledActivity() {
         if (phone.charges.isEmpty()) return
         section("Charging habits", "How you charge your phone.").apply {
             val fast = phone.fastestCharge
-            addTiles(listOfNotNull(
-                phone.averagePlugIn?.let { Triple("${it.roundToInt()}%", "average plug-in", "where you usually reach for the charger") },
-                phone.averageUnplug?.let { Triple("${it.roundToInt()}%", "average unplug", null) },
-                fast?.let { Triple("${(60 / it.ratePerMinute!!).roundToInt()} s", "per 1% at best", "fastest charge · ${shortWhen(it.startMs)}") },
-                Triple("${f1(phone.hoursAt100)} h", "parked at 100%", "time plugged in and already full"),
-                Triple("${f1(phone.hoursBelow20)} h", "spent under 20%", "living dangerously"),
-                Triple("${pctOf(phone.hoursCharging, phone.hoursCharging + phone.hoursOnBattery)}%", "of time charging", null),
+            addTileList(listOfNotNull(
+                phone.averagePlugIn?.let { Tile("${it.roundToInt()}%", "average plug-in", "where you usually reach for the charger", "\uD83D\uDD0C") },
+                phone.averageUnplug?.let { Tile("${it.roundToInt()}%", "average unplug", null, "\uD83D\uDE80") },
+                fast?.let { Tile("${(60 / it.ratePerMinute!!).roundToInt()} s", "per 1% at best", "fastest charge · ${shortWhen(it.startMs)}", "\u26A1") },
+                Tile("${f1(phone.hoursAt100)} h", "parked at 100%", "time plugged in and already full", "\uD83C\uDD7F\uFE0F"),
+                Tile("${f1(phone.hoursBelow20)} h", "spent under 20%", "living dangerously", "\uD83D\uDE2C"),
+                Tile("${pctOf(phone.hoursCharging, phone.hoursCharging + phone.hoursOnBattery)}%", "of time charging", null, "\uD83D\uDD52"),
             ))
         }
     }
@@ -288,6 +293,41 @@ class StatsActivity : StyledActivity() {
             }
         }
     }
+
+    /**
+     * Phone vs Watch vs Ring on everyday terms: battery used per day, charges per week and the
+     * usual time between charges. Each device is measured over its own tracked span, at least 2 days.
+     */
+    private fun renderHeadToHead(devices: List<Triple<String, String, Int>>, stats: List<DeviceStats>) {
+        data class Row(val name: String, val color: Int, val perDay: Double, val perWeek: Double, val between: Double?)
+        val rows = devices.mapIndexedNotNull { i, (_, name, color) ->
+            val s = stats[i]
+            val first = s.firstMs ?: return@mapIndexedNotNull null
+            val last = s.lastMs ?: return@mapIndexedNotNull null
+            val days = (last - first) / 86_400_000.0
+            if (days < 2.0) return@mapIndexedNotNull null
+            val starts = s.charges.map { it.startMs }.sorted()
+            val between = BatteryMath.median(starts.zipWithNext { a, b -> (b - a) / 3_600_000.0 })
+            Row(name, color, s.percentUsed / days, s.charges.size / days * 7, between)
+        }
+        if (rows.size < 2) return
+        section("Head to head", "Phone, Watch and Ring side by side.",
+            "Each over its own tracked days. Battery used counts every observed drop, so 100% a day means one full battery.").apply {
+            val most = rows.maxOf { it.perDay }.coerceAtLeast(1.0)
+            addView(eyebrow("Battery used per day").apply { setPadding(0, dp(10), 0, dp(2)) })
+            rows.sortedByDescending { it.perDay }.forEach { r ->
+                addView(barRow(r.name.uppercase(Locale.getDefault()), r.perDay / most, "${r.perDay.roundToInt()}%", r.color,
+                    "${f1(r.perDay / 100)} full batteries a day"))
+            }
+            addView(eyebrow("Charging").apply { setPadding(0, dp(12), 0, 0) })
+            addTileList(rows.map { r ->
+                Tile(f1(r.perWeek), "charges a week", r.name + (r.between?.let { " · usually ${durationHours(it)} apart" } ?: ""),
+                    when { r.name.contains("Ring", true) -> "\uD83D\uDC8D"; r.name.contains("Watch", true) -> "\u231A"; else -> "\uD83D\uDCF1" })
+            })
+        }
+    }
+
+    private fun durationHours(h: Double) = if (h >= 48) "${f1(h / 24)} days" else "${h.roundToInt()} h"
 
     private fun renderShowdown(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>) {
         val lasting = devices.mapIndexedNotNull { i, (_, name, color) ->
@@ -352,34 +392,53 @@ class StatsActivity : StyledActivity() {
         section("What it costs", "${money(cents)} of electricity so far.",
             if (rateIsSet()) "At ${f1(rate)}\u00a2 per kWh, the rate you set." else
                 "At ${f1(rate)}\u00a2 per kWh, a rough US average. Set your own rate from your bill.").apply {
-            addTiles(listOfNotNull(
-                Triple(money(fullCharge / 1000 * rate), "per full charge", "${f1(fullCharge)} Wh"),
-                if (days >= 1.0) Triple(money(cents / days * 365), "a year at this pace", "for the phone") else null,
-                Triple("${fmt(wh / 1000 / FRIDGE_KWH_PER_DAY * 24 * 60)} min", "of a fridge", "a typical fridge uses about 1.5 kWh a day"),
-                Triple("${fmt(wh / EV_WH_PER_METER)} m", "in an electric car", "at about 300 Wh per mile"),
+            addTileList(listOfNotNull(
+                Tile(money(fullCharge / 1000 * rate), "per full charge", "${f1(fullCharge)} Wh", "\uD83D\uDCB5"),
+                if (days >= 1.0) Tile(money(cents / days * 365), "a year at this pace", "for the phone", "\uD83D\uDCC6") else null,
+                Tile("${fmt(wh / 1000 / FRIDGE_KWH_PER_DAY * 24 * 60)} min", "of a fridge", "a typical fridge uses about 1.5 kWh a day", "\uD83E\uDDCA"),
+                Tile("${fmt(wh / EV_WH_PER_METER)} m", "in an electric car", "at about 300 Wh per mile", "\uD83D\uDE97"),
             ))
             addView(makeButton(if (rateIsSet()) "Change your rate" else "Set your rate") { askRate() },
                 LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
         }
         section("Where it comes from", "What it takes to make ${f1(wh)} Wh.",
             "If all of it came from one source. Rough US averages, before charger losses.").apply {
-            addTiles(listOf(
-                Triple(mass(wh * COAL_G_PER_WH), "of coal", "burned in a power plant"),
-                Triple(volume(wh * GAS_L_PER_WH), "of natural gas", "at a gas power plant"),
-                Triple(mass(wh * URANIUM_G_PER_WH), "of uranium", "nuclear fuel; a grain of salt is about 60 \u00b5g"),
-                Triple(duration(wh / SOLAR_PANEL_W * 3600), "of full sun", "on one 400 W rooftop panel"),
-                Triple(duration(wh / WIND_TURBINE_W * 3600), "of a wind turbine", "a 3 MW turbine at full speed"),
-                Triple(duration(wh / CYCLIST_W * 3600), "of pedaling", "a fit cyclist making 100 W"),
-                Triple(mass(wh * CO2_G_PER_WH), "of CO\u2082", "at the US grid average"),
+            addTileList(listOf(
+                Tile(mass(wh * COAL_G_PER_WH), "of coal", "burned in a power plant", "\u26AB"),
+                Tile(volume(wh * GAS_L_PER_WH), "of natural gas", "at a gas power plant", "\uD83D\uDD25"),
+                Tile(mass(wh * URANIUM_G_PER_WH), "of uranium", "nuclear fuel; a grain of salt is about 60 \u00b5g", "\u269B\uFE0F"),
+                Tile(duration(wh / SOLAR_PANEL_W * 3600), "of full sun", "on one 400 W rooftop panel", "\u2600\uFE0F"),
+                Tile(duration(wh / WIND_TURBINE_W * 3600), "of a wind turbine", "a 3 MW turbine at full speed", "\uD83C\uDF2C\uFE0F"),
+                Tile(duration(wh / CYCLIST_W * 3600), "of pedaling", "a fit cyclist making 100 W", "\uD83D\uDEB4"),
+                Tile(mass(wh * CO2_G_PER_WH), "of CO\u2082", "at the US grid average", "\uD83C\uDF2B\uFE0F"),
             ))
         }
         section("Just for fun", "Your phone has used ${f1(wh)} Wh.",
             "Energy that went through the battery since tracking started, at a nominal 3.87 V.").apply {
-            addTiles(listOf(
-                Triple(f1(wh / 23.0), "cups of tea", "boiled from room temperature"),
-                Triple("${fmt(wh * 3600 / (7 * 9.81))} m", "bowling-ball lift", "how high it could lift a 7 kg ball"),
-                Triple(f1(wh / 9.0), "LED bulb hours", "a 9 W bulb"),
-                Triple(f1(wh / 2.7), "AA batteries", "alkaline, about 2.7 Wh each"),
+            eyebrowRow("Around the house")
+            addTileList(listOf(
+                Tile(f1(wh / LED_BULB_W), "LED bulb hours", "a 9 W bulb, the 60 W kind's replacement", "\uD83D\uDCA1"),
+                Tile(f1(wh / OLD_BULB_W), "old bulb hours", "a 60 W incandescent", "\uD83D\uDD6F\uFE0F"),
+                Tile(f1(wh / TEA_CUP_WH), "cups of tea", "boiled from room temperature", "\u2615"),
+                Tile(f1(wh / TOAST_SLICE_WH), "slices of toast", "a 1,200 W toaster, 2\u00bd min a slice", "\uD83C\uDF5E"),
+                Tile(duration(wh / MICROWAVE_W * 3600), "of microwave", "at 1,100 W: popcorn takes about 3 min", "\uD83C\uDF7F"),
+                Tile(duration(wh / HAIR_DRYER_W * 3600), "of hair dryer", "on high, about 1,800 W", "\uD83D\uDCA8"),
+                Tile(duration(wh / ROUTER_W * 3600), "of Wi-Fi", "a home router uses about 6 W", "\uD83D\uDCF6"),
+                Tile(f1(wh / AA_WH), "AA batteries", "alkaline, about 2.7 Wh each", "\uD83E\uDEAB"),
+            ))
+            eyebrowRow("Muscle power")
+            addTileList(listOf(
+                Tile("${fmt(wh * 3600 / (7 * G))} m", "bowling-ball lift", "how high it could lift a 7 kg ball", "\uD83C\uDFB3"),
+                Tile("${fmt(wh * 3600 / (CAR_KG * G))} m", "car lift", "raising a 1,500 kg car straight up", "\uD83D\uDE99"),
+                Tile(fmt(wh * 3600 / (PERSON_KG * G * FLOOR_M)), "flights of stairs", "a 75 kg person, 3 m a floor, pure lifting work", "\uD83E\uDE9C"),
+                Tile(f1(wh / BANANA_WH), "bananas", "of food energy, 105 Calories each", "\uD83C\uDF4C"),
+            ))
+            eyebrowRow("Other gadgets")
+            addTileList(listOf(
+                Tile(f1(wh / LAPTOP_WH), "laptop charges", "a 50 Wh laptop battery", "\uD83D\uDCBB"),
+                Tile(fmt(wh / WATCH_WH), "smartwatch charges", "about 1.6 Wh each", "\u231A"),
+                Tile(fmt(wh / RING_WH), "smart ring charges", "about 0.08 Wh each", "\uD83D\uDC8D"),
+                Tile(duration(wh / TV_W * 3600), "of TV", "a 55-inch LED TV at about 100 W", "\uD83D\uDCFA"),
             ))
         }
     }
@@ -409,14 +468,16 @@ class StatsActivity : StyledActivity() {
         section("What's draining it", "Battery lost while each app was on screen.",
             "Last ${f1(spanDays)} days of Android's app history. A correlation from 1% steps, not a per-app meter: " +
                 "background work and radios count toward whatever was on screen.").apply {
-            addTiles(listOfNotNull(
-                Triple("${pctOf(d.totalDrop - d.standbyDrop, d.totalDrop)}%", "used by apps on screen", "${f1(d.screenOnHours)} h of screen time"),
-                Triple("${pctOf(d.standbyDrop, d.totalDrop)}%", "idle drain", "what the phone uses on its own"),
-                d.screenOnRate?.let { Triple("${f1(it)}%", "an hour, screen on", "about ${fmt(100 / it.coerceAtLeast(0.1))} h of use from full") },
-                d.screenOffRate?.let { Triple("${f1(it)}%", "an hour, screen off", "about ${fmt(100 / it.coerceAtLeast(0.1))} h asleep from full") },
+            // Idle is shown as the remainder so the pair always reads exactly 100%.
+            val appsPct = pctOf(d.totalDrop - d.standbyDrop, d.totalDrop)
+            addTileList(listOfNotNull(
+                Tile("$appsPct%", "used by apps on screen", "${f1(d.screenOnHours)} h of screen time", "\uD83D\uDCF2"),
+                Tile("${100 - appsPct}%", "idle drain", "what the phone uses on its own", "\uD83D\uDCA4"),
+                d.screenOnRate?.let { Tile("${f1(it)}%", "an hour, screen on", "about ${fmt(100 / it.coerceAtLeast(0.1))} h of use from full", "\u2600\uFE0F") },
+                d.screenOffRate?.let { Tile("${f1(it)}%", "an hour, screen off", "about ${fmt(100 / it.coerceAtLeast(0.1))} h asleep from full", "\uD83C\uDF19") },
             ))
             val top = d.apps.take(8)
-            val most = top.firstOrNull()?.percent ?: 1.0
+            val most = (top.firstOrNull()?.percent ?: 0.0).takeIf { it > 0 } ?: 1.0
             if (top.isNotEmpty()) addView(label("Top apps", 12.5f, Palette.body).apply { setPadding(0, dp(14), 0, 0) })
             top.forEach { a -> addView(appRow(prep.labels[a.app] ?: a.app, a.percent / most,
                 "${f1(a.percent / d.totalDrop * 100)}%", listOfNotNull("${f1(a.foregroundHours)} h",
@@ -480,9 +541,10 @@ class StatsActivity : StyledActivity() {
                 "Ring: ${a.ringWidgetVsBlePairs} pairs, ${na(a.ringWidgetMeanErrorPp, " pts")}"))
             evidence("Phone readings from Android's BatteryManager (percent, charge counter, voltage, current), " +
                     "the Samsung battery widget, the watch companion app and the Ring's own Bluetooth reports.",
-                "A: counter gained after 99% and the 100% plateau after unplugging. B/C: least-squares fits of counter vs percent " +
-                    "by band, and %/h by band. D: voltage after 30 min with little current; resistance = ΔV / ΔI. " +
-                    "E: counter throughput ÷ capacity. F: widget vs direct readings within 10 min.",
+                "A: counter gained after 99% and the 100% plateau after unplugging. B: total counter drop ÷ total percent drop in each band. " +
+                    "C: %/h in each band, counting steps where the percent held as well as fell. D: median voltage at rest " +
+                    "(screen off, under 250 mA, 20–30 °C); resistance = ΔV / ΔI. E: counter throughput ÷ capacity. " +
+                    "F: widget vs direct readings within 2 min (phone) or 5 min (Watch, Ring).",
                 "${phone.size} phone readings, ${phoneWidget.size} widget readings. Gaps longer than the polling " +
                     "allowance are skipped, and readings flagged as repeats or jumps are left out.")
         }
@@ -587,7 +649,8 @@ class StatsActivity : StyledActivity() {
                 val last = readings.lastOrNull()?.takeIf { now - it.timeMs < 6 * 3_600_000L } ?: return@mapNotNull null
                 val rates = BatteryMath.dischargeStretches(readings.map(BatteryPoint::of), gaps = gaps).map { it.drop / it.hours }
                 val chargeRate = BatteryMath.median(ChargeCurves.observedCharges(readings, gaps)
-                    .map { (it.toPct - it.fromPct) / ((it.endMs - it.startMs) / 60_000.0) })
+                    .filter { it.peakMs > it.startMs }
+                    .map { (it.toPct - it.fromPct) / ((it.peakMs - it.startMs) / 60_000.0) })
                 ReadinessPlanner.assess(d.second, last.percent, rates, chargeRate, targetHours.toDouble(), reservePct)
             }
             if (assessed.isEmpty()) holder.addView(label("No recent readings to plan with.", 12.5f, Palette.quiet))
@@ -770,8 +833,42 @@ class StatsActivity : StyledActivity() {
         }, LinearLayout.LayoutParams(dp(92), -2))
     }
 
+    /** A small heading inside a card, to group its tiles. */
+    private fun LinearLayout.eyebrowRow(text: String) =
+        addView(eyebrow(text), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
+
     private companion object {
         const val TAG = "BatteryLabStats"
+        val SECTION_ICONS = mapOf(
+            "Phone battery capacity" to "\uD83D\uDD0B", "By the numbers" to "\uD83D\uDCCA",
+            "Charging habits" to "\uD83D\uDD0C", "Around the clock" to "\uD83D\uDD70\uFE0F",
+            "Showdown" to "\uD83C\uDFC6", "Head to head" to "\uD83E\uDD4A", "Over time" to "\uD83D\uDCC8",
+            "Temperature" to "\uD83C\uDF21\uFE0F", "What it costs" to "\uD83D\uDCB5",
+            "Where it comes from" to "\uD83C\uDFED", "Just for fun" to "\uD83C\uDF89",
+            "What's draining it" to "\uD83D\uDD0D", "Honesty audit" to "\uD83E\uDDD0",
+            "Prediction report card" to "\uD83D\uDCDD", "Charging speed" to "\u26A1",
+            "Asleep and idle" to "\uD83D\uDE34", "Will it last?" to "\uD83E\uDDED",
+            "Heat and charge level" to "\uD83D\uDD25", "Change journal" to "\uD83D\uDCD3",
+            "What Battery Lab costs" to "\uD83E\uDDEA", "What each device can report" to "\uD83D\uDCE1",
+        )
+        // Household and body comparisons (rough, typical values; captions say which).
+        const val G = 9.81
+        const val LED_BULB_W = 9.0
+        const val OLD_BULB_W = 60.0
+        const val TEA_CUP_WH = 23.0          // 250 ml from 20 to 100 C
+        const val TOAST_SLICE_WH = 50.0      // 1,200 W for 2.5 min
+        const val MICROWAVE_W = 1100.0
+        const val HAIR_DRYER_W = 1800.0
+        const val ROUTER_W = 6.0
+        const val TV_W = 100.0
+        const val AA_WH = 2.7
+        const val CAR_KG = 1500.0
+        const val PERSON_KG = 75.0
+        const val FLOOR_M = 3.0
+        const val BANANA_WH = 122.0          // 105 kcal
+        const val LAPTOP_WH = 50.0
+        const val WATCH_WH = 1.6             // ~425 mAh at 3.85 V
+        const val RING_WH = 0.08             // ~21 mAh at 3.85 V
         /** Shown until the user sets their own rate; their rate lives only in the phone's settings. */
         const val DEFAULT_CENTS_PER_KWH = 18.0
         const val KEY_CENTS_PER_KWH = "cents_per_kwh"

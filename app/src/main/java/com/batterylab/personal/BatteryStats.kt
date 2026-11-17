@@ -71,8 +71,11 @@ object BatteryStats {
     /** [hourOf] maps a time to its local hour of day (0..23); injected so tests are timezone-free. */
     /** Steps longer than [GapLimits.stepMs] are gaps (phone off, job deferred) and are not counted as time. */
     fun device(readings: List<Reading>, hourOf: (Long) -> Int, gaps: GapLimits = GapLimits()): DeviceStats {
-        val r = readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs }
+        val r = BatteryMath.withoutSpikes(readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs }, { it.percent }, { it.charging })
         var used = 0
+        // Lowest level since the last charge. A drop only counts below it, so a widget wobbling
+        // 50 → 51 → 50 adds nothing, and drain across a gap still counts (audit review, 2026-11-16).
+        var low: Int? = null
         var below20 = 0.0; var at100 = 0.0; var charging = 0.0; var onBattery = 0.0
         var streakStart: Long? = null; var longest = 0.0
         val hourSum = DoubleArray(24); val hourWeight = DoubleArray(24)
@@ -92,15 +95,15 @@ object BatteryStats {
             val isCharging = cur.charging == true
             if (prev != null) {
                 val dt = cur.timeMs - prev.timeMs
-                val drop = prev.percent - cur.percent
                 val prevCharging = prev.charging == true
+                val drop = if (prevCharging || isCharging) 0 else max(0, (low ?: prev.percent) - cur.percent)
+                used += drop
                 if (dt <= gaps.stepMs) {
                     val h = dt / HOUR
                     if (prev.percent < 20) below20 += h
                     if (prev.percent == 100 && prevCharging) at100 += h
                     if (prevCharging) charging += h else onBattery += h
-                    if (!prevCharging && !isCharging && drop >= 0 && h > 0) {
-                        used += drop
+                    if (!prevCharging && !isCharging && h > 0) {
                         // Share the drop across the clock hours the interval spans, by time in each.
                         var t = prev.timeMs
                         while (t < cur.timeMs) {
@@ -124,6 +127,11 @@ object BatteryStats {
                     if (streakStart == null) streakStart = prev.timeMs
                     longest = max(longest, (cur.timeMs - streakStart!!) / HOUR)
                 }
+            }
+            low = when {
+                isCharging -> null
+                prev != null && cur.percent > prev.percent + 2 -> cur.percent   // unseen charge: new baseline
+                else -> minOf(low ?: cur.percent, cur.percent)
             }
         }
         closeCharge()

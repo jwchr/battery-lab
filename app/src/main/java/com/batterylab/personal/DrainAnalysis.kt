@@ -89,6 +89,17 @@ object DrainAnalysis {
     private const val HOUR = 3_600_000.0
     const val UNATTRIBUTED = "Other"
 
+    /** Sorted, non-overlapping union of [spans]. */
+    fun mergeSpans(spans: List<Span>): List<Span> {
+        val out = mutableListOf<Span>()
+        for (sp in spans.filter { it.endMs > it.startMs }.sortedBy { it.startMs }) {
+            val last = out.lastOrNull()
+            if (last != null && sp.startMs <= last.endMs) out[out.lastIndex] = Span(last.startMs, max(last.endMs, sp.endMs))
+            else out += sp
+        }
+        return out
+    }
+
     fun analyze(points: List<BatteryPoint>, screenOn: List<Span>, apps: Map<String, List<Span>>,
                 maxStepMs: Long, capacityMah: Double? = null,
                 services: Map<String, List<Span>> = emptyMap()): DrainBreakdown {
@@ -120,17 +131,17 @@ object DrainAnalysis {
         if (offRate == null) return DrainBreakdown(onMs / HOUR, offMs / HOUR, null, null, totalDrop, 0.0, emptyList(), usedCounter)
 
         val index = apps.mapValues { SpanIndex(it.value) }
-        var standby = 0.0
-        val share = HashMap<String, Double>()
+        // Idle is priced over the whole window, not step by step: with 1% steps most quarter-hours
+        // show no drop and a few show 1, and a per-step min(drop, idle) booked most of every 1%
+        // step as app use, even with the screen off (audit review, 2026-11-16).
+        val totalHours = steps.sumOf { it.to - it.from } / HOUR
+        val standby = min(totalDrop, offRate * totalHours)
         val fgMs = HashMap<String, Long>()
-        // Whole-phone drop and energy during each app's on-screen time, for intensity.
+        // Whole-phone drop and energy during each app's on-screen time, for intensity and shares.
         val activeDrop = HashMap<String, Double>()
         val activeWh = HashMap<String, Double>()
+        var otherOnMs = 0L; var otherOnDrop = 0.0
         for (s in steps) {
-            val hours = (s.to - s.from) / HOUR
-            val base = min(s.drop, offRate * hours)
-            standby += base
-            val extra = s.drop - base
             val inStep = index.mapValues { (_, ix) -> ix.overlap(s.from, s.to) }.filterValues { it > 0 }
             val stepMs = (s.to - s.from).toDouble()
             inStep.forEach { (app, ms) ->
@@ -139,18 +150,41 @@ object DrainAnalysis {
                 activeDrop[app] = (activeDrop[app] ?: 0.0) + part
                 if (capacityMah != null && s.mvAvg != null) activeWh[app] = (activeWh[app] ?: 0.0) + part / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
             }
-            if (extra <= 0.0) continue
-            val total = inStep.values.sum()
-            if (total == 0L) share[UNATTRIBUTED] = (share[UNATTRIBUTED] ?: 0.0) + extra
-            else inStep.forEach { (app, ms) -> share[app] = (share[app] ?: 0.0) + extra * ms / total }
+            // Screen on with no app in the history (lock screen, system UI) counts as Other.
+            val bare = (s.onMs - inStep.values.sum()).coerceAtLeast(0L)
+            otherOnMs += bare; otherOnDrop += s.drop * bare / stepMs
+        }
+        // Each app: drop while it was on screen beyond what idle would have used in that time.
+        // Screen-off time is never given to an app. Shares are then scaled to add up to exactly
+        // the drop above idle, so idle plus every row is 100%.
+        val raw = HashMap<String, Double>()
+        fgMs.forEach { (app, ms) -> raw[app] = max(0.0, (activeDrop[app] ?: 0.0) - offRate * ms / HOUR) }
+        if (otherOnMs > 0) raw[UNATTRIBUTED] = (raw[UNATTRIBUTED] ?: 0.0) + max(0.0, otherOnDrop - offRate * otherOnMs / HOUR)
+        val above = totalDrop - standby
+        val rawSum = raw.values.sum()
+        val share = HashMap<String, Double>()
+        when {
+            above <= 0.0 -> Unit
+            rawSum > 0.0 -> raw.forEach { (app, v) -> if (v > 0) share[app] = v / rawSum * above }
+            else -> share[UNATTRIBUTED] = above
         }
         // Screen-on drain can't really be below idle drain; if the fit says so, the data is too thin.
         val onRate = if (onMs >= HOUR / 2) {
             ((totalDrop - offRate * offMs / HOUR) / (onMs / HOUR)).takeIf { it >= offRate }
         } else null
-        // Foreground services running while the screen was off.
+        // Foreground services running while the screen was off, only within the analysed steps
+        // (not charging time or before the readings start), with overlapping spans merged.
+        val stepIndex = SpanIndex(steps.map { Span(it.from, it.to) })
         val screenOffServiceHours = services.mapValues { (_, spans) ->
-            spans.sumOf { sp -> (sp.endMs - sp.startMs) - screen.overlap(sp.startMs, sp.endMs) } / HOUR
+            mergeSpans(spans).sumOf { sp ->
+                val inWindow = stepIndex.overlap(sp.startMs, sp.endMs)
+                // Of the in-window time, keep the part with the screen off.
+                val onInWindow = steps.sumOf { st ->
+                    val from = max(sp.startMs, st.from); val to = min(sp.endMs, st.to)
+                    if (to > from) screen.overlap(from, to) else 0L
+                }
+                (inWindow - onInWindow).coerceAtLeast(0L)
+            } / HOUR
         }
         val list = (share.keys + fgMs.keys + screenOffServiceHours.filterValues { it > 0 }.keys).distinct().map { app ->
             val fgHours = (fgMs[app] ?: 0L) / HOUR

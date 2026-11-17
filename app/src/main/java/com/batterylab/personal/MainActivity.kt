@@ -73,6 +73,13 @@ class MainActivity : StyledActivity() {
 
     /** Reads Samsung's widget (no radio use) and records labeled Ring/Watch slots. */
     private fun refreshWidget() {
+        val started = android.os.SystemClock.elapsedRealtime()
+        try { refreshWidgetNow() } finally {
+            android.util.Log.i("BatteryLabMain", "Widget refresh (main): ${android.os.SystemClock.elapsedRealtime() - started} ms")
+        }
+    }
+
+    private fun refreshWidgetNow() {
         widgetSnapshot = try {
             SamsungWidgetSource.snapshot(this)?.also { SamsungWidgetSource.record(this, store, it, "app") }
         } catch (e: Exception) {
@@ -81,7 +88,20 @@ class MainActivity : StyledActivity() {
         }
     }
 
+    /** Main-thread time per part of [render], logged under BatteryLabMain (audit #4 A6). */
+    private val renderMarks = mutableListOf<Pair<String, Long>>()
+    private var renderMarkAt = 0L
+    private fun mark(name: String) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        renderMarks += name to (now - renderMarkAt); renderMarkAt = now
+    }
+    private fun logRender() {
+        android.util.Log.i("BatteryLabMain", "Render (main): total ${renderMarks.sumOf { it.second }} ms · " +
+            renderMarks.joinToString { "${it.first} ${it.second}" })
+    }
+
     private fun render() {
+        renderMarks.clear(); renderMarkAt = android.os.SystemClock.elapsedRealtime()
         val oldScroll = scroll.scrollY
         body.removeAllViews()
         val exempt = (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
@@ -113,6 +133,7 @@ class MainActivity : StyledActivity() {
             }
         }
 
+        mark("header+right now")
         section("Last 48 hours", "How the last two days went.").apply {
             addView(chipRow(chip("Phone", colors[0]), chip("Watch", colors[1]), chip("Ring", colors[2])))
             val series = devices.map { (id, _) -> store.since(id, System.currentTimeMillis() - 48 * 3_600_000L) }
@@ -147,7 +168,9 @@ class MainActivity : StyledActivity() {
                 else "Gaps mean Android delayed a check, not that a battery stopped.", 11.5f, Palette.quiet))
         }
 
+        mark("48h graph")
         renderBatteryLifeSection(devices, colors)
+        mark("battery life")
 
         val backupUri = DriveBackup.uri(this)
         section("Backup", if (backupUri != null) "Backing up to your Drive." else "Keep a copy in Google Drive.",
@@ -187,7 +210,7 @@ class MainActivity : StyledActivity() {
             addView(label("The widget connection, Ring Bluetooth, the A/B test and CSV export.", 13f))
             button(if (labOpen) "Hide lab tools" else "Show lab tools") { labOpen = !labOpen; render() }
         }
-        if (!labOpen) { scroll.post { scroll.scrollTo(0, oldScroll) }; return }
+        if (!labOpen) { mark("rest"); logRender(); scroll.post { scroll.scrollTo(0, oldScroll) }; return }
 
         renderWidgetSection()
 
@@ -269,6 +292,7 @@ class MainActivity : StyledActivity() {
             addView(label("For Watch8 data, install the included Wear OS companion and open it once. " +
                 "Watch sampling is scheduled approximately every 30 minutes.", 12f, quiet))
         }
+        mark("rest+lab tools"); logRender()
         scroll.post { scroll.scrollTo(0, oldScroll) }
     }
 

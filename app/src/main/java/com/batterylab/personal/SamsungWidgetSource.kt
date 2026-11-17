@@ -273,6 +273,8 @@ object SamsungWidgetSource {
                 PERCENT_TEXT.find(it.text)?.groupValues?.get(1)?.toIntOrNull()
             }?.takeIf { it in 0..100 } ?: return@mapIndexedNotNull null // empty slot
             val icon = images.firstOrNull()?.drawable
+            // A second image is the charging bolt. Checked against real history for the phone,
+            // Ring and Watch (docs/ARCHITECTURE.md, "Known limits of the widget source").
             WidgetSlot(index, percent, bar.progress, images.size >= 2,
                 icon?.let(::fingerprint), if (includeIcons) icon?.let { render(it, 96) } else null)
         }

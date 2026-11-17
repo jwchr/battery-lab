@@ -19,7 +19,7 @@ class WatchActivity : Activity() {
             setPadding(25, 20, 25, 20)
             setBackgroundColor(Color.rgb(11, 20, 33))
         }
-        val text = TextView(this).apply {
+        val label = TextView(this).apply {
             textSize = 21f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
@@ -37,7 +37,7 @@ class WatchActivity : Activity() {
                 }
             }
         }
-        layout.addView(text)
+        layout.addView(label)
         layout.addView(button)
         setContentView(layout)
     }

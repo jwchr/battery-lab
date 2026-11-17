@@ -69,10 +69,17 @@ class BatteryStore(context: Context) : SQLiteOpenHelper(context, "battery_lab.db
 
     fun latest(device: String): Reading? = recent(device, 1).lastOrNull()
 
-    fun recent(device: String, limit: Int = 500): List<Reading> {
+    fun recent(device: String, limit: Int = 500): List<Reading> =
+        query("device=?", arrayOf(device), limit.coerceIn(1, 10000).toString())
+
+    /** Every reading for [device] since [fromMs], oldest first; for long-range history. */
+    fun since(device: String, fromMs: Long): List<Reading> =
+        query("device=? AND time_ms>=?", arrayOf(device, fromMs.toString()), null)
+
+    private fun query(where: String, args: Array<String>, limit: String?): List<Reading> {
         val output = mutableListOf<Reading>()
-        readableDatabase.query("readings", null, "device=?", arrayOf(device), null, null,
-            "time_ms DESC, id DESC", limit.coerceIn(1, 10000).toString()).use { c ->
+        readableDatabase.query("readings", null, where, args, null, null,
+            "time_ms DESC, id DESC", limit).use { c ->
             while (c.moveToNext()) {
                 fun nullableInt(name: String): Int? {
                     val ix = c.getColumnIndexOrThrow(name)

@@ -6,4 +6,4 @@ dependencyResolutionManagement {
     repositories { google(); mavenCentral() }
 }
 rootProject.name = "BatteryLab"
-include(":app", ":wear")
+include(":app", ":wear", ":widgetprobe")

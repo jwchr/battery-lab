@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Not grantable to third-party apps; the documented host flow falls back to
+         the system ACTION_APPWIDGET_BIND consent dialog. Declared per Android docs. -->
+    <uses-permission android:name="android.permission.BIND_APPWIDGET"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- Package visibility for the one provider package this probe inspects. -->
+    <queries>
+        <package android:name="com.android.settings.intelligence" />
+    </queries>
+
+    <application
+        android:allowBackup="false"
+        android:label="Battery Lab Widget Probe"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+        <activity android:name=".ProbeActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

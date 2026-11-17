@@ -24,6 +24,10 @@ import java.util.zip.GZIPOutputStream
  * part way would roll back with nothing retrying it. Until the import succeeds, backups keep the
  * restored file as is, so a nearly empty new database can't overwrite the history in the cloud.
  * The import skips readings that already exist, so a repeated restore is harmless.
+ *
+ * If the import keeps failing, it gives up after [MAX_TRIES] but still holds the restored file as
+ * the cloud copy: a fresh export replaces it only once it has at least as many lines, so a new
+ * phone's short history never overwrites a longer one in the cloud.
  */
 class CloudBackupAgent : BackupAgent() {
 
@@ -35,8 +39,15 @@ class CloudBackupAgent : BackupAgent() {
         try {
             GZIPOutputStream(staged.outputStream()).bufferedWriter().use(store::exportCsv)
             // Same check as the Drive backup: only a complete, readable archive replaces the last one.
-            check(GZIPInputStream(staged.inputStream()).bufferedReader().useLines { it.count() } >= 1) { "empty archive" }
-            if (!staged.renameTo(target)) error("could not replace snapshot")
+            val fresh = lineCount(staged)
+            check(fresh >= 1) { "empty archive" }
+            val held = File(dir(this), HELD)
+            if (held.exists() && target.exists() && !replacesHeld(lineCount(target), fresh)) {
+                store.logProbe("backup", "Cloud backup kept the restored copy (local history still shorter)")
+            } else {
+                if (!staged.renameTo(target)) error("could not replace snapshot")
+                held.delete()
+            }
         } catch (e: Exception) {
             store.logProbe("backup", "Cloud backup snapshot failed: ${e.javaClass.simpleName}")
         } finally {
@@ -59,7 +70,13 @@ class CloudBackupAgent : BackupAgent() {
         const val DIR = "cloud"
         const val FILE = "history.csv.gz"
         private const val PENDING = "import.pending"
+        private const val HELD = "restore.held"
         private const val MAX_TRIES = 3
+
+        private fun lineCount(gz: File) = GZIPInputStream(gz.inputStream()).bufferedReader().useLines { it.count() }
+
+        /** A fresh export replaces a held, unimported restore only once it is at least as long. */
+        internal fun replacesHeld(heldLines: Int, freshLines: Int) = freshLines >= heldLines
 
         private fun dir(context: Context) = File(context.filesDir, DIR).apply { mkdirs() }
 
@@ -71,8 +88,9 @@ class CloudBackupAgent : BackupAgent() {
             val store = BatteryStore.get(context)
             val tries = marker.readText().trim().toIntOrNull() ?: 0
             if (!file.exists() || tries >= MAX_TRIES) {
-                // Out of tries: keep the file aside for a manual look; the next backup exports the database.
-                if (file.exists()) file.renameTo(File(dir(context), "history-unimported.csv.gz"))
+                // Out of tries: stop importing, but keep the restored file in place as the cloud copy
+                // until the local history catches up (see onFullBackup), so it isn't overwritten.
+                if (file.exists()) File(dir(context), HELD).writeText(tries.toString())
                 marker.delete()
                 if (tries >= MAX_TRIES) store.logProbe("backup", "Cloud restore gave up after $tries tries")
                 return

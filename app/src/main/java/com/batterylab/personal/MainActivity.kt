@@ -629,11 +629,26 @@ class MainActivity : StyledActivity() {
         afterWidgetReady()
     }
 
-    /** Samsung renders asynchronously after binding/resizing; read shortly afterwards. */
-    private fun afterWidgetReady() {
-        toast("Samsung Battery widget connected")
+    /**
+     * Samsung renders asynchronously after binding/resizing; read shortly afterwards and report
+     * what the widget actually shows, not just that binding finished.
+     */
+    private fun afterWidgetReady(settingsCancelled: Boolean = false) {
+        if (settingsCancelled) store.logProbe(SamsungWidgetSource.SOURCE, "Widget settings screen cancelled")
+        toast(if (settingsCancelled) "Widget settings cancelled. Checking whether the widget still shows readings…"
+              else "Checking the Samsung Battery widget…")
         render()
-        body.postDelayed({ refreshWidget(); render() }, 1500)
+        body.postDelayed({
+            if (isDestroyed) return@postDelayed
+            refreshWidget()
+            val slots = widgetSnapshot?.slots?.size ?: 0
+            toast(when {
+                slots > 0 -> "Samsung Battery widget connected ($slots ${if (slots == 1) "device" else "devices"} visible)"
+                settingsCancelled -> "Widget added, but it shows no readings. Tap Connect again to finish its settings."
+                else -> "Widget added, but it shows no readings yet. Check again in a minute."
+            })
+            render()
+        }, 1500)
     }
 
     private fun chooseRing() {
@@ -695,17 +710,21 @@ class MainActivity : StyledActivity() {
             }.setNegativeButton("Cancel", null).show()
     }
 
-    /** Prefers sources that do not wake the Ring: Samsung widget, then a recent manual entry, then BLE. */
-    private fun freshRingReading(next: (Reading) -> Unit) {
+    /**
+     * Prefers sources that do not wake the Ring: what the Samsung widget shows now, then a recent
+     * manual entry, then BLE, which only the monitoring arm may use.
+     */
+    private fun freshRingReading(mode: String, next: (Reading) -> Unit) {
         refreshWidget()
-        val ringId = PollScheduler.ringDeviceId(this)
-        val latest = store.latest(ringId)
-        val age = latest?.let { System.currentTimeMillis() - it.timeMs } ?: Long.MAX_VALUE
-        when {
-            latest != null && latest.source == SamsungWidgetSource.SOURCE && age <= 120_000 -> next(latest)
-            latest != null && latest.source == "manual_widget" && age <= 120_000 -> next(latest)
-            PollScheduler.ringAddress(this) != null -> readRing(next)
-            else -> toast("No current Ring reading. Label the Ring in the Samsung widget section or enter it manually.")
+        val widgetRing = widgetSnapshot?.slots?.firstOrNull {
+            SamsungWidgetSource.labelFor(this, it.fingerprint) == SamsungWidgetSource.LABEL_RING
+        }?.percent
+        val choice = ExperimentEndpoint.choose(mode, widgetRing, store.latest(PollScheduler.ringDeviceId(this)),
+            System.currentTimeMillis(), PollScheduler.ringAddress(this) != null)
+        when (choice) {
+            is ExperimentEndpoint.Choice.Use -> next(choice.reading)
+            ExperimentEndpoint.Choice.ReadBle -> readRing(next)
+            is ExperimentEndpoint.Choice.Refuse -> toast(choice.reason)
         }
     }
 
@@ -721,7 +740,7 @@ class MainActivity : StyledActivity() {
             return
         }
         PollScheduler.setRingEnabled(this, false)
-        freshRingReading { reading ->
+        freshRingReading(mode) { reading ->
             store.startExperiment(reading.device, mode, reading)
             PollScheduler.setRingEnabled(this, mode == "monitoring")
             toast("${mode.replaceFirstChar { it.uppercase() }} test started at ${reading.percent}%")
@@ -737,7 +756,7 @@ class MainActivity : StyledActivity() {
         }
         // Monitoring is switched off only once the final reading is saved; if the read fails the
         // test and its settings stay exactly as they were.
-        freshRingReading { reading ->
+        freshRingReading(experiment.mode) { reading ->
             store.finishExperiment(reading)
             PollScheduler.setRingEnabled(this, false)
             toast("Experiment finished")
@@ -769,7 +788,7 @@ class MainActivity : StyledActivity() {
             return
         }
         if (requestCode == CONFIGURE_WIDGET) {
-            afterWidgetReady()
+            afterWidgetReady(settingsCancelled = resultCode != RESULT_OK)
             return
         }
         if (requestCode == PICK_BACKUP && resultCode == RESULT_OK) {

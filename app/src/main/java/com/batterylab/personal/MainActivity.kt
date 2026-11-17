@@ -174,27 +174,28 @@ class MainActivity : StyledActivity() {
         renderBatteryLifeSection(devices, colors)
         mark("battery life")
 
-        val backupUri = DriveBackup.uri(this)
-        section("Backup", if (backupUri != null) "Backing up to your Drive." else "Keep a copy in Google Drive.",
-            if (backupUri != null) DriveBackup.lastBackupMs(this)?.let {
+        val backupOn = DriveBackup.isOn(this)
+        val singleFile = DriveBackup.treeUri(this) == null && DriveBackup.uri(this) != null
+        fun pickFolder() = startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_BACKUP)
+        section("Backup", if (backupOn) "Backing up to your Drive." else "Keep a copy in Google Drive.",
+            if (backupOn) (DriveBackup.lastBackupMs(this)?.let {
                 "Last saved ${BatteryStore.format(it)}. Updated about twice a day with your full history (zipped CSV)."
-            } ?: "Waiting for the first save." else "Pick a file in Google Drive once; Battery Lab updates it about " +
-                "twice a day with your full history. Your history otherwise lives only on this phone.",
-            tag = if (backupUri != null) "On" else null).apply {
-            if (backupUri == null) button("Choose a Drive file", primary = true) {
-                startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "application/gzip"
-                    putExtra(Intent.EXTRA_TITLE, "battery-lab-history.csv.gz")
-                }, PICK_BACKUP)
-            } else {
+            } ?: "Waiting for the first save.") + (if (singleFile) " Each save replaces the one file; a folder keeps " +
+                "the last ${DriveBackup.KEEP} copies, so a failed save can't erase the good one." else
+                " The newest ${DriveBackup.KEEP} copies are kept.")
+            else "Pick a folder in Google Drive once; Battery Lab saves your full history there about twice a day " +
+                "and keeps the last ${DriveBackup.KEEP} copies. Your history otherwise lives only on this phone.",
+            tag = if (backupOn) "On" else null).apply {
+            if (!backupOn) button("Choose a Drive folder", primary = true) { pickFolder() }
+            else {
+                if (singleFile) button("Switch to a folder (keeps ${DriveBackup.KEEP} copies)") { pickFolder() }
                 button("Back up now") {
                     toast("Backing up\u2026")
                     Background.io.execute {
                         val ok = DriveBackup.maybeBackup(this@MainActivity, store, force = true)
                         Background.onMain {
                             if (isDestroyed) return@onMain
-                            toast(if (ok) "Saved to your backup file" else "Backup failed; check that the file still exists")
+                            toast(if (ok) "Backup saved" else "Backup failed; check that the backup folder or file still exists")
                             render()
                         }
                     }
@@ -845,8 +846,8 @@ class MainActivity : StyledActivity() {
         if (requestCode == PICK_BACKUP && resultCode == RESULT_OK) {
             val uri = data?.data ?: return
             try {
-                DriveBackup.enable(this, uri)
-            } catch (e: Exception) { toast("Couldn't use that file: ${e.message}"); return }
+                DriveBackup.enableFolder(this, uri)
+            } catch (e: Exception) { toast("Couldn't use that folder: ${e.message}"); return }
             Background.io.execute {
                 val ok = DriveBackup.maybeBackup(this, store, force = true)
                 Background.onMain {

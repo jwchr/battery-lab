@@ -112,8 +112,7 @@ class MainActivity : StyledActivity() {
 
         val ringAddress = PollScheduler.ringAddress(this)
         val ringId = PollScheduler.ringDeviceId(this)
-        val watchId = store.deviceIds().filter { it.startsWith("watch:") }
-            .maxByOrNull { store.latest(it)?.timeMs ?: 0L }
+        val watchId = store.primaryWatchId()
         val devices = listOf("phone" to "Phone", (watchId ?: "watch:unknown") to "Galaxy Watch8",
             ringId to "Galaxy Ring")
         if (!exempt) section("Heads up", "Background checks may pause for hours",

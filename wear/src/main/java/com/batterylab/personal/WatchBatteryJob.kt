@@ -47,8 +47,11 @@ object WatchReporter {
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val state = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
         val charging = state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL
-        val request = PutDataMapRequest.create("/batterylab/watch").apply {
-            dataMap.putLong("time_ms", System.currentTimeMillis())
+        // One item per sample: with a single shared path, every sample taken while the phone was
+        // out of range overwrote the last, and only the newest ever reached it.
+        val now = System.currentTimeMillis()
+        val request = PutDataMapRequest.create("/batterylab/watch/$now").apply {
+            dataMap.putLong("time_ms", now)
             dataMap.putInt("percent", percent)
             dataMap.putBoolean("charging", charging)
             dataMap.putString("model", Build.MODEL)

@@ -57,6 +57,8 @@ class StatsActivity : StyledActivity() {
         val phoneWidget: List<Reading>,
         val drain: DrainPrep?,
         val forecasts: List<Forecast>,
+        /** Watch-app readings, compared against the widget's in the audit. */
+        val watchCompanion: List<Reading>,
     )
 
     /** The drain breakdown and the app names it shows, prepared off the main thread. */
@@ -102,7 +104,7 @@ class StatsActivity : StyledActivity() {
 
     private fun load(): Loaded {
         val ringId = PollScheduler.ringDeviceId(this)
-        val watchId = store.deviceIds().filter { it.startsWith("watch:") }.maxByOrNull { store.latest(it)?.timeMs ?: 0L }
+        val watchId = store.primaryWatchId()
         val devices = listOf(Triple("phone", "Phone", Palette.phone),
             Triple(watchId ?: "watch:unknown", "Galaxy Watch8", Palette.watch), Triple(ringId, "Galaxy Ring", Palette.ring))
         val hourOf = { ms: Long -> Calendar.getInstance().apply { timeInMillis = ms }.get(Calendar.HOUR_OF_DAY) }
@@ -124,7 +126,8 @@ class StatsActivity : StyledActivity() {
                 UsageSource.hiddenCount(this))
         }
         return Loaded(devices, data, gaps, stats, capacity, usage, idle,
-            store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain, store.forecasts())
+            store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain, store.forecasts(),
+            if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList())
     }
 
     private fun renderTitle() {
@@ -159,7 +162,7 @@ class StatsActivity : StyledActivity() {
         timed("drain") { renderDrain(l.drain) }
         timed("nights") { renderNights(idle) }
         timed("charging") { renderCharging(phone, gaps) }
-        timed("audit") { renderAudit(phone, l.phoneWidget, data[1], data[2], capacity, gaps) }
+        timed("audit") { renderAudit(phone, l.phoneWidget, (data[1] + l.watchCompanion).sortedBy { it.timeMs }, data[2], capacity, gaps) }
         timed("forecasts") { renderForecasts(l.forecasts, l.devices) }
         timed("journal") { renderJournal(idle) }
         timed("heat") { renderHeat(phone, gaps) }

@@ -1,12 +1,12 @@
 # Battery Lab handoff
 
-Last updated 2026-11-16. This replaces the Nov 13 note in issue #2. For the architecture and its evidence, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
+Last updated 2026-11-17. This replaces the Nov 13 note in issue #2. For the architecture and its evidence, see [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## Where things stand
-- **PR #3** (`feature/samsung-widget-source`, draft): reads the Samsung Battery widget as the Ring and Watch source, plus the scheduling fix.
-- **PR #6** (`feature/pretty-ui`, draft, based on PR #3's branch): the redesign, the Stats "lab engine" and the audit #4 fixes. Auto-fix is on for it in the session that opened it.
-- **Nothing is merged.** Every merge needs the owner's OK.
-- **Phone:** has the newest `feature/pretty-ui` debug build, installed over the old app with history kept. The background job runs every 15 minutes, and the app is exempt from battery optimization (Unrestricted).
+- **PR #3** (Samsung widget source and the scheduling fix): merged into `main` on 2026-11-17.
+- **PR #6** (the redesign, the Stats "lab engine", the audit #4 fixes, cloud backup and two review passes): merged into `main` on 2026-11-17, after PR #3. Both branches are deleted.
+- **New work goes on a branch off `main`.** Every merge still needs the owner's OK.
+- **Phone:** has the newest debug build (the code now on `main`), installed over the old app with history kept. The background job runs every 15 minutes, and the app is exempt from battery optimization (Unrestricted).
 - **Watch app:** the newest `wear` build is not installed on the watch.
 
 ## Audit #4 status
@@ -44,7 +44,7 @@ For the full table, see the triage comment on issue #4. That comment predates A1
 2. **B5 restore check:** a real restore onto a new phone is untested; the backup itself ran on 2026-11-16.
 3. **A/B Ring-overhead experiment** (widget-only vs BLE monitoring, ABBA order). Not run yet.
 4. **Issue #5 (Ring Radar):** a proposal only, not approved for coding.
-5. **After PR #3 merges:** delete `feature/widget-host-probe` once it has no unique work, and consider closing `feature/passive-battery-diagnostic` (PR #1, closed).
+5. **Old branches kept:** `feature/widget-host-probe` (3 commits) and `feature/passive-battery-diagnostic` (2 commits, PR #1 closed) still hold work that is not in `main`.
 
 ## Working with the phone
 - **adb:** the phone is held by the Android SDK's adb server on **port 5040**, not the Homebrew adb on 5037. Before blaming phone settings, run commands this way:

@@ -336,7 +336,8 @@ class BatteryStore private constructor(context: Context) :
         return Reading(c.getString(c.getColumnIndexOrThrow("device")),
             c.getLong(c.getColumnIndexOrThrow("time_ms")),
             c.getInt(c.getColumnIndexOrThrow("percent")),
-            int("charging")?.let { it == 1 },
+            // Plugged in counts as on the charger, for old readings too (see PhoneBattery.read).
+            int("charging")?.let { it == 1 || (detail?.plugged ?: 0) > 0 },
             c.getString(c.getColumnIndexOrThrow("source")),
             int("temp_tenths_c"), int("voltage_mv"), int("remaining_uah"), detail)
     }
@@ -625,8 +626,9 @@ class BatteryStore private constructor(context: Context) :
                             }
                         }
                         db.insertOrThrow("readings", null, v); added++
-                        // A long restore shouldn't lock out the 15-minute job.
-                        if (added % 2000 == 0) db.yieldIfContendedSafely()
+                        // Commit in chunks: a long restore doesn't lock out the 15-minute job, and if
+                        // the process dies part way, what was imported stays (the import skips it next time).
+                        if (added % 2000 == 0) { db.setTransactionSuccessful(); db.endTransaction(); db.beginTransaction() }
                     }
                     "experiment" -> {
                         val mode = get("mode_or_source") ?: continue

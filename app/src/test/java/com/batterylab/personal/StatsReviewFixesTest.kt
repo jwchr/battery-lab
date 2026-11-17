@@ -82,6 +82,21 @@ class StatsReviewFixesTest {
         assertEquals(22.5, c.bands.single { it.fromPct == 20 }.minutes, 1e-9)
     }
 
+    @Test fun parkingAtFullDoesNotSlowTheFastestCharge() {
+        // 20 -> 100 in 45 min, then parked on the charger for 7 h.
+        val s = BatteryStats.device(listOf(r(0, 20), r(15, 50, true), r(30, 80, true), r(45, 100, true),
+            r(465, 100, true), r(480, 100)), hourOf)
+        assertEquals(80.0 / 45.0, s.charges.single().ratePerMinute!!, 1e-9)
+    }
+
+    @Test fun aProtectionHoldEndsTheTimedCharge() {
+        val hold = (60..400 step 20).map { Reading("phone", t + it * m, 80, true, "android", detail = ReadingDetail(status = 4)) }
+        val readings = listOf(r(0, 30, true), r(25, 55, true), r(50, 80, true)) + hold + listOf(r(420, 90, true), r(440, 100, true))
+        val charges = ChargeCurves.observedCharges(readings, GapLimits())
+        assertEquals(2, charges.size)
+        assertEquals(80, charges[0].toPct)
+    }
+
     @Test fun serviceSpansAreMergedBeforeCounting() {
         val merged = DrainAnalysis.mergeSpans(listOf(Span(0, 10), Span(5, 20), Span(30, 40), Span(40, 45)))
         assertEquals(listOf(Span(0, 20), Span(30, 45)), merged)

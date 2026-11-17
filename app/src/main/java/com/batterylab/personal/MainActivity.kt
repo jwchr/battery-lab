@@ -48,7 +48,7 @@ class MainActivity : StyledActivity() {
         super.onCreate(savedInstanceState)
         store = BatteryStore.get(this)
         pendingWidgetId = savedInstanceState?.getInt("pendingWidgetId", pendingWidgetId) ?: pendingWidgetId
-        PhoneBattery.read(this, "app")?.let(store::append)
+        if (savedInstanceState == null) PhoneBattery.read(this, "app")?.let(store::append)
         PollScheduler.schedule(this)
         Background.io.execute { CloudBackupAgent.importPending(applicationContext) }
 

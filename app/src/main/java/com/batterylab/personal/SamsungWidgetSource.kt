@@ -247,6 +247,8 @@ object SamsungWidgetSource {
         return if (bestDistance <= MATCH_DISTANCE && best != null) best to bestDistance else null
     }
 
+    // Synchronized with [record], which can auto-label the phone slot: both rewrite the labels JSON.
+    @Synchronized
     fun setLabel(context: Context, fingerprint: String, label: String) {
         val labels = labels(context)
         // Drop near-duplicates so one icon never carries two labels.

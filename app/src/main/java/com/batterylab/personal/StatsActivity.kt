@@ -130,24 +130,32 @@ class StatsActivity : StyledActivity() {
         val devices = l.devices; val data = l.data; val gaps = l.gaps; val stats = l.stats
         val capacity = l.capacity; val usage = l.usage; val idle = l.idle; val phone = data[0]
 
-        renderPhoneHealth(phone, capacity)
-        renderPlanner(devices, data, gaps)
-        renderDrain(phone, gaps, usage, capacity.combinedMah)
-        renderNights(idle)
-        renderCharging(phone, gaps)
-        renderAudit(phone, l.phoneWidget, data[1], data[2], capacity, gaps)
-        renderForecasts()
-        renderJournal(idle)
-        renderHeat(phone, gaps)
-        renderNumbers(devices, stats)
-        renderHabits(stats[0])
-        renderHours(devices, stats)
-        renderShowdown(devices, data)
-        renderRolling(devices, data)
-        BatteryStats.temperature(phone)?.let(::renderTemperature)
-        renderFun(stats[0], capacity.combinedMah ?: phoneCapacity(phone)?.first, phone)
-        renderOverhead()
-        renderCapabilities()
+        val sectionMs = mutableListOf<Pair<String, Long>>()
+        fun timed(name: String, block: () -> Unit) {
+            val t0 = android.os.SystemClock.elapsedRealtime(); block()
+            sectionMs += name to android.os.SystemClock.elapsedRealtime() - t0
+        }
+        timed("health") { renderPhoneHealth(phone, capacity) }
+        timed("planner") { renderPlanner(devices, data, gaps) }
+        timed("drain") { renderDrain(phone, gaps, usage, capacity.combinedMah) }
+        timed("nights") { renderNights(idle) }
+        timed("charging") { renderCharging(phone, gaps) }
+        timed("audit") { renderAudit(phone, l.phoneWidget, data[1], data[2], capacity, gaps) }
+        timed("forecasts") { renderForecasts() }
+        timed("journal") { renderJournal(idle) }
+        timed("heat") { renderHeat(phone, gaps) }
+        timed("numbers") { renderNumbers(devices, stats) }
+        timed("habits") { renderHabits(stats[0]) }
+        timed("hours") { renderHours(devices, stats) }
+        timed("showdown") { renderShowdown(devices, data) }
+        timed("rolling") { renderRolling(devices, data) }
+        timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
+        timed("fun") { renderFun(stats[0], capacity.combinedMah ?: phoneCapacity(phone)?.first, phone) }
+        timed("overhead") { renderOverhead() }
+        timed("capabilities") { renderCapabilities() }
+        // Which sections still cost main-thread time (audit #4 A6); only the slow ones are listed.
+        android.util.Log.i(TAG, "Stats sections (main, >=5 ms): " +
+            sectionMs.filter { it.second >= 5 }.sortedByDescending { it.second }.joinToString { "${it.first} ${it.second}" }.ifEmpty { "none" })
         body.addView(label("All numbers come from readings stored on this phone. Estimates, not lab measurements.",
             11.5f, Palette.body).apply { setPadding(dp(6), dp(4), dp(6), 0) })
         scroll.post { scroll.scrollTo(0, oldScroll) }

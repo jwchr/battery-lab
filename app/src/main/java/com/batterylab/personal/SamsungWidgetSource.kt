@@ -136,16 +136,25 @@ object SamsungWidgetSource {
     }
 
     /** Stores labeled Ring/Watch slots as readings. Phone slots are never stored (Android is authoritative). */
+    // Synchronized: the screen and the background check both save widget reads, and each checks
+    // the last reading before inserting; unsynchronized, both could insert the same value.
+    @Synchronized
     fun record(context: Context, store: BatteryStore, snapshot: WidgetSnapshot, trigger: String = "job"): List<Reading> {
         val saved = mutableListOf<Reading>()
         val seen = mutableSetOf<String>()
         val unmatched = mutableListOf<String>()
         val clock = ReadingDetail.clock(context, trigger).copy(elapsedMs = snapshot.elapsedMs)
         recognizePhoneSlot(context, store, snapshot)
-        for (slot in snapshot.slots) {
-            val label = labelFor(context, slot.fingerprint)
+        // Each label goes to its closest slot only. Two slots matching one label (two watches, or a
+        // Buds icon close to the Ring's) would otherwise save two values for one device at once.
+        val matches = snapshot.slots.map { match(context, it.fingerprint) }
+        val owner = matches.withIndex().filter { it.value != null }
+            .groupBy { it.value!!.first }.mapValues { (_, v) -> v.minByOrNull { it.value!!.second }!!.index }
+        for ((i, slot) in snapshot.slots.withIndex()) {
+            val m = matches[i]
+            val label = m?.first?.takeIf { owner[it] == i }
             if (label == null) {
-                unmatched += "${slot.index}:${if (slot.fingerprint == null) "unreadable" else "unrecognized"}"
+                unmatched += "${slot.index}:${when { slot.fingerprint == null -> "unreadable"; m != null -> "duplicate"; else -> "unrecognized" }}"
             } else seen += label
             val device = when (label) {
                 LABEL_RING -> PollScheduler.ringDeviceId(context)
@@ -154,7 +163,7 @@ object SamsungWidgetSource {
                 else -> null
             } ?: continue
             // Keep the progress arc's own value next to the number shown, and flag loose icon matches.
-            val loose = (match(context, slot.fingerprint)?.second ?: 0) > MATCH_DISTANCE * 3 / 4
+            val loose = (m?.second ?: 0) > MATCH_DISTANCE * 3 / 4
             val reading = Reading(device, snapshot.timeMs, slot.percent, slot.chargingIcon, SOURCE,
                 detail = clock.copy(rawExtra = slot.progress?.let { "arc_progress=$it" },
                     qualityFlags = if (loose) QualityFlags.AMBIGUOUS_WIDGET_SLOT else null))

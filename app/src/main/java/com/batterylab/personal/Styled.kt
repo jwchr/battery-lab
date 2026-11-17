@@ -43,6 +43,9 @@ abstract class StyledActivity : Activity() {
     protected val pageReady: Boolean get() = ::body.isInitialized
 
     protected fun setUpPage() {
+        // The page is drawn for light mode only; One UI's forced dark mode would darken the cards
+        // and text but not the painted landscape behind them.
+        if (android.os.Build.VERSION.SDK_INT >= 29) window.decorView.isForceDarkAllowed = false
         body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(36), dp(16), dp(28))
@@ -204,9 +207,9 @@ abstract class StyledActivity : Activity() {
     protected fun deviceBanner(name: String, color: Int) = LinearLayout(this).apply {
         gravity = android.view.Gravity.CENTER_VERTICAL
         setPadding(dp(10), dp(6), dp(12), dp(6))
-        // Darken a touch so white text stays readable on the lighter colors (the Ring's amber).
+        // Darkened so white text reads at about 4.5:1 even on the lightest band (the Ring's amber).
         val deep = android.graphics.Color.rgb(
-            (Color.red(color) * 0.82).toInt(), (Color.green(color) * 0.82).toInt(), (Color.blue(color) * 0.82).toInt())
+            (Color.red(color) * 0.66).toInt(), (Color.green(color) * 0.66).toInt(), (Color.blue(color) * 0.66).toInt())
         background = rounded(deep, 9)
         addView(DeviceIcon(this@StyledActivity, name, Color.WHITE), LinearLayout.LayoutParams(dp(18), dp(18)))
         addView(TextView(this@StyledActivity).apply {

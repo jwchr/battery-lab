@@ -17,7 +17,8 @@ import kotlin.random.Random
 object Palette {
     val ink = Color.rgb(30, 53, 80)
     val body = Color.rgb(84, 98, 117)
-    val quiet = Color.rgb(124, 133, 146)
+    // Dark enough for 11–12 sp captions on the cream cards (about 5:1).
+    val quiet = Color.rgb(104, 112, 124)
     val card = Color.argb(222, 255, 253, 250)
     val cardStroke = Color.rgb(236, 229, 216)
     val hairline = Color.rgb(234, 228, 218)
@@ -28,6 +29,8 @@ object Palette {
     val amberSoft = Color.rgb(253, 243, 224)
     val amberInk = Color.rgb(140, 88, 18)
     val green = Color.rgb(116, 166, 88)
+    /** Green for small text; [green] itself is too light to read at 11 sp. */
+    val greenInk = Color.rgb(60, 120, 40)
     val phone = Color.rgb(91, 143, 214)
     val watch = Color.rgb(116, 166, 88)
     val ring = Color.rgb(233, 162, 59)

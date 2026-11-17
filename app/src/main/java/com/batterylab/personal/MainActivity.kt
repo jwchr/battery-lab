@@ -40,6 +40,7 @@ class MainActivity : StyledActivity() {
     private val RESTORE_CSV = 113
     private val CONFIGURE_WIDGET = 111
     private val PICK_BACKUP = 112
+    private val REQUEST_BLUETOOTH_PICK = 114
     private var pendingWidgetId = AppWidgetManager.INVALID_APPWIDGET_ID
     private var widgetSnapshot: WidgetSnapshot? = null
 
@@ -49,6 +50,7 @@ class MainActivity : StyledActivity() {
         pendingWidgetId = savedInstanceState?.getInt("pendingWidgetId", pendingWidgetId) ?: pendingWidgetId
         PhoneBattery.read(this, "app")?.let(store::append)
         PollScheduler.schedule(this)
+        Background.io.execute { CloudBackupAgent.importPending(applicationContext) }
 
         setUpPage()
         if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
@@ -313,7 +315,7 @@ class MainActivity : StyledActivity() {
      */
     private fun renderBatteryLifeSection(devices: List<Pair<String, String>>, colors: List<Int>) {
         val from = System.currentTimeMillis() - HISTORY_WEEKS * 7 * 86_400_000L
-        val day = java.text.SimpleDateFormat("EEE HH:mm", Locale.getDefault())
+        val day = java.text.SimpleDateFormat("EEE h:mm a", Locale.getDefault())
         val weekFmt = java.text.SimpleDateFormat("MMM d", Locale.getDefault())
         val perDevice = devices.map { (id, _) ->
             val readings = BatteryStats.fullHoldAsCharging(store.since(id, from))
@@ -466,9 +468,9 @@ class MainActivity : StyledActivity() {
         val (status, statusColor) = when {
             last == null -> "No data yet" to Palette.quiet
             !fresh -> "Offline" to Palette.amberInk
-            last.charging == true -> "Charging" to Palette.green
+            last.charging == true -> "Charging" to Palette.greenInk
             // Widget shows a full wearable without a bolt whether or not it is still on the charger.
-            last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> "Full" to Palette.green
+            last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> "Full" to Palette.greenInk
             else -> "On battery" to Palette.tintInk
         }
         return LinearLayout(this).apply {
@@ -533,7 +535,7 @@ class MainActivity : StyledActivity() {
                     last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> "—" to "full"
                     historyRate != null -> BatteryMath.timeLeftLabel(
                         BatteryMath.timeLeftNow(last.percent / historyRate, last.timeMs, System.currentTimeMillis()))
-                        .first to "est. (history)"
+                        .let { (v, u) -> v to "$u (est.)" }
                     else -> "—" to "calibrating"
                 }
                 addView(TextView(this@MainActivity).apply {
@@ -683,7 +685,7 @@ class MainActivity : StyledActivity() {
     private fun chooseRing() {
         if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
             != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), REQUEST_BLUETOOTH)
+            requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), REQUEST_BLUETOOTH_PICK)
             return
         }
         val devices = RingReader.pairedDevices(this)
@@ -716,6 +718,9 @@ class MainActivity : StyledActivity() {
         toast("Requesting Ring battery percentage…")
         reader = RingReader(applicationContext, address) { reading, error ->
             reader = null
+            // Leaving the screen cancels the read: keep a reading if one arrived, but don't toast,
+            // log "Cancelled" as a Bluetooth failure, or render a destroyed page.
+            if (isDestroyed) { reading?.let(store::append); return@RingReader }
             if (reading != null) {
                 store.append(reading)
                 ready(reading)
@@ -777,7 +782,7 @@ class MainActivity : StyledActivity() {
         freshRingReading(mode) { reading ->
             store.startExperiment(reading.device, mode, reading)
             PollScheduler.setRingEnabled(this, mode == "monitoring")
-            toast("${mode.replaceFirstChar { it.uppercase() }} test started at ${reading.percent}%")
+            toast("${modeName(mode)} test started at ${reading.percent}%")
             render()
         }
     }
@@ -873,6 +878,13 @@ class MainActivity : StyledActivity() {
 
     private fun toast(message: String) = Toast.makeText(this, message, Toast.LENGTH_LONG).show()
     private fun f(number: Double): String = String.format(Locale.US, "%.2f", number)
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_BLUETOOTH_PICK) return
+        if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) chooseRing()
+        else toast("Battery Lab needs Nearby devices permission to list your Ring. Allow it in Settings › Apps › Battery Lab › Permissions.")
+    }
 
     override fun onDestroy() {
         reader?.cancel()

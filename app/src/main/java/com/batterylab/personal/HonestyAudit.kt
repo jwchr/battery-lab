@@ -179,7 +179,7 @@ object HonestyAuditor {
             if (pct < 3) return null
             return (sel.sumOf { it.second } / pct).takeIf { it > 0 && it <= 500 }
         }
-        fun band(lo: Int, hi: Int) = ratio(perStep.filter { it.first >= lo && it.first <= hi })
+        fun band(lo: Int, hi: Int) = ratio(perStep.filter { it.first >= lo && (it.first < hi || hi == 95 && it.first <= hi) })
         val upper = band(70, 95); val mid = band(40, 70); val lower = band(15, 40)
         val deciles = (1..9).mapNotNull { d -> ratio(perStep.filter { (it.first / 10).toInt() == d })?.let { d * 10 to it } }.toMap()
 
@@ -317,9 +317,19 @@ object HonestyAuditor {
         if (widget.isEmpty()) return emptyList()
         val w = widget.sortedBy { it.timeMs }
         val out = mutableListOf<Double>()
+        // Drops come in time order, so the window's start only moves forward, and nothing past
+        // 360 minutes is kept: this stays linear instead of rescanning all widget history per drop.
+        var start = 0
         for ((a, b) in android.sortedBy { it.timeMs }.zipWithNext()) {
             if (b.percent >= a.percent || b.charging == true) continue
-            val seen = w.firstOrNull { it.timeMs >= b.timeMs - 60_000L && it.percent <= b.percent } ?: continue
+            while (start < w.size && w[start].timeMs < b.timeMs - 60_000L) start++
+            var i = start
+            var seen: Reading? = null
+            while (i < w.size && w[i].timeMs <= b.timeMs + 360 * 60_000L) {
+                if (w[i].percent <= b.percent) { seen = w[i]; break }
+                i++
+            }
+            if (seen == null) continue
             val lag = (seen.timeMs - b.timeMs) / 60_000.0
             if (lag in -1.0..360.0) out += maxOf(0.0, lag)
         }

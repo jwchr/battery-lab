@@ -46,18 +46,27 @@ object ChargeCurves {
     }
 
     private fun build(run: List<Reading>): ObservedCharge {
-        fun firstAtOrAbove(p: Int) = run.firstOrNull { it.percent >= p }
+        fun firstAtOrAbove(p: Int) = run.indexOfFirst { it.percent >= p }.takeIf { it >= 0 }
+        // When the percentage crossed [p], interpolated between the readings either side. With
+        // 15-minute checks, timing from the readings alone snaps every band to 15-minute steps.
+        fun crossedMs(i: Int, p: Int): Double {
+            val x = run[i]; val y = run.getOrNull(i - 1) ?: return x.timeMs.toDouble()
+            if (x.percent <= y.percent) return x.timeMs.toDouble()
+            return y.timeMs + (p - y.percent).coerceAtLeast(0).toDouble() / (x.percent - y.percent) * (x.timeMs - y.timeMs)
+        }
         val bands = BANDS.mapNotNull { (lo, hi) ->
             // The band must start at or below its low edge to be timed fairly.
             if (run.first().percent > lo) return@mapNotNull null
-            val a = firstAtOrAbove(lo) ?: return@mapNotNull null
-            val b = firstAtOrAbove(hi) ?: return@mapNotNull null
-            val minutes = (b.timeMs - a.timeMs) / 60_000.0
+            val ia = firstAtOrAbove(lo) ?: return@mapNotNull null
+            val ib = firstAtOrAbove(hi) ?: return@mapNotNull null
+            val a = run[ia]; val b = run[ib]
+            val minutes = (crossedMs(ib, hi) - crossedMs(ia, lo)) / 60_000.0
             if (minutes <= 0) return@mapNotNull null
             val ra = a.remainingUah; val rb = b.remainingUah
+            val readingHours = (b.timeMs - a.timeMs) / 3_600_000.0
             val mv = run.filter { it.timeMs in a.timeMs..b.timeMs }.mapNotNull { it.voltageMv }.takeIf { it.isNotEmpty() }?.average()
-            val watts = if (ra != null && rb != null && rb > ra && mv != null)
-                (rb - ra) / 1000.0 * mv / 1000.0 / (minutes / 60.0) / 1000.0 else null
+            val watts = if (ra != null && rb != null && rb > ra && mv != null && readingHours > 0)
+                (rb - ra) / 1000.0 * mv / 1000.0 / readingHours / 1000.0 else null
             BandTiming(lo, hi, minutes, watts)
         }
         val plugged = run.mapNotNull { it.detail?.plugged }.filter { it > 0 }.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
@@ -128,9 +137,28 @@ object IdleAnalysis {
     fun stretches(readings: List<Reading>, screenOn: List<Span>? = null, minHours: Double = 4.0,
                   gaps: GapLimits = GapLimits(), screenCoverageStartMs: Long? = null): List<IdleStretch> {
         val idx = screenOn?.let { SpanIndex(it) }
-        return HonestyAuditor.dischargeRuns(readings.sortedBy { it.timeMs }, gaps).mapNotNull { run0 ->
+        fun covered(ms: Long) = idx != null && (screenCoverageStartMs == null || ms >= screenCoverageStartMs)
+        // A run from unplug to plug-in usually holds both a busy day and a quiet night. Cut it at
+        // every step that saw the screen on, so the quiet stretches inside are measured on their
+        // own instead of the whole run being thrown out.
+        fun busy(a: Reading, b: Reading): Boolean =
+            if (covered(a.timeMs)) idx!!.overlap(a.timeMs, b.timeMs) > 0.05 * (b.timeMs - a.timeMs)
+            else a.detail?.displayState == 2 || b.detail?.displayState == 2
+        val quiet = HonestyAuditor.dischargeRuns(readings.sortedBy { it.timeMs }, gaps).flatMap { run ->
+            val parts = mutableListOf<List<Reading>>()
+            var start = 0
+            for (i in 0 until run.size - 1) if (busy(run[i], run[i + 1])) {
+                if (i > start) parts += run.subList(start, i + 1)
+                start = i + 1
+            }
+            if (run.size - 1 > start) parts += run.subList(start, run.size)
+            parts
+        }
+        return quiet.mapNotNull { run0 ->
             var end = run0.size - 1
-            while (end > 0 && QualityFlags.has(run0[end].detail?.qualityFlags, QualityFlags.UNCHANGED_REPEAT) &&
+            // Only the widget repeats a cached value; a repeated phone reading is real flat time.
+            while (end > 0 && run0[end].source == SamsungWidgetSource.SOURCE &&
+                QualityFlags.has(run0[end].detail?.qualityFlags, QualityFlags.UNCHANGED_REPEAT) &&
                 run0[end].percent == run0[end - 1].percent) end--
             val run = run0.subList(0, end + 1)
             if (run.size < 2) return@mapNotNull null
@@ -139,9 +167,8 @@ object IdleAnalysis {
             if (hours < minHours) return@mapNotNull null
             // Android keeps about a week of screen history; before that, no spans means unknown,
             // not "screen off", so older stretches fall back to the recorded display state.
-            val covered = idx != null && (screenCoverageStartMs == null || a.timeMs >= screenCoverageStartMs)
             val onFraction = when {
-                covered -> idx!!.overlap(a.timeMs, b.timeMs).toDouble() / (b.timeMs - a.timeMs)
+                covered(a.timeMs) -> idx!!.overlap(a.timeMs, b.timeMs).toDouble() / (b.timeMs - a.timeMs)
                 else -> run.mapNotNull { it.detail?.displayState }.takeIf { it.size >= run.size / 2 }
                     ?.let { s -> s.count { it == 2 }.toDouble() / s.size }
             }
@@ -201,7 +228,9 @@ data class DeviceReadiness(
     val hoursToReserveSlow: Double?,
     val meetsTarget: Boolean?,
     /** Minutes on the charger needed to last the window, from learned charge speed. */
-    val topUpMinutes: Double?
+    val topUpMinutes: Double?,
+    /** Hours from a full charge down to the reserve at the typical rate. */
+    val hoursFromFull: Double? = null
 )
 
 object ReadinessPlanner {
@@ -221,7 +250,8 @@ object ReadinessPlanner {
         fun h(rate: Double) = usable / rate
         val needed = (typical * targetHours + reservePct - percent).coerceAtLeast(0.0)
         val minutes = if (needed <= 0) 0.0 else chargeRate?.takeIf { it > 0 }?.let { minOf(needed, 100.0 - percent) / it }
-        return DeviceReadiness(name, percent, h(typical), h(fast), h(slow), h(typical) >= targetHours, minutes)
+        return DeviceReadiness(name, percent, h(typical), h(fast), h(slow), h(typical) >= targetHours, minutes,
+            (100 - reservePct) / typical)
     }
 
     /** Charging order with one charger: the device that falls short soonest goes first. */
@@ -259,7 +289,11 @@ object ForecastScoring {
             val before = r.filter { it.timeMs <= target }
             if (before.any { it.charging == true } || rose(before, f.startPct)) { charged = true; break }
             val prev = before.lastOrNull { target - it.timeMs <= 30 * 60_000L }
-            val next = r.firstOrNull { it.timeMs >= target && it.timeMs - target <= 30 * 60_000L && it.charging != true }
+            // The first reading at or after the horizon, and only if no charge came before it:
+            // skipping a charging reading would score the forecast against a topped-up value.
+            val next = r.firstOrNull { it.timeMs >= target }?.takeIf {
+                it.timeMs - target <= 30 * 60_000L && it.charging != true && (prev == null || it.percent <= prev.percent + 2)
+            }
             actual[i] = when {
                 prev != null && next != null && next.timeMs > prev.timeMs ->
                     prev.percent + (next.percent - prev.percent) * (target - prev.timeMs).toDouble() / (next.timeMs - prev.timeMs)

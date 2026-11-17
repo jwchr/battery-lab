@@ -148,7 +148,7 @@ data class Forecast(
  * writes overlap.
  */
 class BatteryStore private constructor(context: Context) :
-    SQLiteOpenHelper(context.applicationContext, "battery_lab.db", null, 6) {
+    SQLiteOpenHelper(context.applicationContext, "battery_lab.db", null, 7) {
     init { setWriteAheadLoggingEnabled(true) }
 
     /** Shared for the life of the process; callers may still call close(), which does nothing. */
@@ -170,6 +170,7 @@ class BatteryStore private constructor(context: Context) :
             id INTEGER PRIMARY KEY AUTOINCREMENT, time_ms INTEGER NOT NULL,
             device TEXT NOT NULL, message TEXT NOT NULL)""")
         createV6Tables(db)
+        createV7Indexes(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -193,6 +194,17 @@ class BatteryStore private constructor(context: Context) :
             addColumns(db, V6_COLUMNS)
             createV6Tables(db)
         }
+        if (oldVersion < 7) createV7Indexes(db)
+    }
+
+    /**
+     * v7: indexes only. Each save looks up the device's last reading from the same source, which
+     * walked the device's whole history for a rarely used source; and every check scans pending
+     * forecasts by status.
+     */
+    private fun createV7Indexes(db: SQLiteDatabase) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_readings_device_source_time ON readings(device, source, time_ms)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_forecasts_device_status ON forecasts(device, status)")
     }
 
     private fun addColumns(db: SQLiteDatabase, columns: List<Pair<String, String>>) {
@@ -531,9 +543,18 @@ class BatteryStore private constructor(context: Context) :
         out.write(CSV_HEAD.joinToString(",") + "," + DETAIL_COLUMNS.joinToString(",") { it.first } + "\n")
         // Audit columns go last so tools that read the original columns by position still work.
         val blanks = List(DETAIL_COLUMNS.size) { "" }
-        readableDatabase.rawQuery("SELECT device,time_ms,percent,charging,source,temp_tenths_c,voltage_mv,remaining_uah," +
-            DETAIL_COLUMNS.joinToString(",") { it.first } + " FROM readings ORDER BY time_ms", null).use { c ->
+        // Paged by row id (the order readings were saved, which is nearly time order). One cursor
+        // sorted by time had no index to use, and Android re-runs a cursor's query each time its
+        // 2 MB window refills, so a long history was re-sorted dozens of times per export.
+        val sql = "SELECT device,time_ms,percent,charging,source,temp_tenths_c,voltage_mv,remaining_uah," +
+            DETAIL_COLUMNS.joinToString(",") { it.first } + ",id FROM readings WHERE id>? ORDER BY id LIMIT $EXPORT_PAGE"
+        var lastId = -1L
+        var pageRows = EXPORT_PAGE
+        while (pageRows == EXPORT_PAGE) readableDatabase.rawQuery(sql, arrayOf(lastId.toString())).use { c ->
+            pageRows = 0
             while (c.moveToNext()) {
+                pageRows++
+                lastId = c.getLong(c.columnCount - 1)
                 val charging = if (c.isNull(3)) "" else if (c.getInt(3) == 1) "true" else "false"
                 val temp = if (c.isNull(5)) "" else (c.getInt(5) / 10.0).toString()
                 val volt = if (c.isNull(6)) "" else c.getInt(6).toString()
@@ -629,6 +650,7 @@ class BatteryStore private constructor(context: Context) :
     companion object {
         /** Every Ring reading, from the widget or Bluetooth, shares this history id. */
         const val RING_ID = "ring:samsung_widget"
+        private const val EXPORT_PAGE = 2000
         /** baseline/monitoring: Ring Bluetooth polling off vs on. ring_alone/ring_with_watch: Samsung's synergy claim. */
         val EXPERIMENT_MODES = listOf("baseline", "monitoring", "ring_alone", "ring_with_watch")
         private const val PROBE_KEEP = 3000L

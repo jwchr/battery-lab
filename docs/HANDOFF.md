@@ -63,7 +63,7 @@ For the full table, see the triage comment on issue #4. That comment predates A1
 ```bash
 JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=/opt/homebrew/share/android-commandlinetools /opt/homebrew/opt/gradle@8/bin/gradle --no-daemon :app:assembleDebug :app:testDebugUnitTest :wear:assembleDebug
 ```
-84 unit tests pass as of this note. The repo's only workflow is manual (`workflow_dispatch`).
+88 unit tests pass as of this note. The repo's only workflow is manual (`workflow_dispatch`).
 
 ## Rules that still apply
 - **Not allowed:**

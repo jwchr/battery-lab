@@ -125,4 +125,11 @@ class ForecastAndExperimentTest {
         assertEquals("Preliminary", im.strength)
         assertEquals(1.0, im.delta!!.estimate, 1e-9)
     }
+
+    @Test fun aReadingAfterATopUpIsNotTheActual() {
+        // 2 h mark at 120 min: 77% at 110, plugged in at 125, unplugged at 88% at 145.
+        val s = ForecastScoring.score(forecast(), listOf(r(110, 77), r(125, 80, true), r(145, 88)), t0 + 10 * h)
+        org.junit.Assert.assertNull(s.actual2h)
+        assertEquals("CENSORED_CHARGED", s.status)
+    }
 }

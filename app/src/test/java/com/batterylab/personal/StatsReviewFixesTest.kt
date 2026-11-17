@@ -59,6 +59,29 @@ class StatsReviewFixesTest {
         assertEquals(80.0, ChargeCurves.topUpPercent(listOf(charge), 500.0)!!, 1e-9)
     }
 
+    @Test fun plannerKnowsWhenEvenAFullChargeFallsShort() {
+        // 5%/h with a 15% reserve: a full charge lasts 17 h, so no top-up reaches 24 h.
+        val r = ReadinessPlanner.assess("Ring", 50, listOf(5.0), 1.0, 24.0, 15)
+        assertEquals(false, r.meetsTarget)
+        assertEquals(17.0, r.hoursFromFull!!, 1e-9)
+    }
+
+    @Test fun aQuietNightInsideABusyDayIsStillMeasured() {
+        // One unplugged day: 10 min of screen every hour for 15 h, then 9.75 h untouched.
+        val readings = (0..96).map { i -> r(i * 15L, 100 - i / 4) }
+        val screen = (0..14).map { hr -> Span(t + hr * h, t + hr * h + 10 * m) }
+        val st = IdleAnalysis.stretches(readings, screen)
+        assertEquals(1, st.size)
+        assertEquals(t + 855 * m, st[0].startMs)
+        assertEquals(t + 1440 * m, st[0].endMs)
+    }
+
+    @Test fun chargeBandsAreTimedFromWhenTheEdgeWasCrossed() {
+        // 20 -> 40 -> 60 at 15-min checks: 50% was crossed at 22.5 min, not at the 30-min reading.
+        val c = ChargeCurves.observedCharges(listOf(r(0, 20, true), r(15, 40, true), r(30, 60, true)), GapLimits()).single()
+        assertEquals(22.5, c.bands.single { it.fromPct == 20 }.minutes, 1e-9)
+    }
+
     @Test fun serviceSpansAreMergedBeforeCounting() {
         val merged = DrainAnalysis.mergeSpans(listOf(Span(0, 10), Span(5, 20), Span(30, 40), Span(40, 45)))
         assertEquals(listOf(Span(0, 20), Span(30, 45)), merged)

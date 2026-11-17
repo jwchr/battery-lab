@@ -376,7 +376,7 @@ class StatsActivity : StyledActivity() {
                 Triple("${f1(t.maxC)}°C", "hottest", shortWhen(t.maxAtMs)),
                 Triple("${f1(t.minC)}°C", "coolest", null),
                 t.avgChargingC?.let { c -> Triple("${f1(c)}°C", "while charging",
-                    t.avgOnBatteryC?.let { "${f1(c - it)}° warmer than unplugged" }) },
+                    t.avgOnBatteryC?.let { u -> "${f1(kotlin.math.abs(c - u))}° ${if (c >= u) "warmer" else "cooler"} than unplugged" }) },
             ))
         }
     }
@@ -637,6 +637,17 @@ class StatsActivity : StyledActivity() {
     private fun renderPlanner(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>, gaps: GapLimits) {
         val card = section("Will it last?", null, "Keeps a $reservePct% reserve. Each device is judged on its own history.")
         val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // Rates don't depend on the chosen window, so work them out once, not on every chip tap.
+        class PlanInput(val name: String, val percent: Int, val rates: List<Double>, val chargeRate: Double?)
+        val now = System.currentTimeMillis()
+        val inputs = devices.zip(data).mapNotNull { (d, readings) ->
+            val last = readings.lastOrNull()?.takeIf { now - it.timeMs < 6 * 3_600_000L } ?: return@mapNotNull null
+            val rates = BatteryMath.dischargeStretches(readings.map(BatteryPoint::of), gaps = gaps).map { it.drop / it.hours }
+            val chargeRate = BatteryMath.median(ChargeCurves.observedCharges(readings, gaps)
+                .filter { it.peakMs - it.startMs >= 10 * 60_000L }
+                .map { (it.toPct - it.fromPct) / ((it.peakMs - it.startMs) / 60_000.0) })
+            PlanInput(d.second, last.percent, rates, chargeRate)
+        }
         fun fill() {
             holder.removeAllViews()
             holder.addView(chipRow(*listOf(8, 12, 18, 24).map { h ->
@@ -644,14 +655,8 @@ class StatsActivity : StyledActivity() {
                     setOnClickListener { targetHours = h; fill() }
                 }
             }.toTypedArray()))
-            val now = System.currentTimeMillis()
-            val assessed = devices.zip(data).mapNotNull { (d, readings) ->
-                val last = readings.lastOrNull()?.takeIf { now - it.timeMs < 6 * 3_600_000L } ?: return@mapNotNull null
-                val rates = BatteryMath.dischargeStretches(readings.map(BatteryPoint::of), gaps = gaps).map { it.drop / it.hours }
-                val chargeRate = BatteryMath.median(ChargeCurves.observedCharges(readings, gaps)
-                    .filter { it.peakMs > it.startMs }
-                    .map { (it.toPct - it.fromPct) / ((it.peakMs - it.startMs) / 60_000.0) })
-                ReadinessPlanner.assess(d.second, last.percent, rates, chargeRate, targetHours.toDouble(), reservePct)
+            val assessed = inputs.map {
+                ReadinessPlanner.assess(it.name, it.percent, it.rates, it.chargeRate, targetHours.toDouble(), reservePct)
             }
             if (assessed.isEmpty()) holder.addView(label("No recent readings to plan with.", 12.5f, Palette.quiet))
             for (r in assessed) {
@@ -659,8 +664,12 @@ class StatsActivity : StyledActivity() {
                     null -> "not enough history yet"
                     true -> "lasts about ${fmt(r.hoursToReserve!!)} h" + (if (fmt(r.hoursToReserveFast!!) == fmt(r.hoursToReserveSlow!!)) ""
                         else " (${fmt(r.hoursToReserveFast)}–${fmt(r.hoursToReserveSlow)} h)") + " ✓"
-                    false -> "falls short after about ${fmt(r.hoursToReserve!!)} h" +
-                        (r.topUpMinutes?.let { "; charge ${fmt(it.coerceAtLeast(1.0))} min first" } ?: "")
+                    false -> "falls short after about ${fmt(r.hoursToReserve!!)} h" + when {
+                        // A top-up can't fix it if even a full charge runs out first.
+                        r.hoursFromFull != null && r.hoursFromFull < targetHours ->
+                            "; even a full charge lasts only about ${fmt(r.hoursFromFull)} h"
+                        else -> r.topUpMinutes?.let { "; charge ${fmt(it.coerceAtLeast(1.0))} min first" } ?: ""
+                    }
                 }
                 holder.addView(label("${r.name} at ${r.percent}% — $verdict", 13f, ink).apply { setPadding(0, dp(8), 0, 0) })
             }
@@ -918,11 +927,11 @@ class StatsActivity : StyledActivity() {
             .setMessage("Cents per kWh, all charges included: your bill's total divided by the kWh used.")
             .setView(LinearLayout(this).apply { setPadding(dp(20), 0, dp(20), 0); addView(input, LinearLayout.LayoutParams(-1, -2)) })
             .setPositiveButton("Save") { _, _ ->
-                val v = input.text.toString().toDoubleOrNull()
+                val v = input.text.toString().trim().replace(',', '.').toDoubleOrNull()
                 if (v != null && v in 1.0..200.0) {
                     PollScheduler.prefs(this).edit().putFloat(KEY_CENTS_PER_KWH, v.toFloat()).apply()
                     render()
-                }
+                } else android.widget.Toast.makeText(this, "Enter cents per kWh between 1 and 200", android.widget.Toast.LENGTH_LONG).show()
             }
             .setNeutralButton("Use default") { _, _ -> PollScheduler.prefs(this).edit().remove(KEY_CENTS_PER_KWH).apply(); render() }
             .setNegativeButton("Cancel", null)

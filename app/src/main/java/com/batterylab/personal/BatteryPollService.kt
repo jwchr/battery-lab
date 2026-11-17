@@ -92,6 +92,7 @@ class BatteryPollService : JobService() {
         val snapshot = try { SamsungWidgetSource.snapshot(this, includeIcons = false) to null } catch (e: Exception) { null to e }
         Background.io.execute {
             try {
+                CloudBackupAgent.importPending(this)
                 logStandbyBucketChange(store)
                 PhoneBattery.read(this, "job")?.let(store::append)
                 snapshot.first?.let { SamsungWidgetSource.record(this, store, it) }

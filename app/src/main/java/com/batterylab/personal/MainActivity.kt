@@ -292,7 +292,7 @@ class MainActivity : StyledActivity() {
                 render()
             }
             addView(label("For Watch8 data, install the included Wear OS companion and open it once. " +
-                "Watch sampling is scheduled approximately every 30 minutes.", 12f, quiet))
+                "The optional watch app checks about every 2 hours, as a cross-check on Samsung's widget.", 12f, quiet))
         }
         mark("rest+lab tools"); logRender()
         scroll.post { scroll.scrollTo(0, oldScroll) }

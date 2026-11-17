@@ -55,7 +55,11 @@ class StatsActivity : StyledActivity() {
         val usage: UsageWindow?,
         val idle: List<IdleStretch>,
         val phoneWidget: List<Reading>,
+        val drain: DrainPrep?,
     )
+
+    /** The drain breakdown and the app names it shows, prepared off the main thread. */
+    private class DrainPrep(val recent: List<Reading>, val d: DrainBreakdown, val labels: Map<String, String>, val hidden: Int?)
 
     private var renderGeneration = 0
 
@@ -105,7 +109,17 @@ class StatsActivity : StyledActivity() {
         val now = System.currentTimeMillis()
         val usage = if (UsageSource.granted(this)) UsageSource.load(this, now - 7 * 86_400_000L, now) else null
         val idle = IdleAnalysis.stretches(phone, usage?.screenOn, gaps = gaps)
-        return Loaded(devices, data, gaps, stats, capacity, usage, idle, store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L))
+        // The drain analysis and package-manager label lookups took ~116 ms on the main thread.
+        val drain = usage?.let { u ->
+            val start = u.coverageStartMs
+            val recent = if (start == null) emptyList() else phone.filter { it.timeMs >= start }
+            val d = DrainAnalysis.analyze(recent.map(BatteryPoint::of), u.screenOn, u.apps, gaps.stepMs,
+                capacity.combinedMah, u.services)
+            DrainPrep(recent, d, d.apps.take(8).associate { it.app to UsageSource.label(this, it.app) },
+                UsageSource.hiddenCount(this))
+        }
+        return Loaded(devices, data, gaps, stats, capacity, usage, idle,
+            store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain)
     }
 
     private fun renderTitle() {
@@ -137,7 +151,7 @@ class StatsActivity : StyledActivity() {
         }
         timed("health") { renderPhoneHealth(phone, capacity) }
         timed("planner") { renderPlanner(devices, data, gaps) }
-        timed("drain") { renderDrain(phone, gaps, usage, capacity.combinedMah) }
+        timed("drain") { renderDrain(l.drain) }
         timed("nights") { renderNights(idle) }
         timed("charging") { renderCharging(phone, gaps) }
         timed("audit") { renderAudit(phone, l.phoneWidget, data[1], data[2], capacity, gaps) }
@@ -371,8 +385,8 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Where the phone's battery went: idle vs screen-on, and which apps were on screen while it dropped. */
-    private fun renderDrain(phone: List<Reading>, gaps: GapLimits, usage: UsageWindow?, capacityMah: Double?) {
-        if (usage == null) {
+    private fun renderDrain(prep: DrainPrep?) {
+        if (prep == null) {
             section("What's draining it", "See which apps cost the most.",
                 "Give Battery Lab Usage access and it will line up which apps were on screen with how fast the " +
                     "battery dropped. It sees app names and times only, never what's inside them, and it stays on this phone.").apply {
@@ -383,10 +397,8 @@ class StatsActivity : StyledActivity() {
             return
         }
         val now = System.currentTimeMillis()
-        val start = usage.coverageStartMs
-        val recent = if (start == null) emptyList() else phone.filter { it.timeMs >= start }
-        val d = DrainAnalysis.analyze(recent.map(BatteryPoint::of), usage.screenOn, usage.apps, gaps.stepMs,
-            capacityMah, usage.services)
+        val recent = prep.recent
+        val d = prep.d
         if (d.totalDrop < 5 || !d.baselineKnown) {
             section("What's draining it", "Collecting\u2026",
                 if (d.totalDrop < 5) "Needs a few hours of the phone off the charger, within the days Android keeps app history."
@@ -406,14 +418,14 @@ class StatsActivity : StyledActivity() {
             val top = d.apps.take(8)
             val most = top.firstOrNull()?.percent ?: 1.0
             if (top.isNotEmpty()) addView(label("Top apps", 12.5f, Palette.body).apply { setPadding(0, dp(14), 0, 0) })
-            top.forEach { a -> addView(appRow(UsageSource.label(this@StatsActivity, a.app), a.percent / most,
+            top.forEach { a -> addView(appRow(prep.labels[a.app] ?: a.app, a.percent / most,
                 "${f1(a.percent / d.totalDrop * 100)}%", listOfNotNull("${f1(a.foregroundHours)} h",
                     a.mahUsed?.let { "${fmt(it)} mAh" }, a.activeWatts?.let { String.format(Locale.US, "%.1f W", it) },
                     a.backgroundServiceHours.takeIf { it >= 0.1 }?.let { "+${f1(it)} h bg" }).joinToString(" \u00b7 "))) }
             if (top.isNotEmpty()) addView(label("Share of all battery lost, beyond idle drain, while the app was on screen; then its screen time.",
                 11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
             val candidates = d.apps.map { it.app }.filter { it != DrainAnalysis.UNATTRIBUTED }.take(15)
-            if (candidates.isNotEmpty() || (UsageSource.hiddenCount(this@StatsActivity) ?: 0) > 0)
+            if (candidates.isNotEmpty() || (prep.hidden ?: 0) > 0)
                 addView(makeButton("Hide apps from this list") { askHide(candidates) },
                     LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
             evidence("Phone readings plus Android's app history: which app was on screen, and foreground services.",

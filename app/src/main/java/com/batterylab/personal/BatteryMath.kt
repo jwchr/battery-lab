@@ -1,5 +1,6 @@
 package com.batterylab.personal
 
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -52,8 +53,7 @@ object BatteryMath {
     private const val HOUR_MS = 3_600_000L
 
     fun estimate(points: List<BatteryPoint>, gaps: GapLimits = GapLimits()): RuntimeEstimate? {
-        val chronological = points.filter { it.percent in 0..100 }
-            .sortedBy { it.timeMs }
+        val chronological = withoutSpikes(points.filter { it.percent in 0..100 }.sortedBy { it.timeMs })
         if (chronological.size < 2) return null
         val last = chronological.last()
         if (last.charging == true) return null
@@ -80,11 +80,6 @@ object BatteryMath {
     }
 
     /**
-     * Splits history into uninterrupted discharges. A stretch ends at a charging reading, a rise
-     * of more than 2 points (an unseen charge), or a gap longer than [GapLimits.stretchMs] (8 hours at the default interval). Stretches shorter than
-     * [minHours] or dropping less than [minDrop] points are too noisy to project and are skipped.
-     */
-    /**
      * Weighted drain rate (% per hour) over finished discharge stretches: total drop over total
      * hours, so long stretches count for more. Null without at least 1 hour and a 4-point drop.
      */
@@ -94,6 +89,16 @@ object BatteryMath {
         return if (hours >= 1.0 && drop >= 4) drop / hours else null
     }
 
+    /**
+     * Splits history into uninterrupted discharges. A stretch ends at a charging reading, a rise
+     * of more than 2 points (an unseen charge), or a gap longer than [GapLimits.stretchMs] (8 hours
+     * at the default interval). Stretches shorter than [minHours] or dropping less than [minDrop]
+     * points are too noisy to project and are skipped. Lone glitch readings are ignored first
+     * ([withoutSpikes]).
+     *
+     * Known limit: a charge that starts and ends between two readings less than
+     * [GapLimits.stretchMs] apart, and leaves the battery lower than before, cannot be seen.
+     */
     fun dischargeStretches(points: List<BatteryPoint>, minHours: Double = 1.0, minDrop: Int = 4,
                            gaps: GapLimits = GapLimits()): List<DischargeStretch> {
         val out = mutableListOf<DischargeStretch>()
@@ -105,7 +110,7 @@ object BatteryMath {
             }
             run = mutableListOf()
         }
-        for (p in points.filter { it.percent in 0..100 }.sortedBy { it.timeMs }) {
+        for (p in withoutSpikes(points.filter { it.percent in 0..100 }.sortedBy { it.timeMs })) {
             if (p.charging == true) { close(); continue }
             val prev = run.lastOrNull()
             if (prev != null && (p.percent > prev.percent + 2 || p.timeMs - prev.timeMs > gaps.stretchMs)) close()
@@ -116,14 +121,47 @@ object BatteryMath {
     }
 
     /**
-     * Full-charge runtime per week, weighted by percentage points discharged so long stretches
-     * count more than short ones. [weekOf] maps a time to the start of its week.
+     * Removes lone readings that sit more than [SPIKE_POINTS] away from both neighbours while the
+     * neighbours agree within 3 points: no battery drains 75 points and recovers within one check.
+     * Charging readings, and the first and last reading, are always kept. Input must be sorted.
      */
-    fun weeklyRuntime(stretches: List<DischargeStretch>, weekOf: (Long) -> Long): List<WeeklyRuntime> =
-        stretches.groupBy { weekOf(it.startMs) }.toSortedMap().map { (week, list) ->
-            val hours = list.sumOf { it.hours }
-            WeeklyRuntime(week, list.size, hours, 100.0 * hours / list.sumOf { it.drop })
+    fun withoutSpikes(sorted: List<BatteryPoint>): List<BatteryPoint> {
+        if (sorted.size < 3) return sorted
+        return sorted.filterIndexed { i, p ->
+            if (i == 0 || i == sorted.lastIndex || p.charging == true) return@filterIndexed true
+            val a = sorted[i - 1]; val b = sorted[i + 1]
+            !(abs(a.percent - b.percent) <= 3 &&
+                abs(p.percent - a.percent) > SPIKE_POINTS && abs(p.percent - b.percent) > SPIKE_POINTS)
         }
+    }
+
+    private const val SPIKE_POINTS = 10
+
+    /**
+     * Full-charge runtime per week, weighted by percentage points discharged so long stretches
+     * count more than short ones. [weekOf] maps a time to the start of its week. A stretch that
+     * crosses into another week is split by time, assuming an even drain across it; it counts
+     * toward [WeeklyRuntime.stretches] in each week it touches.
+     */
+    fun weeklyRuntime(stretches: List<DischargeStretch>, weekOf: (Long) -> Long): List<WeeklyRuntime> {
+        class Acc { var count = 0; var hours = 0.0; var drop = 0.0 }
+        val weeks = sortedMapOf<Long, Acc>()
+        for (s in stretches) {
+            val total = (s.endMs - s.startMs).toDouble()
+            if (total <= 0) continue
+            var from = s.startMs
+            while (from < s.endMs) {
+                val week = weekOf(from)
+                // 7.5 days on from a week's start always lands in the next week, DST or not.
+                val next = weekOf(week + 180 * HOUR_MS)
+                val to = minOf(s.endMs, next)
+                val share = (to - from) / total
+                weeks.getOrPut(week) { Acc() }.apply { count++; hours += s.hours * share; drop += s.drop * share }
+                from = to
+            }
+        }
+        return weeks.map { (week, a) -> WeeklyRuntime(week, a.count, a.hours, 100.0 * a.hours / a.drop) }
+    }
 
     /**
      * Phone capacity implied by Android's charge counter at one reading. Only readings at or above

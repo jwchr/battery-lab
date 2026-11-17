@@ -471,6 +471,10 @@ class MainActivity : StyledActivity() {
                 addView(TextView(this@MainActivity).apply {
                     text = if (last != null && !fresh) "Last seen $seenAt at ${last.percent}%" else buildList {
                         if (last != null) add("Updated ${time.format(java.util.Date(last.timeMs))}")
+                        // Read recently is not the same as changed recently (audit #4 A1).
+                        val same = BatteryMath.unchangedSince(recent)
+                        if (last != null && same != null && last.timeMs - same >= 60 * 60_000L && status != "Full")
+                            add("same since ${time.format(java.util.Date(same))}")
                         if (projection != null) add("about ${f1(projection.percentPerHour)}% an hour")
                         else if (last != null && last.charging != true && status != "Full")
                             add(if (historyRate != null) "this stretch still calibrating" else "needs 4% drop")

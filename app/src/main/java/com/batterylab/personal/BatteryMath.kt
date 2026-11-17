@@ -140,6 +140,22 @@ object BatteryMath {
         return if (s.size % 2 == 1) s[s.size / 2] else (s[s.size / 2 - 1] + s[s.size / 2]) / 2
     }
 
+    /**
+     * When the latest value was first seen: the start of the trailing run of readings with the
+     * same percent and charging state. Audit #4 A1: a widget can keep showing an old number, so
+     * the time it was last read is not the time it last changed. Null for an empty list.
+     */
+    fun unchangedSince(readings: List<Reading>): Long? {
+        val r = readings.sortedBy { it.timeMs }
+        val last = r.lastOrNull() ?: return null
+        var since = last.timeMs
+        for (i in r.indices.reversed()) {
+            if (r[i].percent != last.percent || r[i].charging != last.charging) break
+            since = r[i].timeMs
+        }
+        return since
+    }
+
     /** Hours left right now: the estimate made at the reading, minus the time since that reading. */
     fun timeLeftNow(hoursAtReading: Double, readingMs: Long, nowMs: Long): Double =
         max(0.0, hoursAtReading - (nowMs - readingMs).coerceAtLeast(0L).toDouble() / HOUR_MS)

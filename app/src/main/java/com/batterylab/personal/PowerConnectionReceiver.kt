@@ -19,12 +19,21 @@ class PowerConnectionReceiver : BroadcastReceiver() {
             else -> return
         }
         val app = context.applicationContext
+        // Android 14+ holds broadcasts for a cached app and delivers them when it next runs, so an
+        // event can arrive long after the fact. Skip one that no longer matches the charger state:
+        // recording it would label the current reading with the opposite plug state.
+        if (!PlugEvent.stillCurrent(connected, PhoneBattery.isPlugged(app))) {
+            Background.io.execute {
+                try { BatteryStore.get(app).logProbe("power", "Skipped a late ${if (connected) "plug" else "unplug"} event") } catch (_: Throwable) { }
+            }
+            return
+        }
         val pending = goAsync()
         Background.io.execute {
             try { record(app, if (connected) "plug" else "unplug") } finally { pending.finish() }
         }
         if (connected) Background.onMainDelayed(3_500) {
-            Background.io.execute { record(app, "plug_settled") }
+            Background.io.execute { if (PhoneBattery.isPlugged(app) != false) record(app, "plug_settled") }
         }
     }
 
@@ -54,4 +63,9 @@ class PowerConnectionReceiver : BroadcastReceiver() {
             }
         }
     }
+}
+
+/** Pure check, unit-tested: an event is current unless the charger state is known and disagrees. */
+internal object PlugEvent {
+    fun stillCurrent(connected: Boolean, pluggedNow: Boolean?) = pluggedNow == null || pluggedNow == connected
 }

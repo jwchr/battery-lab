@@ -222,12 +222,18 @@ class MainActivity : StyledActivity() {
             addView(label("Periodic Ring sampling: ${if (PollScheduler.ringEnabled(this@MainActivity)) "ON" else "OFF"}. " +
                 "The default is OFF to avoid influencing your battery tests.", 13f, quiet))
             button("Choose paired Ring") { chooseRing() }
-            button("Read Ring battery now") { readRing { } }
+            button("Read Ring battery now") {
+                if (!ExperimentEndpoint.bleAllowed(store.activeExperiment()?.mode)) {
+                    toast("This test keeps Ring Bluetooth off. Use the widget or enter the % manually.")
+                    return@button
+                }
+                readRing { }
+            }
             button("Enter Ring % manually") { manualReading() }
             button(if (PollScheduler.ringEnabled(this@MainActivity)) "Stop Ring monitoring" else "Enable Ring monitoring (15 min)") {
                 if (ringAddress == null) { toast("Choose your Ring first"); return@button }
-                if (store.activeExperiment()?.mode == "baseline") {
-                    toast("Finish the baseline test before enabling monitoring")
+                if (!ExperimentEndpoint.monitoringSwitchAllowed(store.activeExperiment()?.mode)) {
+                    toast("Finish the current test before changing Ring monitoring")
                     return@button
                 }
                 PollScheduler.setRingEnabled(this@MainActivity,

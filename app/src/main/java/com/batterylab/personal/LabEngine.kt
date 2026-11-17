@@ -169,9 +169,15 @@ object ForecastKeeper {
         for (id in devices) {
             val readings = BatteryStats.fullHoldAsCharging(store.since(id, now - 4 * 86_400_000L))
             val last = readings.lastOrNull() ?: continue
-            // Score anything due.
-            for (f in store.forecasts(id, "PENDING")) {
-                val s = ForecastScoring.score(f, readings.filter { it.timeMs >= f.issuedMs }, now)
+            // Score anything due, from readings back to the oldest pending forecast (capped at 30
+            // days): after a long gap in collection, the last 4 days would no longer reach its
+            // horizons. Horizons already scored are kept, never blanked.
+            val pending = store.forecasts(id, "PENDING")
+            val scoreFrom = maxOf(now - 30 * 86_400_000L, pending.minOfOrNull { it.issuedMs } ?: now)
+            val scoring = if (scoreFrom >= now - 4 * 86_400_000L) readings
+                else BatteryStats.fullHoldAsCharging(store.since(id, scoreFrom))
+            for (f in pending) {
+                val s = ForecastScoring.keepScored(f, ForecastScoring.score(f, scoring.filter { it.timeMs >= f.issuedMs }, now))
                 if (s.status != "PENDING" || s.actual2h != f.actual2h || s.actual4h != f.actual4h)
                     store.updateForecast(f.id, s.actual2h, s.actual4h, s.actual8h, s.status)
             }

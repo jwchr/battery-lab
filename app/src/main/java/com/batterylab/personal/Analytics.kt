@@ -315,6 +315,13 @@ object ForecastScoring {
         return ForecastScore(actual[0], actual[1], actual[2], status)
     }
 
+    /** A rescore never erases a horizon already saved; once any horizon is scored, a final status is SCORED. */
+    fun keepScored(f: Forecast, s: ForecastScore): ForecastScore {
+        val a2 = f.actual2h ?: s.actual2h; val a4 = f.actual4h ?: s.actual4h; val a8 = f.actual8h ?: s.actual8h
+        val status = if (s.status != "PENDING" && (a2 != null || a4 != null || a8 != null)) "SCORED" else s.status
+        return ForecastScore(a2, a4, a8, status)
+    }
+
     /** True if the percentage ever climbs more than 2 points above its lowest value so far. */
     private fun rose(r: List<Reading>, startPct: Int): Boolean {
         var low = startPct
@@ -443,6 +450,9 @@ data class UpdateImpact(
 )
 
 object UpdateImpactAnalysis {
+    /** Only phone changes can be judged: the idle stretches come from the phone's own readings. */
+    fun measures(e: JournalEntry) = e.device == "phone"
+
     /** Hours after an OS update treated as background re-indexing and left out. */
     const val SETTLE_HOURS = 6
 

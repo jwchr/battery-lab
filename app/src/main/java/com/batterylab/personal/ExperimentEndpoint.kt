@@ -8,6 +8,16 @@ package com.batterylab.personal
  * exists it refuses instead of silently falling back to a BLE read.
  */
 object ExperimentEndpoint {
+    /** Whether anything may connect to the Ring over BLE while [activeMode] runs (null: no test). */
+    fun bleAllowed(activeMode: String?) = activeMode == null || activeMode == "monitoring"
+
+    /** Whether the monitoring switch may change: never mid-test, since it would change the arm's conditions. */
+    fun monitoringSwitchAllowed(activeMode: String?) = activeMode == null
+
+    /** An imported copy completes a known test only if that test is still open and the end is valid. */
+    fun importCompletes(knownEndMs: Long?, startMs: Long, endMs: Long?, endPct: Int?) =
+        knownEndMs == null && endMs != null && endPct != null && endMs > startMs
+
     const val MANUAL_MAX_AGE_MS = 120_000L
 
     sealed class Choice {

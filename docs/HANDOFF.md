@@ -7,7 +7,7 @@ Last updated 2026-11-17. This replaces the Nov 13 note in issue #2. For the arch
 - **PR #6** (the redesign, the Stats "lab engine", the audit #4 fixes, cloud backup and two review passes): merged into `main` on 2026-11-17, after PR #3. Both branches are deleted.
 - **New work goes on a branch off `main`.** Every merge still needs the owner's OK.
 - **Phone:** has the newest debug build (the code now on `main`), installed over the old app with history kept. The background job runs every 15 minutes, and the app is exempt from battery optimization (Unrestricted).
-- **Watch app:** the newest `wear` build is not installed on the watch.
+- **Watch app:** never installed on the watch (no watch-app readings have ever arrived). It is optional: a cross-check on Samsung's widget, every 2 hours. Installing it needs wireless debugging on the watch.
 
 ## Audit #4 status
 For the full table, see the triage comment on issue #4. That comment predates A1, the A3 glitch/week fixes, A6 and B4.

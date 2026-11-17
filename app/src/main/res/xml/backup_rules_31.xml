@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12 and newer. Only the compressed history snapshot; see CloudBackupAgent. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="file" path="cloud/history.csv.gz" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="file" path="cloud/history.csv.gz" />
+    </device-transfer>
+</data-extraction-rules>

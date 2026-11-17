@@ -24,7 +24,7 @@ For the full table, see the triage comment on issue #4. That comment predates A1
 | B2 widget-settings cancel | Fixed |
 | B3 Ring picker | Likely Rings listed first |
 | B4 watch percent | Refreshes on return and on send |
-| B5 cloud backup | **Owner's decision:** `allowBackup` stays false until they choose |
+| B5 cloud backup | On (owner chose cloud): Android backs up a gzipped CSV of the history only; settings stay on the phone |
 | B6 address in exports | Already fixed (stable Ring ID) |
 
 **Decided: leave the main screen's history loading on the main thread.** Every main-screen query has a fixed window (last 1,000 readings, 48 h, 26 weeks), so its cost stays flat as history grows. On a fresh open it is about 250 ms, and about 77 ms once the app is running. Revisit only if the `BatteryLabMain` log shows growth.
@@ -41,7 +41,7 @@ For the full table, see the triage comment on issue #4. That comment predates A1
    - CSV export
 
    The owner has said some buttons and numbers looked wrong. Which ones is not known yet.
-2. **B5** cloud-backup decision.
+2. **B5 restore check:** a real restore onto a new phone is untested; the backup itself ran on 2026-11-16.
 3. **A/B Ring-overhead experiment** (widget-only vs BLE monitoring, ABBA order). Not run yet.
 4. **Issue #5 (Ring Radar):** a proposal only, not approved for coding.
 5. **After PR #3 merges:** delete `feature/widget-host-probe` once it has no unique work, and consider closing `feature/passive-battery-diagnostic` (PR #1, closed).
@@ -63,7 +63,7 @@ For the full table, see the triage comment on issue #4. That comment predates A1
 ```bash
 JAVA_HOME=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ANDROID_HOME=/opt/homebrew/share/android-commandlinetools /opt/homebrew/opt/gradle@8/bin/gradle --no-daemon :app:assembleDebug :app:testDebugUnitTest :wear:assembleDebug
 ```
-77 unit tests pass as of this note. The repo's only workflow is manual (`workflow_dispatch`).
+84 unit tests pass as of this note. The repo's only workflow is manual (`workflow_dispatch`).
 
 ## Rules that still apply
 - **Not allowed:**

@@ -662,7 +662,12 @@ class MainActivity : StyledActivity() {
             toast("No paired Bluetooth devices visible. Pair your Ring in Galaxy Wearable first.")
             return
         }
-        val names = devices.map { "${it.name ?: "Unnamed"}  (${it.address})" }.toTypedArray()
+        // Every bonded device is listed (a renamed Ring must stay choosable), but likely Rings come
+        // first and the rest are marked, so a headset or car is harder to pick by mistake.
+        val ringFirst = devices.sortedBy { if (RingReader.looksLikeRing(it.name)) 0 else 1 }
+        val names = ringFirst.map {
+            "${it.name ?: "Unnamed"}  (${it.address})" + if (RingReader.looksLikeRing(it.name)) "" else "  · not a Ring?"
+        }.toTypedArray()
         AlertDialog.Builder(this).setTitle("Choose your already-paired Galaxy Ring")
             .setItems(names) { _, which ->
                 if (store.activeExperiment() != null) {
@@ -670,7 +675,7 @@ class MainActivity : StyledActivity() {
                     return@setItems
                 }
                 PollScheduler.setRingEnabled(this, false)
-                PollScheduler.prefs(this).edit().putString(PollScheduler.RING_ADDRESS, devices[which].address).apply()
+                PollScheduler.prefs(this).edit().putString(PollScheduler.RING_ADDRESS, ringFirst[which].address).apply()
                 render()
             }.setNegativeButton("Cancel", null).show()
     }

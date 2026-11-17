@@ -231,8 +231,9 @@ class StatsActivity : StyledActivity() {
         val now = System.currentTimeMillis()
         val day = 86_400_000L
         val windows = listOf("7 DAYS" to 7 * day, "30 DAYS" to 30 * day, "6 MONTHS" to 182 * day, "1 YEAR" to 365 * day, "ALL TIME" to Long.MAX_VALUE / 2)
-        section("Over time", "How long a full charge lasts.", "Rolling averages of every discharge in each window, " +
-            "weighted by how much battery it used. Longer windows fill in as history grows.").apply {
+        section("Over time", "How long a full charge would last at the drain rate seen.", "Projected 100% → 0% from " +
+            "the observed stretches of discharge in each window (each at least an hour long, not full cycles), weighted by " +
+            "how much battery each used. Longer windows fill in as history grows.").apply {
             devices.forEachIndexed { i, (_, name, color) ->
                 val stretches = BatteryMath.dischargeStretches(data[i].map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = PollScheduler.gapLimits(this@StatsActivity))
                 if (stretches.isEmpty()) return@forEachIndexed
@@ -240,7 +241,7 @@ class StatsActivity : StyledActivity() {
                 val rows = windows.mapNotNull { (labelText, span) ->
                     val inWindow = stretches.filter { it.startMs >= now - span }
                     if (inWindow.isEmpty()) null else Triple(labelText, 100.0 * inWindow.sumOf { it.hours } / inWindow.sumOf { it.drop },
-                        if (now - first < span && span < Long.MAX_VALUE / 2) "only ${f1((now - first) / day.toDouble())} days so far" else "${inWindow.size} discharge${if (inWindow.size == 1) "" else "s"}")
+                        if (now - first < span && span < Long.MAX_VALUE / 2) "only ${f1((now - first) / day.toDouble())} days so far" else "${inWindow.size} observed stretch${if (inWindow.size == 1) "" else "es"}")
                 }
                 if (rows.isEmpty()) return@forEachIndexed
                 addView(deviceBanner(name, color))

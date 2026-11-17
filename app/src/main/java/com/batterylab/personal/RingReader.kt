@@ -192,6 +192,9 @@ class RingReader(
         private val WRITE_UUID = UUID.fromString("63e30bad-4206-4596-839f-e47cbf7a4b5d")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
+        /** Name-only hint for sorting the picker; never used to decide a device's identity. */
+        fun looksLikeRing(name: String?): Boolean = name?.contains("ring", ignoreCase = true) == true
+
         fun pairedDevices(context: Context): List<BluetoothDevice> {
             if (Build.VERSION.SDK_INT >= 31 && context.checkSelfPermission(
                 Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) return emptyList()

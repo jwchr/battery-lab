@@ -8,6 +8,11 @@ import android.os.Build
 import android.os.PowerManager
 
 object PhoneBattery {
+    /** Whether a charger is connected right now, or null if Android won't say. */
+    fun isPlugged(context: Context): Boolean? =
+        context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            ?.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1)?.takeIf { it >= 0 }?.let { it > 0 }
+
     /** The phone's own battery right now, with its context. [trigger] says what asked for it. */
     fun read(context: Context, trigger: String): Reading? {
         val intent: Intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)) ?: return null

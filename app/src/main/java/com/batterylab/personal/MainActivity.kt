@@ -710,16 +710,18 @@ class MainActivity : StyledActivity() {
             }.setNegativeButton("Cancel", null).show()
     }
 
-    private fun readRing(ready: (Reading) -> Unit) {
+    /** [failed] runs when no reading reaches [ready]: no Ring chosen, busy, BLE error, or the screen closed. */
+    private fun readRing(failed: () -> Unit = {}, ready: (Reading) -> Unit) {
         val address = PollScheduler.ringAddress(this)
-        if (address == null) { toast("Choose your paired Ring first"); return }
-        if (reader != null) { toast("A Ring reading is already in progress"); return }
+        if (address == null) { toast("Choose your paired Ring first"); failed(); return }
+        if (reader != null) { toast("A Ring reading is already in progress"); failed(); return }
         toast("Requesting Ring battery percentage…")
         reader = RingReader(applicationContext, address) { reading, error ->
             reader = null
             // Leaving the screen cancels the read: keep a reading if one arrived, but don't toast,
             // log "Cancelled" as a Bluetooth failure, or render a destroyed page.
-            if (isDestroyed) { reading?.let(store::append); return@RingReader }
+            // A rotation also destroys the page, so [failed] still runs to undo any setup.
+            if (isDestroyed) { reading?.let(store::append); failed(); return@RingReader }
             if (reading != null) {
                 store.append(reading)
                 ready(reading)
@@ -727,6 +729,7 @@ class MainActivity : StyledActivity() {
             } else {
                 store.logProbe(BatteryStore.RING_ID, error ?: "Unknown BLE error")
                 toast("Ring BLE failed: ${error ?: "Unknown"}. Manual entry is available.")
+                failed()
             }
             render()
         }.also { it.start() }
@@ -752,7 +755,7 @@ class MainActivity : StyledActivity() {
      * Prefers sources that do not wake the Ring: what the Samsung widget shows now, then a recent
      * manual entry, then BLE, which only the monitoring arm may use.
      */
-    private fun freshRingReading(mode: String, next: (Reading) -> Unit) {
+    private fun freshRingReading(mode: String, failed: () -> Unit = {}, next: (Reading) -> Unit) {
         refreshWidget()
         val widgetRing = widgetSnapshot?.slots?.firstOrNull {
             SamsungWidgetSource.labelFor(this, it.fingerprint) == SamsungWidgetSource.LABEL_RING
@@ -761,8 +764,8 @@ class MainActivity : StyledActivity() {
             System.currentTimeMillis(), PollScheduler.ringAddress(this) != null)
         when (choice) {
             is ExperimentEndpoint.Choice.Use -> next(choice.reading)
-            ExperimentEndpoint.Choice.ReadBle -> readRing(next)
-            is ExperimentEndpoint.Choice.Refuse -> toast(choice.reason)
+            ExperimentEndpoint.Choice.ReadBle -> readRing(failed, next)
+            is ExperimentEndpoint.Choice.Refuse -> { toast(choice.reason); failed() }
         }
     }
 
@@ -777,8 +780,12 @@ class MainActivity : StyledActivity() {
             toast("A monitored test polls the Ring over BLE. Choose your paired Ring first.")
             return
         }
-        PollScheduler.setRingEnabled(this, false)
-        freshRingReading(mode) { reading ->
+        // Monitoring pauses during the start reading. If no test starts (refused, BLE failure, or
+        // the screen rotating or closing mid-read), it goes back to how it was.
+        val app = applicationContext
+        val wasMonitoring = PollScheduler.ringEnabled(app)
+        PollScheduler.setRingEnabled(app, false)
+        freshRingReading(mode, failed = { PollScheduler.setRingEnabled(app, wasMonitoring) }) { reading ->
             store.startExperiment(reading.device, mode, reading)
             PollScheduler.setRingEnabled(this, mode == "monitoring")
             toast("${modeName(mode)} test started at ${reading.percent}%")

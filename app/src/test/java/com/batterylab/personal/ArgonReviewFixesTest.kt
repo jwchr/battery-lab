@@ -60,6 +60,26 @@ class ArgonReviewFixesTest {
         assertEquals(listOf(true, true, false, false), ended.map { it.charging })
     }
 
+    // F8: drain is split at local clock hours, also in a half-hour zone.
+    @Test fun drainByHourSplitsAtLocalHoursInAHalfHourZone() {
+        val offset = 5 * h + 30 * m
+        fun r(hours: Double, pct: Int) = Reading("phone", (hours * h).toLong(), pct, false, "android")
+        // 00:00 to 01:00 UTC is 05:30 to 06:30 local: half in local hour 5, half in hour 6.
+        val s = BatteryStats.device(listOf(r(0.0, 100), r(1.0, 90)), { ((it + offset) / h % 24).toInt() },
+            utcOffsetMs = { offset })
+        assertEquals(10.0, s.drainByHour[5]!!, 1e-9)
+        assertEquals(10.0, s.drainByHour[6]!!, 1e-9)
+    }
+
+    // F8: unplugging within one check, what was lost since the charging reading counts as used.
+    @Test fun dropRightAfterUnpluggingCountsAsUsed() {
+        fun r(min: Long, pct: Int, charging: Boolean? = false) = Reading("phone", t + min * m, pct, charging, "android")
+        val hourOf = { ms: Long -> ((ms - t) / h % 24).toInt() }
+        assertEquals(3, BatteryStats.device(listOf(r(0, 80, true), r(15, 78), r(30, 77)), hourOf).percentUsed)
+        // Across a gap the step is unknown, as before.
+        assertEquals(0, BatteryStats.device(listOf(r(0, 80, true), r(180, 70)), hourOf).percentUsed)
+    }
+
     // F9: screen-on time with no app in the history counts toward Other's hours and intensity.
     @Test fun bareScreenTimeGivesOtherItsHoursAndIntensity() {
         fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)

@@ -71,7 +71,12 @@ object BatteryStats {
 
     /** [hourOf] maps a time to its local hour of day (0..23); injected so tests are timezone-free. */
     /** Steps longer than [GapLimits.stepMs] are gaps (phone off, job deferred) and are not counted as time. */
-    fun device(readings: List<Reading>, hourOf: (Long) -> Int, gaps: GapLimits = GapLimits()): DeviceStats {
+    /**
+     * [utcOffsetMs] gives the local zone's offset from UTC at a time, so a step is split at local
+     * clock-hour boundaries (the same hours [hourOf] names), including in half-hour zones.
+     */
+    fun device(readings: List<Reading>, hourOf: (Long) -> Int, gaps: GapLimits = GapLimits(),
+               utcOffsetMs: (Long) -> Long = { java.util.TimeZone.getDefault().getOffset(it).toLong() }): DeviceStats {
         val r = BatteryMath.withoutSpikes(readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs },
             { it.percent }, { it.charging }, { it.timeMs }, gaps)
         var used = 0
@@ -98,7 +103,12 @@ object BatteryStats {
             if (prev != null) {
                 val dt = cur.timeMs - prev.timeMs
                 val prevCharging = prev.charging == true
-                val drop = if (prevCharging || isCharging) 0 else max(0, (low ?: prev.percent) - cur.percent)
+                val drop = when {
+                    isCharging -> 0
+                    // Unplugged within one check: what it lost since the charging reading is real use.
+                    prevCharging -> if (dt <= gaps.stepMs) max(0, prev.percent - cur.percent) else 0
+                    else -> max(0, (low ?: prev.percent) - cur.percent)
+                }
                 used += drop
                 if (dt <= gaps.stepMs) {
                     val h = dt / HOUR
@@ -110,7 +120,8 @@ object BatteryStats {
                         // Share the drop across the clock hours the interval spans, by time in each.
                         var t = prev.timeMs
                         while (t < cur.timeMs) {
-                            val next = minOf(cur.timeMs, (t / HOUR_MS + 1) * HOUR_MS)
+                            val off = utcOffsetMs(t)
+                            val next = minOf(cur.timeMs, (Math.floorDiv(t + off, HOUR_MS) + 1) * HOUR_MS - off)
                             val part = (next - t).toDouble() / dt
                             val hr = hourOf(t)
                             hourSum[hr] += drop * part; hourWeight[hr] += h * part

@@ -36,4 +36,16 @@ class ArgonReviewFixesTest {
         assertEquals(listOf(Span(0, 10)), f.spans["a"])
         assertEquals(listOf(Span(10, 30)), f.spans["b"])
     }
+
+    // F9: screen-on time with no app in the history counts toward Other's hours and intensity.
+    @Test fun bareScreenTimeGivesOtherItsHoursAndIntensity() {
+        fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)
+        // 1%/h idle with the screen off; one hour on screen with no app: 8 points.
+        val points = listOf(p(0, 100), p(60, 99), p(120, 98), p(180, 90), p(240, 89))
+        val d = DrainAnalysis.analyze(points, listOf(Span(t + 120 * m, t + 180 * m)), emptyMap(), h)
+        val other = d.apps.single { it.app == DrainAnalysis.UNATTRIBUTED }
+        assertEquals(7.0, other.percent, 1e-9)
+        assertEquals(1.0, other.foregroundHours, 1e-9)
+        assertEquals(8.0, other.activePctPerHour!!, 1e-9)
+    }
 }

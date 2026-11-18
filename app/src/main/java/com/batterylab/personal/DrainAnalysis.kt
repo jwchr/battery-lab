@@ -140,7 +140,7 @@ object DrainAnalysis {
         // Whole-phone drop and energy during each app's on-screen time, for intensity and shares.
         val activeDrop = HashMap<String, Double>()
         val activeWh = HashMap<String, Double>()
-        var otherOnMs = 0L; var otherOnDrop = 0.0
+        var otherOnMs = 0L; var otherOnDrop = 0.0; var otherOnWh: Double? = null
         for (s in steps) {
             val inStep = index.mapValues { (_, ix) -> ix.overlap(s.from, s.to) }.filterValues { it > 0 }
             val stepMs = (s.to - s.from).toDouble()
@@ -153,13 +153,21 @@ object DrainAnalysis {
             // Screen on with no app in the history (lock screen, system UI) counts as Other.
             val bare = (s.onMs - inStep.values.sum()).coerceAtLeast(0L)
             otherOnMs += bare; otherOnDrop += s.drop * bare / stepMs
+            if (bare > 0 && capacityMah != null && s.mvAvg != null)
+                otherOnWh = (otherOnWh ?: 0.0) + s.drop * bare / stepMs / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
         }
         // Each app: drop while it was on screen beyond what idle would have used in that time.
         // Screen-off time is never given to an app. Shares are then scaled to add up to exactly
         // the drop above idle, so idle plus every row is 100%.
         val raw = HashMap<String, Double>()
         fgMs.forEach { (app, ms) -> raw[app] = max(0.0, (activeDrop[app] ?: 0.0) - offRate * ms / HOUR) }
-        if (otherOnMs > 0) raw[UNATTRIBUTED] = (raw[UNATTRIBUTED] ?: 0.0) + max(0.0, otherOnDrop - offRate * otherOnMs / HOUR)
+        if (otherOnMs > 0) {
+            raw[UNATTRIBUTED] = (raw[UNATTRIBUTED] ?: 0.0) + max(0.0, otherOnDrop - offRate * otherOnMs / HOUR)
+            // The same screen time also counts toward Other's on-screen hours and intensity.
+            fgMs[UNATTRIBUTED] = (fgMs[UNATTRIBUTED] ?: 0L) + otherOnMs
+            activeDrop[UNATTRIBUTED] = (activeDrop[UNATTRIBUTED] ?: 0.0) + otherOnDrop
+            otherOnWh?.let { activeWh[UNATTRIBUTED] = (activeWh[UNATTRIBUTED] ?: 0.0) + it }
+        }
         val above = totalDrop - standby
         val rawSum = raw.values.sum()
         val share = HashMap<String, Double>()

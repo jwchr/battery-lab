@@ -23,7 +23,7 @@
 ## Build and test (Linux cloud)
 - Modules: `app` (phone), `wear` (Watch), `widgetprobe` (widget test tool). compileSdk 35, Java 17 target, Gradle 8.9 in CI.
 - SDK setup (cloud environment "battery-lab" allows dl.google.com): install the command-line tools into `$HOME/android-sdk`, then `sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"`.
-- Quiet check: `gradle --no-daemon -q :app:assembleDebug :app:testDebugUnitTest :wear:assembleDebug` (130 unit tests pass as of Nov 18). If Maven Central reports a missing dependency, rerun with `--refresh-dependencies`.
+- Quiet check: `gradle --no-daemon -q :app:assembleDebug :app:testDebugUnitTest :wear:assembleDebug :widgetprobe:assembleDebug` (130 unit tests pass as of Nov 18). If Maven Central reports a missing dependency, rerun with `--refresh-dependencies`.
 - `.github/workflows/build-apks.yml` builds the phone and Watch APKs, manual run only. It costs GitHub Actions minutes, so run it only when Jeff needs APKs.
 
 ## Needs Jeff's devices

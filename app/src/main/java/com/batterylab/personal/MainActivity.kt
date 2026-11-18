@@ -555,7 +555,7 @@ class MainActivity : StyledActivity() {
                     text = unit
                     textSize = 11f; setTextColor(Palette.quiet)
                 })
-                if (projection != null || chargeMs != null || unit == "est. (history)") addView(TextView(this@MainActivity).apply {
+                if (projection != null || chargeMs != null || unit.endsWith("(est.)")) addView(TextView(this@MainActivity).apply {
                     text = if (chargeMs != null && projection == null) "Android" else "Battery Lab"
                     textSize = 9.5f; setTextColor(Palette.quiet)
                 })

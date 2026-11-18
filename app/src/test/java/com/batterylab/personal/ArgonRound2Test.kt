@@ -28,4 +28,27 @@ class ArgonRound2Test {
         assertTrue(ExperimentStats.usesSource("baseline", "manual_widget"))
         assertEquals(false, ExperimentStats.usesSource("monitoring", "manual_widget"))
     }
+
+    // R6: plugged in overnight, the slow finish ends at FULL or when the counter stops rising.
+    @Test fun slowFinishStopsAtFullOrAFlatCounter() {
+        fun p(min: Long, uah: Int?, status: Int? = null) = Reading("phone", t + min * m, 100, true, "android",
+            remainingUah = uah, detail = status?.let { ReadingDetail(status = it) })
+        // Counter rises for 30 min, then sits flat on the charger for 8 hours.
+        val byCounter = listOf(p(0, 4_000_000), p(15, 4_050_000), p(30, 4_080_000)) +
+            (1..32).map { p(30 + it * 15L, 4_080_000) }
+        assertEquals(listOf(30.0 to 80.0), HonestyAuditor.cvTaper(byCounter, GapLimits()))
+        // No counter: the charger's FULL status ends it.
+        val byStatus = listOf(p(0, null, 2), p(20, null, 2), p(40, null, 5)) + (1..30).map { p(40 + it * 15L, null, 5) }
+        assertEquals(listOf(40.0 to null), HonestyAuditor.cvTaper(byStatus, GapLimits()))
+    }
+
+    // R10: no lag when the widget already shows the new value; no match across a widget charge.
+    @Test fun widgetLagIsZeroWhenAlreadyShownAndStopsAtACharge() {
+        fun a(min: Long, pct: Int) = Reading("phone", t + min * m, pct, false, "android")
+        fun w(min: Long, pct: Int, charging: Boolean? = false) = Reading("phone", t + min * m, pct, charging, SamsungWidgetSource.SOURCE)
+        assertEquals(listOf(0.0), HonestyAuditor.widgetLags(listOf(a(0, 80), a(30, 79)), listOf(w(20, 79), w(50, 79))))
+        // The widget charges before it ever shows 79: no lag is counted from the later 79.
+        assertEquals(emptyList<Double>(), HonestyAuditor.widgetLags(listOf(a(0, 80), a(30, 79)),
+            listOf(w(15, 80), w(45, 85, true), w(90, 79))))
+    }
 }

@@ -13,7 +13,7 @@ As of 2026-11-18 the Argon API is out of usage, so step 3 falls through to step 
 
 ## Merging and devices
 
-- No merge without Jeff's OK.
+- Claude may merge its own PRs when it decides they are ready: reviewed per the rule above with findings handled, and build and unit tests passing (Jeff, 2026-11-18: "you have permission to merge on your own when you decide it's ready").
 - Up to 3 open PRs at a time.
 - Anything that needs Jeff's phone, Watch or Ring is a hands-on test for him: ask in one plain line and keep working.
 - Phone, install and Bluetooth rules, and build commands: see `docs/HANDOFF.md`. The newest handoff note is the latest open "Handoff note" issue.

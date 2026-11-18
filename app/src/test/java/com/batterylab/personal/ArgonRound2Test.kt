@@ -51,4 +51,19 @@ class ArgonRound2Test {
         assertEquals(emptyList<Double>(), HonestyAuditor.widgetLags(listOf(a(0, 80), a(30, 79)),
             listOf(w(15, 80), w(45, 85, true), w(90, 79))))
     }
+
+    // R13: a charge seen only after a gap is timed from its first charging reading; a history
+    // that starts mid-charge still records the charge.
+    @Test fun chargeSessionsAfterAGapAndAtTheStart() {
+        fun r(min: Long, pct: Int, charging: Boolean? = false) = Reading("phone", t + min * m, pct, charging, "android")
+        val hourOf = { ms: Long -> ((ms - t) / h % 24).toInt() }
+        val gap = BatteryStats.device(listOf(r(0, 30), r(300, 40, true), r(330, 70, true), r(345, 70)), hourOf)
+        val c = gap.charges.single()
+        assertEquals(t + 300 * m, c.startMs)
+        assertEquals(40, c.fromPct)
+        assertEquals(1.0, c.ratePerMinute!!, 1e-9)
+        val start = BatteryStats.device(listOf(r(0, 50, true), r(30, 80, true), r(45, 80)), hourOf)
+        assertEquals(50, start.charges.single().fromPct)
+        assertEquals(30.0, start.charges.single().minutes, 1e-9)
+    }
 }

@@ -130,7 +130,8 @@ object BatteryStats {
                     }
                 }
                 // Charges: watched (charging flag) or inferred (a jump up of more than 2 points).
-                if (isCharging && !prevCharging) { closeCharge(); chargeStart = prev; chargePeak = cur }
+                // After a gap the plug-in time is unknown, so the timed charge starts at this reading.
+                if (isCharging && !prevCharging) { closeCharge(); chargeStart = if (dt > gaps.stepMs) cur else prev; chargePeak = cur }
                 // ">" not ">=": time parked at the peak afterwards isn't charging speed.
                 else if (isCharging) { if (cur.percent > (chargePeak?.percent ?: -1)) chargePeak = cur }
                 else if (prevCharging) closeCharge()
@@ -143,6 +144,8 @@ object BatteryStats {
                     longest = max(longest, (cur.timeMs - streakStart!!) / HOUR)
                 }
             }
+            // History that starts mid-charge: time the charge from its first reading.
+            if (prev == null && isCharging) { chargeStart = cur; chargePeak = cur }
             low = when {
                 isCharging -> null
                 prev != null && cur.percent > prev.percent + 2 -> cur.percent   // unseen charge: new baseline

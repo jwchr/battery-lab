@@ -369,7 +369,7 @@ class StatsActivity : StyledActivity() {
                 if (stretches.isEmpty()) return@forEachIndexed
                 val first = data[i].first().timeMs
                 val rows = windows.mapNotNull { (labelText, span) ->
-                    val inWindow = stretches.filter { it.startMs >= now - span }
+                    val inWindow = BatteryMath.overlapping(stretches, now - span)
                     if (inWindow.isEmpty()) null else Triple(labelText, 100.0 * inWindow.sumOf { it.hours } / inWindow.sumOf { it.drop },
                         if (now - first < span && span < Long.MAX_VALUE / 2) "only ${f1((now - first) / day.toDouble())} days so far" else "${inWindow.size} observed stretch${if (inWindow.size == 1) "" else "es"}")
                 }

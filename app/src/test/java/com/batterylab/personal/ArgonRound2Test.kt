@@ -66,4 +66,13 @@ class ArgonRound2Test {
         assertEquals(50, start.charges.single().fromPct)
         assertEquals(30.0, start.charges.single().minutes, 1e-9)
     }
+
+    // R16: a stretch that began before the window but runs into it counts for that window.
+    @Test fun rollingWindowKeepsStretchesThatOverlapIt() {
+        val day = 24 * h
+        val before = DischargeStretch(t - 9 * day, t - 8 * day, 100, 40)
+        val spanning = DischargeStretch(t - 7 * day - 2 * h, t - 7 * day + 10 * h, 100, 30)
+        val inside = DischargeStretch(t - day, t - day + 8 * h, 90, 50)
+        assertEquals(listOf(spanning, inside), BatteryMath.overlapping(listOf(before, spanning, inside), t - 7 * day))
+    }
 }

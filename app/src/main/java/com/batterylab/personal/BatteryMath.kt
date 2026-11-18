@@ -145,6 +145,10 @@ object BatteryMath {
 
     private const val SPIKE_POINTS = 10
 
+    /** Stretches that reach into the window starting at [fromMs], including one still under way at its start. */
+    fun overlapping(stretches: List<DischargeStretch>, fromMs: Long): List<DischargeStretch> =
+        stretches.filter { it.endMs >= fromMs }
+
     /**
      * Full-charge runtime per week, weighted by percentage points discharged so long stretches
      * count more than short ones. [weekOf] maps a time to the start of its week. A stretch that

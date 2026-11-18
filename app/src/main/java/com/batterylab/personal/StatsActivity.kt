@@ -174,7 +174,8 @@ class StatsActivity : StyledActivity() {
         timed("headtohead") { renderHeadToHead(devices, stats) }
         timed("rolling") { renderRolling(devices, data) }
         timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
-        timed("fun") { renderFun(stats[0], capacity.combinedMah ?: phoneCapacity(phone)?.first, phone) }
+        // The same capacity figure as the Phone battery capacity headline.
+        timed("fun") { renderFun(stats[0], phoneCapacity(phone)?.first ?: capacity.combinedMah, phone) }
         timed("overhead") { renderOverhead() }
         timed("capabilities") { renderCapabilities() }
         // Which sections still cost main-thread time (audit #4 A6); only the slow ones are listed.
@@ -244,8 +245,10 @@ class StatsActivity : StyledActivity() {
                 "slope method: ${lab.slopeCapacityMah?.let { "${fmt(it)} mAh" } ?: "not enough yet"} (${lab.slopeSamples})" +
                 (lab.iqrMah?.let { " \u00b7 spread \u00b1${fmt(it / 2)} mAh" } ?: ""), 11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
             evidence("Android's charge counter (mAh left) and percent, from this phone's readings.",
-                "Two methods: the counter at settled 100% plateaus, and the slope of counter vs percent over each discharge " +
-                    "(15\u201398%) \u00d7 100. The headline is the median of all samples from both.",
+                "The headline is the last 30 days: the counter at the latest 100% reading, else the median capacity implied " +
+                    "by partial readings. With no reading in 30 days it falls back to two longer-run methods: the counter at " +
+                    "settled 100% plateaus, and the slope of counter vs percent over each discharge (15\u201398%) \u00d7 100, " +
+                    "taking the median of all samples from both.",
                 "${lab.sampleCount} samples. Plateaus need the charger to have finished; slopes need a 30-point stretch with 6+ readings.")
             if (spec == null) addView(label("Comparing to new needs this model's factory capacity, which Battery Lab doesn't know yet.", 11.5f, Palette.quiet))
         }

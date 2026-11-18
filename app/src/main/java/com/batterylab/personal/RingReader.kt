@@ -62,23 +62,36 @@ class RingReader(
 
     fun cancel() = complete(null, "Cancelled")
 
+    /** Main thread only: the result waiting for the connection to close. */
+    private var pending: Pair<Reading?, String?>? = null
+
     private fun complete(reading: Reading?, error: String?) {
         if (!finished.compareAndSet(false, true)) return
-        if (holdsLock) { holdsLock = false; inFlight.set(false) }
         main.removeCallbacks(deadline)
         // Hang up now, but release the connection only once Android reports the link is down
         // (or after 2 s), so the Bluetooth stack isn't left holding a half-closed link.
         try { gatt?.disconnect() } catch (_: Exception) { }
-        main.postDelayed(closer, 2_000)
-        main.post { completion(reading, error) }
+        main.post {
+            pending = reading to error
+            if (gatt == null) closeGatt() else main.postDelayed(closer, 2_000)
+        }
     }
 
-    /** Main thread only. */
+    /**
+     * Main thread only. The result is delivered, and the one-read lock released, only after
+     * the connection is closed, so the next read (or the end of a background job) never
+     * overlaps a link that is still open.
+     */
     private fun closeGatt() {
         main.removeCallbacks(closer)
-        val g = gatt ?: return
-        gatt = null
-        try { g.close() } catch (_: Exception) { }
+        gatt?.let { g ->
+            gatt = null
+            try { g.close() } catch (_: Exception) { }
+        }
+        val result = pending ?: return
+        pending = null
+        if (holdsLock) { holdsLock = false; inFlight.set(false) }
+        completion(result.first, result.second)
     }
 
     private val callback = object : BluetoothGattCallback() {

@@ -41,7 +41,8 @@ object DriveBackup {
     fun enableFolder(context: Context, tree: Uri) {
         context.contentResolver.takePersistableUriPermission(tree,
             Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-        disable(context)
+        // Re-picking the same folder must not release the grant just taken.
+        disable(context, keep = tree)
         PollScheduler.prefs(context).edit().putString(KEY_TREE, tree.toString()).apply()
     }
     private const val KEY_LAST = "backup_last_ms"
@@ -63,8 +64,9 @@ object DriveBackup {
         PollScheduler.prefs(context).edit().putString(KEY_URI, uri.toString()).remove(KEY_LAST).remove(KEY_TRY).remove(KEY_FAILS).apply()
     }
 
-    fun disable(context: Context) {
-        val held = listOfNotNull(uri(context), treeUri(context))
+    /** Turns backup off and releases the held grants, except [keep]. */
+    fun disable(context: Context, keep: Uri? = null) {
+        val held = listOfNotNull(uri(context), treeUri(context)).filter { it != keep }
         PollScheduler.prefs(context).edit().remove(KEY_URI).remove(KEY_TREE).remove(KEY_LAST).remove(KEY_TRY).remove(KEY_FAILS).apply()
         for (uri in held) try {
             context.contentResolver.releasePersistableUriPermission(uri,

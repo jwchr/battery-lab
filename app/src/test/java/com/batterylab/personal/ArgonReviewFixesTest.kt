@@ -191,6 +191,17 @@ class ArgonReviewFixesTest {
         assertEquals(emptyList<JournalEntry>() to emptyList<Forecast>(), readBack(old))
     }
 
+    // F7 follow-up: the main card still says "Full" for a wearable parked at 100% after a charge.
+    @Test fun cardShowsFullForATrailingFullHold() {
+        fun w(min: Long, pct: Int, charging: Boolean? = false) = Reading("ring", t + min * m, pct, charging, SamsungWidgetSource.SOURCE)
+        val history = listOf(w(0, 89, true), w(60, 100), w(120, 100))
+        assertEquals(true, BatteryStats.fullHoldAsCharging(history).last().charging)   // analysis view
+        val last = DeviceCard.shown(history)!!
+        assertEquals(false, last.charging)
+        assertEquals(DeviceCard.FULL, DeviceCard.status(last, fresh = true))
+        assertEquals(DeviceCard.CHARGING, DeviceCard.status(w(0, 89, true), fresh = true))
+    }
+
     // F9: screen-on time with no app in the history counts toward Other's hours and intensity.
     @Test fun bareScreenTimeGivesOtherItsHoursAndIntensity() {
         fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)

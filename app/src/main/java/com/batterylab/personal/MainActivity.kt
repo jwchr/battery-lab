@@ -428,8 +428,11 @@ class MainActivity : StyledActivity() {
 
     /** One device: color gauge, name with a status pill, hours left on the right, a quiet meta line. */
     private fun deviceBoard(id: String, name: String, color: Int): View {
-        val recent = BatteryStats.fullHoldAsCharging(store.recent(id, 1000))
-        val last = recent.lastOrNull()
+        val history = store.recent(id, 1000)
+        val recent = BatteryStats.fullHoldAsCharging(history)
+        // The card shows the newest reading as read; charging inferred for a full hold is for the
+        // analysis only, so a wearable parked at 100% still shows "Full".
+        val last = DeviceCard.shown(history)
         val now = System.currentTimeMillis()
         // The phone's own job can sleep for hours in Doze, so it gets a long allowance. A wearable
         // that misses three checks in a row, or drops out of Samsung's widget, is treated as offline:
@@ -475,13 +478,12 @@ class MainActivity : StyledActivity() {
             last?.charging == true -> null   // shown as the big number on the right instead
             else -> androidEstimate.dischargeMs?.let { "Android: ${span(it)} left" }
         }
-        val (status, statusColor) = when {
-            last == null -> "No data yet" to Palette.quiet
-            !fresh -> "Offline" to Palette.amberInk
-            last.charging == true -> "Charging" to Palette.greenInk
-            // Widget shows a full wearable without a bolt whether or not it is still on the charger.
-            last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> "Full" to Palette.greenInk
-            else -> "On battery" to Palette.tintInk
+        val status = DeviceCard.status(last, fresh)
+        val statusColor = when (status) {
+            DeviceCard.NO_DATA -> Palette.quiet
+            DeviceCard.OFFLINE -> Palette.amberInk
+            DeviceCard.CHARGING, DeviceCard.FULL -> Palette.greenInk
+            else -> Palette.tintInk
         }
         return LinearLayout(this).apply {
             gravity = android.view.Gravity.CENTER_VERTICAL
@@ -1065,5 +1067,26 @@ class BatteryGraph(context: android.content.Context, private val series: List<Li
         canvas.drawText("2 days ago", left, h - 4f * d, paint)
         canvas.drawText("yesterday", (left + right) / 2 - 22f * d, h - 4f * d, paint)
         canvas.drawText("now", right - 20f * d, h - 4f * d, paint)
+    }
+}
+
+/** Main-card choices that need no Android; pure so they can be tested. */
+object DeviceCard {
+    const val NO_DATA = "No data yet"
+    const val OFFLINE = "Offline"
+    const val CHARGING = "Charging"
+    const val FULL = "Full"
+    const val ON_BATTERY = "On battery"
+
+    /** The newest reading exactly as read, without charging inferred by [BatteryStats.fullHoldAsCharging]. */
+    fun shown(history: List<Reading>): Reading? = history.sortedBy { it.timeMs }.lastOrNull()
+
+    fun status(last: Reading?, fresh: Boolean): String = when {
+        last == null -> NO_DATA
+        !fresh -> OFFLINE
+        last.charging == true -> CHARGING
+        // Widget shows a full wearable without a bolt whether or not it is still on the charger.
+        last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> FULL
+        else -> ON_BATTERY
     }
 }

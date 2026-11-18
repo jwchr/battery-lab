@@ -53,7 +53,7 @@ object BatteryMath {
     private const val HOUR_MS = 3_600_000L
 
     fun estimate(points: List<BatteryPoint>, gaps: GapLimits = GapLimits()): RuntimeEstimate? {
-        val chronological = withoutSpikes(points.filter { it.percent in 0..100 }.sortedBy { it.timeMs })
+        val chronological = withoutSpikes(points.filter { it.percent in 0..100 }.sortedBy { it.timeMs }, gaps)
         if (chronological.size < 2) return null
         val last = chronological.last()
         if (last.charging == true) return null
@@ -110,7 +110,7 @@ object BatteryMath {
             }
             run = mutableListOf()
         }
-        for (p in withoutSpikes(points.filter { it.percent in 0..100 }.sortedBy { it.timeMs })) {
+        for (p in withoutSpikes(points.filter { it.percent in 0..100 }.sortedBy { it.timeMs }, gaps)) {
             if (p.charging == true) { close(); continue }
             val prev = run.lastOrNull()
             if (prev != null && (p.percent > prev.percent + 2 || p.timeMs - prev.timeMs > gaps.stretchMs)) close()
@@ -123,15 +123,21 @@ object BatteryMath {
     /**
      * Removes lone readings that sit more than [SPIKE_POINTS] away from both neighbours while the
      * neighbours agree within 3 points: no battery drains 75 points and recovers within one check.
-     * Charging readings, and the first and last reading, are always kept. Input must be sorted.
+     * Only when both neighbours are within [GapLimits.stepMs]: across a gap of hours, a real low
+     * and an unseen charge can look the same. Charging readings, and the first and last reading,
+     * are always kept. Input must be sorted.
      */
-    fun withoutSpikes(sorted: List<BatteryPoint>): List<BatteryPoint> = withoutSpikes(sorted, { it.percent }, { it.charging })
+    fun withoutSpikes(sorted: List<BatteryPoint>, gaps: GapLimits = GapLimits()): List<BatteryPoint> =
+        withoutSpikes(sorted, { it.percent }, { it.charging }, { it.timeMs }, gaps)
 
     /** [withoutSpikes] for any reading type. */
-    fun <T> withoutSpikes(sorted: List<T>, percent: (T) -> Int, charging: (T) -> Boolean?): List<T> {
+    fun <T> withoutSpikes(sorted: List<T>, percent: (T) -> Int, charging: (T) -> Boolean?, timeMs: (T) -> Long,
+                          gaps: GapLimits = GapLimits()): List<T> {
         if (sorted.size < 3) return sorted
         return sorted.filterIndexed { i, p ->
             if (i == 0 || i == sorted.lastIndex || charging(p) == true) return@filterIndexed true
+            val t = timeMs(p)
+            if (t - timeMs(sorted[i - 1]) > gaps.stepMs || timeMs(sorted[i + 1]) - t > gaps.stepMs) return@filterIndexed true
             val a = percent(sorted[i - 1]); val b = percent(sorted[i + 1]); val x = percent(p)
             !(abs(a - b) <= 3 && abs(x - a) > SPIKE_POINTS && abs(x - b) > SPIKE_POINTS)
         }

@@ -37,6 +37,19 @@ class ArgonReviewFixesTest {
         assertEquals(listOf(Span(10, 30)), f.spans["b"])
     }
 
+    // F2: a real low between two readings hours apart is not a glitch.
+    @Test fun aLowAcrossAMultiHourGapIsKept() {
+        fun r(min: Long, pct: Int) = Reading("phone", t + min * m, pct, false, "android")
+        val readings = listOf(r(0, 50), r(240, 35), r(480, 50), r(495, 49))
+        val kept = BatteryMath.withoutSpikes(readings, { it.percent }, { it.charging }, { it.timeMs }, GapLimits())
+        assertEquals(readings, kept)
+        val s = BatteryStats.device(readings, { ((it - t) / h % 24).toInt() })
+        assertEquals(35, s.lowest!!.first)
+        assertEquals(16, s.percentUsed)
+        // The same shape 15 minutes apart is still a glitch.
+        assertEquals(2, BatteryMath.withoutSpikes(listOf(r(0, 50), r(15, 35), r(30, 50)).map(BatteryPoint::of)).size)
+    }
+
     // F9: screen-on time with no app in the history counts toward Other's hours and intensity.
     @Test fun bareScreenTimeGivesOtherItsHoursAndIntensity() {
         fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)

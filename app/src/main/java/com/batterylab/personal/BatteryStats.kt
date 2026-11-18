@@ -71,7 +71,8 @@ object BatteryStats {
     /** [hourOf] maps a time to its local hour of day (0..23); injected so tests are timezone-free. */
     /** Steps longer than [GapLimits.stepMs] are gaps (phone off, job deferred) and are not counted as time. */
     fun device(readings: List<Reading>, hourOf: (Long) -> Int, gaps: GapLimits = GapLimits()): DeviceStats {
-        val r = BatteryMath.withoutSpikes(readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs }, { it.percent }, { it.charging })
+        val r = BatteryMath.withoutSpikes(readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs },
+            { it.percent }, { it.charging }, { it.timeMs }, gaps)
         var used = 0
         // Lowest level since the last charge. A drop only counts below it, so a widget wobbling
         // 50 → 51 → 50 adds nothing, and drain across a gap still counts (audit review, 2026-11-16).

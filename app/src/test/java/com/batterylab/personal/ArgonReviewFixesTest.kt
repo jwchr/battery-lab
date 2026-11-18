@@ -50,6 +50,16 @@ class ArgonReviewFixesTest {
         assertEquals(2, BatteryMath.withoutSpikes(listOf(r(0, 50), r(15, 35), r(30, 50)).map(BatteryPoint::of)).size)
     }
 
+    // F7: a full hold that reaches the end of history is still on the charger.
+    @Test fun trailingFullHoldCountsAsChargingThroughTheLastReading() {
+        fun w(min: Long, pct: Int, charging: Boolean? = false) = Reading("ring", t + min * m, pct, charging, SamsungWidgetSource.SOURCE)
+        val r = BatteryStats.fullHoldAsCharging(listOf(w(0, 89, true), w(60, 100), w(120, 100), w(180, 100)))
+        assertEquals(listOf(true, true, true, true), r.map { it.charging })
+        // With a lower reading after it, the last 100% is still where the drain clock starts.
+        val ended = BatteryStats.fullHoldAsCharging(listOf(w(0, 89, true), w(60, 100), w(120, 100), w(180, 99)))
+        assertEquals(listOf(true, true, false, false), ended.map { it.charging })
+    }
+
     // F9: screen-on time with no app in the history counts toward Other's hours and intensity.
     @Test fun bareScreenTimeGivesOtherItsHoursAndIntensity() {
         fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)

@@ -51,8 +51,9 @@ object BatteryStats {
      * Samsung's widget drops a wearable's charging bolt once it reaches 100%, even while it sits on
      * the charger. So a run of widget readings at 100% right after a charging reading counts as still
      * charging, except the last one: the device came off somewhere between it and the first lower
-     * reading, so the drain clock starts there. Only the analysis sees this; stored history and the
-     * CSV export keep exactly what was read.
+     * reading, so the drain clock starts there. A run that reaches the end of the history has no
+     * lower reading yet, so all of it counts as charging. Only the analysis sees this; stored
+     * history and the CSV export keep exactly what was read.
      */
     fun fullHoldAsCharging(readings: List<Reading>): List<Reading> {
         val r = readings.sortedBy { it.timeMs }
@@ -62,7 +63,7 @@ object BatteryStats {
             if (r[i].charging != true) { i++; continue }
             var j = i + 1
             while (j < r.size && r[j].percent == 100 && r[j].charging != true && r[j].source == SamsungWidgetSource.SOURCE) j++
-            for (k in i + 1 until j - 1) out[k] = r[k].copy(charging = true)
+            for (k in i + 1 until (if (j == r.size) j else j - 1)) out[k] = r[k].copy(charging = true)
             i = maxOf(j, i + 1)
         }
         return out

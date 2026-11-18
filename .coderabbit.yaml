@@ -1,0 +1,9 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Save CodeRabbit reviews (Jeff, Nov 18, 2026): all apps share one hourly review allowance.
+# Review each pull request once, when it is marked ready (drafts are skipped).
+# No automatic re-review on every push: after fixes, comment "@coderabbitai review" once.
+reviews:
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: false

@@ -100,6 +100,7 @@ class CloudBackupAgent : BackupAgent() {
             try {
                 val (readings, experiments) = GZIPInputStream(file.inputStream()).bufferedReader().use(store::importCsv)
                 marker.delete()
+                PollScheduler.afterImport(context, store)
                 store.logProbe("backup", "Cloud restore imported $readings readings, $experiments experiments")
             } catch (e: Throwable) {
                 marker.writeText((tries + 1).toString())

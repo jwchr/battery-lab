@@ -874,6 +874,7 @@ class MainActivity : StyledActivity() {
                     input.reset()
                     val stream = if (gz) java.util.zip.GZIPInputStream(input) else input
                     val (rows, tests) = stream.bufferedReader().use(store::importCsv)
+                    PollScheduler.afterImport(this, store)
                     "Restored $rows readings and $tests tests (duplicates skipped)"
                 } catch (e: Exception) { "Restore failed: ${e.message ?: e.javaClass.simpleName}" }
                 Background.onMain { if (!isDestroyed) { toast(message); render() } }

@@ -59,6 +59,16 @@ object PollScheduler {
         prefs(context).edit().putBoolean(RING_ENABLED, enabled).apply()
         schedule(context)
     }
+
+    /**
+     * After a restore: if it brought in a running test other than the monitoring arm, periodic
+     * Ring reads go off, as starting that test would have done. Call off the main thread.
+     */
+    fun afterImport(context: Context, store: BatteryStore) {
+        val on = ringEnabled(context)
+        if (on && !ExperimentEndpoint.monitoringAfterImport(on, store.activeExperiment()?.mode))
+            prefs(context).edit().putBoolean(RING_ENABLED, false).apply()
+    }
 }
 
 private const val KEY_LAST_BUCKET = "last_standby_bucket"
@@ -111,15 +121,21 @@ class BatteryPollService : JobService() {
                 Overhead.logPoll(this, store, android.os.SystemClock.elapsedRealtime() - startedMs,
                     android.os.Process.getElapsedCpuTime() - startedCpu)
             } catch (_: Throwable) { }
-            Background.onMain { readRingOrFinish(params, store) }
+            // Read here, off the main thread. A running test other than the monitoring arm must
+            // not wake the Ring; if the test can't be read, don't risk it.
+            val ringAllowed = try {
+                ExperimentEndpoint.backgroundReadAllowed(PollScheduler.ringEnabled(this),
+                    PollScheduler.ringAddress(this) != null, store.activeExperiment()?.mode)
+            } catch (_: Throwable) { false }
+            Background.onMain { readRingOrFinish(params, store, ringAllowed) }
         }
         return true
     }
 
-    private fun readRingOrFinish(params: JobParameters, store: BatteryStore) {
+    private fun readRingOrFinish(params: JobParameters, store: BatteryStore, ringAllowed: Boolean) {
         if (stopped) return
         val address = PollScheduler.ringAddress(this)
-        if (!PollScheduler.ringEnabled(this) || address == null) {
+        if (!ringAllowed || !PollScheduler.ringEnabled(this) || address == null) {
             jobFinished(params, false)
             return
         }

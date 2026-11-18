@@ -98,6 +98,19 @@ class ArgonReviewFixesTest {
         assertTrue(ExperimentStats.compare(results.take(4), "baseline", "monitoring").let { it.chosen === it.paired })
     }
 
+    // F13: background Ring reads and monitoring after a restore follow the running test's arm.
+    @Test fun ringReadsFollowTheRunningTest() {
+        assertTrue(ExperimentEndpoint.backgroundReadAllowed(true, true, null))
+        assertTrue(ExperimentEndpoint.backgroundReadAllowed(true, true, "monitoring"))
+        for (mode in listOf("baseline", "ring_alone", "ring_with_watch"))
+            assertEquals(false, ExperimentEndpoint.backgroundReadAllowed(true, true, mode))
+        assertEquals(false, ExperimentEndpoint.backgroundReadAllowed(false, true, null))
+        assertEquals(false, ExperimentEndpoint.backgroundReadAllowed(true, false, null))
+        assertTrue(ExperimentEndpoint.monitoringAfterImport(true, "monitoring"))
+        assertEquals(false, ExperimentEndpoint.monitoringAfterImport(true, "baseline"))
+        assertEquals(false, ExperimentEndpoint.monitoringAfterImport(false, null))
+    }
+
     // F9: screen-on time with no app in the history counts toward Other's hours and intensity.
     @Test fun bareScreenTimeGivesOtherItsHoursAndIntensity() {
         fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)

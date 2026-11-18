@@ -11,6 +11,13 @@ object ExperimentEndpoint {
     /** Whether anything may connect to the Ring over BLE while [activeMode] runs (null: no test). */
     fun bleAllowed(activeMode: String?) = activeMode == null || activeMode == "monitoring"
 
+    /** Whether the background job may read the Ring: monitoring is on, a Ring is chosen, and no running test forbids BLE. */
+    fun backgroundReadAllowed(monitoringOn: Boolean, hasRingAddress: Boolean, activeMode: String?) =
+        monitoringOn && hasRingAddress && bleAllowed(activeMode)
+
+    /** Whether Ring monitoring stays on after a restore, given the test that is now running (if any). */
+    fun monitoringAfterImport(monitoringOn: Boolean, activeMode: String?) = monitoringOn && bleAllowed(activeMode)
+
     /** Whether the monitoring switch may change: never mid-test, since it would change the arm's conditions. */
     fun monitoringSwitchAllowed(activeMode: String?) = activeMode == null
 

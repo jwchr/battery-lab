@@ -8,8 +8,8 @@
 
 - **Watch:** pair over Wireless debugging from **Terminal.app** with a separate helper (`adb -P 5041 pair <ip>:<pairing pop-up port>`, then `connect` to the main screen's port). A Claude-launched adb helper is blocked from the local network by macOS.
 - **Before any `adb shell input`:** Battery Lab must be the resumed activity and the screen awake.
-- **Timing logs:** `adb logcat -s BatteryLabStats BatteryLabMain`.
-- **Soak readout:** `ADB=<sdk adb> ADB_SERVER_SOCKET=tcp:127.0.0.1:5040 tools/soak_report.sh` (counts only).
+- **Timing logs:** `ADB_SERVER_SOCKET=tcp:127.0.0.1:5040 /opt/homebrew/share/android-commandlinetools/platform-tools/adb logcat -s BatteryLabStats BatteryLabMain`.
+- **Soak readout:** `ADB=/opt/homebrew/share/android-commandlinetools/platform-tools/adb ADB_SERVER_SOCKET=tcp:127.0.0.1:5040 tools/soak_report.sh` (counts only).
 - **Mac build:**
 
   ```bash

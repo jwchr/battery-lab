@@ -130,6 +130,67 @@ class ArgonReviewFixesTest {
         assertTrue(ForecastKeeper.rescore(listOf(f), emptyList(), t + 1 * h).isEmpty())
     }
 
+    // F4: journal and forecast rows survive export and import through the real CSV codec.
+    private fun utc(ms: Long) = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US)
+        .apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.format(java.util.Date(ms))
+
+    /** Parses an export the way importCsv does: header by name, records that may span lines. */
+    private fun readBack(csv: String): Pair<List<JournalEntry>, List<Forecast>> {
+        val lines = java.io.StringReader(csv).buffered()
+        val col = CsvCodec.parseLine(CsvCodec.readRecord(lines)!!).withIndex().associate { (i, n) -> n to i }
+        val parseTime = CsvCodec.utcParser()
+        val journal = mutableListOf<JournalEntry>(); val forecasts = mutableListOf<Forecast>()
+        while (true) {
+            val line = CsvCodec.readRecord(lines) ?: break
+            val f = CsvCodec.parseLine(line)
+            fun get(name: String): String? = col[name]?.let { f.getOrNull(it) }?.takeIf { it.isNotEmpty() }
+            when (get("kind")) {
+                "journal" -> journal += ContextRows.journal(::get, parseTime)!!
+                "forecast" -> forecasts += ContextRows.forecast(::get, parseTime)!!
+            }
+        }
+        return journal to forecasts
+    }
+
+    private val journal = listOf(
+        JournalEntry(0, t, t - 3 * h, "phone", "os_update", "Android update: 16 \"beta\", build 2",
+            "{\"from\":\"a, b\",\n\"to\":\"c\"}"),
+        JournalEntry(0, t + h, null, "phone", "note", "=not a formula", null),
+        JournalEntry(0, t + 2 * h, null, "phone", "note", "'quoted, with comma", "line one\nline two\n"))
+    private val forecasts = listOf(
+        Forecast(0, "phone", t, 80, 2.5, 32.0, 30.25, true, ForecastScoring.MODEL_VERSION, 75.1, 70.0, null, "PENDING"),
+        Forecast(0, BatteryStore.RING_ID, t + h, 60, 1.0 / 3, 180.0, null, null, ForecastScoring.MODEL_VERSION,
+            null, null, null, "CENSORED_GAP"))
+
+    private fun export(): String {
+        val header = BatteryStore.EXPORT_COLUMNS
+        return header.joinToString(",") + "\n" +
+            journal.joinToString("") { ContextRows.line(header, ContextRows.journalFields(it, ::utc)) + "\n" } +
+            forecasts.joinToString("") { ContextRows.line(header, ContextRows.forecastFields(it, ::utc)) + "\n" }
+    }
+
+    @Test fun journalAndForecastsRoundTripThroughTheCsv() {
+        val (j, f) = readBack(export())
+        assertEquals(journal, j)
+        assertEquals(forecasts, f)
+    }
+
+    @Test fun reimportingTheSameRowsAddsNothing() {
+        val (j, f) = readBack(export())
+        val journalKeys = journal.mapTo(HashSet(), ContextRows::journalKey)
+        val forecastKeys = forecasts.mapTo(HashSet(), ContextRows::forecastKey)
+        assertEquals(0, j.count { journalKeys.add(ContextRows.journalKey(it)) })
+        assertEquals(0, f.count { forecastKeys.add(ContextRows.forecastKey(it)) })
+    }
+
+    @Test fun exportsWithoutTheNewColumnsStillParse() {
+        // An older export: original and audit columns only, readings and an experiment.
+        val old = "kind,device,mode_or_source,timestamp_utc,percentage,charging\n" +
+            "reading,\"phone\",\"android\",${utc(t)},80,false\n" +
+            "experiment,\"ring:samsung_widget\",baseline,${utc(t)},90,\n"
+        assertEquals(emptyList<JournalEntry>() to emptyList<Forecast>(), readBack(old))
+    }
+
     // F9: screen-on time with no app in the history counts toward Other's hours and intensity.
     @Test fun bareScreenTimeGivesOtherItsHoursAndIntensity() {
         fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)

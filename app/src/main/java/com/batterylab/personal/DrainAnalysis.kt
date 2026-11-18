@@ -144,17 +144,22 @@ object DrainAnalysis {
         for (s in steps) {
             val inStep = index.mapValues { (_, ix) -> ix.overlap(s.from, s.to) }.filterValues { it > 0 }
             val stepMs = (s.to - s.from).toDouble()
+            // Screen-off time in the step is charged at the idle rate; what's left of the drop is
+            // spread over the on-screen time only, so app rates aren't diluted toward idle.
+            val screenMs = maxOf(s.onMs, inStep.values.sum()).toDouble()
+            val onDrop = max(0.0, s.drop - offRate * (stepMs - screenMs).coerceAtLeast(0.0) / HOUR)
+            fun partFor(ms: Long) = if (screenMs > 0) onDrop * ms / screenMs else 0.0
             inStep.forEach { (app, ms) ->
                 fgMs[app] = (fgMs[app] ?: 0L) + ms
-                val part = s.drop * ms / stepMs
+                val part = partFor(ms)
                 activeDrop[app] = (activeDrop[app] ?: 0.0) + part
                 if (capacityMah != null && s.mvAvg != null) activeWh[app] = (activeWh[app] ?: 0.0) + part / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
             }
             // Screen on with no app in the history (lock screen, system UI) counts as Other.
             val bare = (s.onMs - inStep.values.sum()).coerceAtLeast(0L)
-            otherOnMs += bare; otherOnDrop += s.drop * bare / stepMs
+            otherOnMs += bare; otherOnDrop += partFor(bare)
             if (bare > 0 && capacityMah != null && s.mvAvg != null)
-                otherOnWh = (otherOnWh ?: 0.0) + s.drop * bare / stepMs / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
+                otherOnWh = (otherOnWh ?: 0.0) + partFor(bare) / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
         }
         // Each app: drop while it was on screen beyond what idle would have used in that time.
         // Screen-off time is never given to an app. Shares are then scaled to add up to exactly

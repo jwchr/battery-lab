@@ -75,4 +75,17 @@ class ArgonRound2Test {
         val inside = DischargeStretch(t - day, t - day + 8 * h, 90, 50)
         assertEquals(listOf(spanning, inside), BatteryMath.overlapping(listOf(before, spanning, inside), t - 7 * day))
     }
+
+    // R8: within a step, screen-off time costs idle; the rest of the drop goes to on-screen time.
+    @Test fun appRateIsNotDilutedByScreenOffTimeInTheStep() {
+        fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)
+        // Idle 1%/h. The last hour lost 5 points with 15 minutes on screen in one app.
+        val points = listOf(p(0, 100), p(60, 99), p(120, 98), p(180, 93))
+        val on = listOf(Span(t + 120 * m, t + 135 * m))
+        val d = DrainAnalysis.analyze(points, on, mapOf("a" to on), h)
+        val a = d.apps.single { it.app == "a" }
+        assertEquals(0.25, a.foregroundHours, 1e-9)
+        assertEquals((5 - 0.75) / 0.25, a.activePctPerHour!!, 1e-9)
+        assertEquals(d.totalDrop, d.standbyDrop + d.apps.sumOf { it.percent }, 1e-9)
+    }
 }

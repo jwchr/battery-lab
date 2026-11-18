@@ -111,6 +111,25 @@ class ArgonReviewFixesTest {
         assertEquals(false, ExperimentEndpoint.monitoringAfterImport(false, null))
     }
 
+    // F14a: a phone that always reports 0 cycles gives an unknown cycle change, not 0.
+    @Test fun zeroCycleCountsAreUnknown() {
+        fun r(min: Long, pct: Int, cycles: Int) =
+            Reading("phone", t + min * m, pct, false, "android", detail = ReadingDetail(cycleCount = cycles))
+        val zeros = HonestyAuditor.audit(listOf(r(0, 90, 0), r(20, 89, 0), r(40, 88, 0)), emptyList(), emptyList(), emptyList(), null)
+        assertEquals(null, zeros.reportedCycleDelta)
+        val counted = HonestyAuditor.audit(listOf(r(0, 90, 0), r(20, 89, 5), r(40, 88, 7)), emptyList(), emptyList(), emptyList(), null)
+        assertEquals(2, counted.reportedCycleDelta)
+    }
+
+    // F14b: forecasts for a device with no recent readings are closed as gaps, not left pending.
+    @Test fun forecastsWithNoReadingsAreScoredAsGaps() {
+        val f = Forecast(1, "watch:x", t, 80, 2.0, 40.0, null, null, ForecastScoring.MODEL_VERSION, null, null, null, "PENDING")
+        val updates = ForecastKeeper.rescore(listOf(f), emptyList(), t + 9 * h)
+        assertEquals("CENSORED_GAP", updates.single().second.status)
+        // Not yet due: nothing to write.
+        assertTrue(ForecastKeeper.rescore(listOf(f), emptyList(), t + 1 * h).isEmpty())
+    }
+
     // F9: screen-on time with no app in the history counts toward Other's hours and intensity.
     @Test fun bareScreenTimeGivesOtherItsHoursAndIntensity() {
         fun p(min: Long, pct: Int) = BatteryPoint(t + min * m, pct, false)

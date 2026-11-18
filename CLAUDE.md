@@ -2,8 +2,8 @@
 
 ## Working rules (same in every app; Control Center, Nov 18, 2026)
 - Owner: Jeff, not a developer. Short plain American English, no em dashes, Eastern time. Verify, don't infer.
-- Permission (Jeff, Nov 17-18): decide and act; ask Jeff only for safety, security or money. Hands-on tests on his devices and product facts only he knows are questions, not approvals.
-- Reviews (Jeff, Nov 17, quoted exactly): "CodeRabbit gets the regular reviews and Codex gets the riskier ones. If Codex is not available, then it goes to Argon. If the API Argon is not available, then tell me and I will do it manually. That's how it's always been." When the Argon API fails, give Jeff a Review-<PR>-for-Gemini.txt file and keep working. The author never reviews its own PR. CodeRabbit after Nov 22: wait for Jeff's answer (the Control Center plans to ask him Nov 21; not yet asked as of Nov 18).
+- Permission (Jeff, Nov 18, all projects, permanent): don't ask Jeff for permission. Ask only when an action is safety, security or financially sensitive; for anything else, decide and act. Jeff: "Make this rule global and persistent, forever." Hands-on tests on his devices and product facts only he knows are questions, not approvals.
+- Reviews (Jeff's standing rule, restated Nov 18): (1) CodeRabbit gets every review, unless the change is safety, security or finance sensitive, or complex. (2) Those go to Codex (comment `@codex review` on the PR). (3) If Codex is unavailable, Argon (Gemini) via API. (4) If the Argon API is unavailable, Jeff gives it to Argon manually: hand him a `Review-<PR>-for-Gemini.txt` file and keep working. The author never reviews its own PR. CodeRabbit reviews each ready PR once; ask with one `@coderabbitai review` comment (`.coderabbit.yaml`). CodeRabbit after Nov 22: wait for Jeff's answer (the Control Center plans to ask him Nov 21; not yet asked as of Nov 18).
 - Up to 3 open PRs, oldest finished first.
 - Keep the chat small: quiet tests (failures and final count only), grep instead of reading whole files, subagents for big reads, never paste whole files or logs.
 - Current state lives only in the newest GitHub issue titled "Handoff note: <app> chat, <date>" (find it with an issue search on that title). Rules live here. Do not keep a second status file.
@@ -12,7 +12,7 @@
 
 ## Battery Lab specifics
 - **Riskier reviews** (Codex): safety, security or finance sensitive, or complex changes. In this app that includes Bluetooth, backup and restore, and the database.
-- **Merging:** Claude may merge its own PRs on green CI and a clean qualifying review. This repo has no automatic PR workflow (to save Actions minutes), so "green CI" means the quiet check below passes on the PR's head in a cloud build.
+- **Merging:** Claude may merge its own PRs when it decides they are ready: reviewed per the rule above with findings handled, and the quiet check passing (Jeff, Nov 18: "you have permission to merge on your own when you decide it's ready"). This repo has no automatic PR workflow (to save Actions minutes), so "green CI" means the quiet check below passes on the PR's head in a cloud build.
 - **Argon API:** out of usage (monthly spending cap) as of Nov 18, so Argon reviews go to Jeff by hand.
 - **Never:** root the phone; modify, decompile or analyze Samsung's apps; use accessibility services; add the "trusted devices only" permission to Claude Code settings.
 - **Ring Bluetooth:** connect to the Ring only when the user starts something that needs it (monitoring they turned on, an A/B test they started, a "connect now" button). Never on a background schedule by default. Listening for the Ring's broadcasts is fine.

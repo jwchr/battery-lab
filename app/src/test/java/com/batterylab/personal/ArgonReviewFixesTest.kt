@@ -1,6 +1,7 @@
 package com.batterylab.personal
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Regression tests for the 2026-11-18 review fixes. */
@@ -78,6 +79,23 @@ class ArgonReviewFixesTest {
         assertEquals(3, BatteryStats.device(listOf(r(0, 80, true), r(15, 78), r(30, 77)), hourOf).percentUsed)
         // Across a gap the step is unknown, as before.
         assertEquals(0, BatteryStats.device(listOf(r(0, 80, true), r(180, 70)), hourOf).percentUsed)
+    }
+
+    // F5: with unequal run counts the headline and its range both come from Welch.
+    @Test fun unequalRunCountsUseWelchForTheHeadlineAndTheRange() {
+        fun run(id: Long, mode: String, rate: Double) =
+            ExperimentResult(Experiment(id, "ring", mode, t + id * 24 * h, 90, t + id * 24 * h + 10 * h, 80), rate, null, 5, null)
+        val results = listOf(run(1, "baseline", 1.0), run(2, "monitoring", 1.5), run(3, "baseline", 1.0),
+            run(4, "monitoring", 1.6), run(5, "baseline", 3.0))
+        val c = ExperimentStats.compare(results, "baseline", "monitoring")
+        // The paired range alone would not contain the unpaired difference of the means.
+        assertTrue(c.paired!!.low > c.meanB!! - c.meanA!!)
+        assertTrue(c.chosen === c.welch)
+        val d = c.difference!!
+        assertEquals(c.meanB!! - c.meanA!!, d, 1e-9)
+        assertTrue(c.chosen!!.low <= d && d <= c.chosen!!.high)
+        // Equal counts still use the paired comparison.
+        assertTrue(ExperimentStats.compare(results.take(4), "baseline", "monitoring").let { it.chosen === it.paired })
     }
 
     // F9: screen-on time with no app in the history counts toward Other's hours and intensity.

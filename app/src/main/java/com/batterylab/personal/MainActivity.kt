@@ -273,13 +273,14 @@ class MainActivity : StyledActivity() {
             }
             for ((armA, armB) in listOf("baseline" to "monitoring", "ring_alone" to "ring_with_watch")) {
                 val c = ExperimentStats.compare(results, armA, armB)
-                if (c.meanA == null || c.meanB == null) continue
-                val ci = c.paired ?: c.welch
-                addView(label("${modeName(armB)} − ${modeName(armA)}: ${if (c.meanB - c.meanA > 0) "+" else ""}" +
-                    "${f(c.meanB - c.meanA)} pp/hour", 15f, ink, true))
+                val diff = c.difference ?: continue
+                // The headline and its range come from the same comparison.
+                val ci = c.chosen
+                addView(label("${modeName(armB)} − ${modeName(armA)}: ${if (diff > 0) "+" else ""}" +
+                    "${f(diff)} pp/hour", 15f, ink, true))
                 addView(label(buildString {
                     append("${c.nA} vs ${c.nB} runs. ")
-                    if (ci != null) append("95% range ${f(ci.low)} to ${f(ci.high)} (${if (c.paired != null) "paired" else "Welch"}). ")
+                    if (ci != null) append("95% range ${f(ci.low)} to ${f(ci.high)} (${if (ci === c.paired) "paired" else "Welch"}). ")
                     c.runtimeChange?.let { append("${modeName(armB)} lasts ${if (it >= 0) "${f(it * 100)}% longer" else "${f(-it * 100)}% shorter"}. ") }
                     if (ci == null) append("Needs at least 2 runs of each before there's a range.")
                     else if (ci.low <= 0 && ci.high >= 0) append("The range includes zero, so no clear difference yet.")

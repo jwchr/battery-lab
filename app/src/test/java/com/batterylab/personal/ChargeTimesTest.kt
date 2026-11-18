@@ -49,4 +49,16 @@ class ChargeTimesTest {
     @Test fun noChargesMeansNothingToShow() {
         assertNull(ChargeTimes.analyze(listOf(ring(0, 80, false), ring(15, 79, false))))
     }
+
+    @Test fun emptyToFullIsNeverShorterThanAMeasuredTwentyToFull() {
+        // Two charges: a fast one that only covers 10→30 (short low steps) and a timed 20→100.
+        val fastLow = listOf(ring(0, 10), ring(4, 30), ring(19, 30, false))
+        val full = listOf(ring(100, 20), ring(115, 40), ring(130, 60), ring(145, 80), ring(175, 95), ring(190, 100), ring(205, 100, false))
+        val t = ChargeTimes.analyze(fastLow + full)!!
+        val twentyToFull = ChargeCurves.bandMinutes(full.dropLast(1), 20, 100)!!
+        assertTrue(t.zeroToFull!!.minutes >= twentyToFull)
+        // 20→100 as timed, plus 0→20 estimated from the 10→20 step (2 min) borrowed for 0→10.
+        assertEquals(twentyToFull + 4.0, t.zeroToFull!!.minutes, 1e-9)
+        assertFalse(t.zeroToFull!!.measured)
+    }
 }

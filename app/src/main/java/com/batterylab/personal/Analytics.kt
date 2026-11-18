@@ -39,7 +39,18 @@ object ChargeTimes {
             val v = runs.mapNotNull { ChargeCurves.bandMinutes(it, lo, hi) }
             return BatteryMath.median(v)?.let { ChargeEstimate(it, true, v.size) }
         }
-        fun bestOf(lo: Int, hi: Int) = direct(lo, hi) ?: estimate(steps, lo, hi)
+        // Measured if some charge covered the whole span. Otherwise start from the longest measured
+        // stretch that ends at [hi] and estimate only the part below it: adding up 10% steps alone
+        // can come out shorter than a span that was actually timed.
+        fun bestOf(lo: Int, hi: Int): ChargeEstimate? {
+            direct(lo, hi)?.let { return it }
+            for (start in STEPS.filter { it > lo && it < hi }) {
+                val top = direct(start, hi) ?: continue
+                val low = estimate(steps, lo, start) ?: continue
+                return ChargeEstimate(low.minutes + top.minutes, low.measured, 0)
+            }
+            return estimate(steps, lo, hi)
+        }
         val starts = runs.map { it.first().percent }
         val usual = BatteryMath.median(starts.map { it.toDouble() })?.let { Math.round(it).toInt() }
         val d2080 = runs.mapNotNull { ChargeCurves.bandMinutes(it, 20, 80) }

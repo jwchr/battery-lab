@@ -26,8 +26,9 @@ import java.util.zip.GZIPOutputStream
  * The import skips readings that already exist, so a repeated restore is harmless.
  *
  * If the import keeps failing, it gives up after [MAX_TRIES] but still holds the restored file as
- * the cloud copy: a fresh export replaces it only once it has at least as many lines, so a new
- * phone's short history never overwrites a longer one in the cloud.
+ * the cloud copy: a fresh export replaces it only once it has at least as many history rows, so a new
+ * phone's short history never overwrites a longer one in the cloud. Only reading and experiment
+ * rows are compared ([historyRows]), not journal or forecast rows.
  */
 class CloudBackupAgent : BackupAgent() {
 
@@ -42,7 +43,7 @@ class CloudBackupAgent : BackupAgent() {
             val fresh = lineCount(staged)
             check(fresh >= 1) { "empty archive" }
             val held = File(dir(this), HELD)
-            if (held.exists() && target.exists() && !replacesHeld(lineCount(target), fresh)) {
+            if (held.exists() && target.exists() && !replacesHeld(historyRows(target), historyRows(staged))) {
                 store.logProbe("backup", "Cloud backup kept the restored copy (local history still shorter)")
             } else {
                 if (!staged.renameTo(target)) error("could not replace snapshot")
@@ -75,8 +76,24 @@ class CloudBackupAgent : BackupAgent() {
 
         private fun lineCount(gz: File) = GZIPInputStream(gz.inputStream()).bufferedReader().useLines { it.count() }
 
-        /** A fresh export replaces a held, unimported restore only once it is at least as long. */
-        internal fun replacesHeld(heldLines: Int, freshLines: Int) = freshLines >= heldLines
+        private fun historyRows(gz: File) = GZIPInputStream(gz.inputStream()).bufferedReader().use { historyRows(it) }
+
+        /**
+         * Reading and experiment rows in an export: the history the hold protects. Journal and
+         * forecast rows don't count, so they can't make a short history look as long as a full one.
+         */
+        internal fun historyRows(reader: java.io.BufferedReader): Int {
+            CsvCodec.readRecord(reader) ?: return 0   // header
+            var n = 0
+            while (true) {
+                val record = CsvCodec.readRecord(reader) ?: break
+                if (record.startsWith("reading,") || record.startsWith("experiment,")) n++
+            }
+            return n
+        }
+
+        /** A fresh export replaces a held, unimported restore only once it has at least as many history rows. */
+        internal fun replacesHeld(heldRows: Int, freshRows: Int) = freshRows >= heldRows
 
         private fun dir(context: Context) = File(context.filesDir, DIR).apply { mkdirs() }
 

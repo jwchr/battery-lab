@@ -475,7 +475,9 @@ object ExperimentStats {
         val end = e.endMs
         val endpoint = BatteryMath.experimentDrain(e.startMs, e.endMs, e.startPct, e.endPct)
         if (end == null) return ExperimentResult(e, null, null, 0, "Still running")
-        val inRun = readings.filter { it.timeMs in e.startMs..end }.sortedBy { it.timeMs }
+        // One Ring source per arm: widget and Bluetooth values alternate in the Ring's history and
+        // can differ by a few points, which read as rises and extra changes.
+        val inRun = readings.filter { it.timeMs in e.startMs..end && usesSource(e.mode, it.source) }.sortedBy { it.timeMs }
         if (inRun.any { it.charging == true }) return ExperimentResult(e, endpoint, null, 0, "Charged during the run")
         if (inRun.zipWithNext().any { (a, b) -> b.percent > a.percent + 2 }) return ExperimentResult(e, endpoint, null, 0, "Percentage rose mid-run")
         // Only real changes count: a cached value repeating every check is one observation, not many.
@@ -486,6 +488,16 @@ object ExperimentStats {
             HonestyAuditor.ols(pts.map { (it.timeMs - e.startMs) / 3_600_000.0 }, pts.map { it.percent.toDouble() }) else null
         return ExperimentResult(e, endpoint, fit?.first?.let { -it }?.takeIf { it >= 0 }, changes.size, null)
     }
+
+    private val WIDGET_SOURCES = setOf(SamsungWidgetSource.SOURCE, "manual_widget")
+
+    /**
+     * Whether a reading from [source] belongs to an arm's series: the monitoring arm reads the
+     * Ring over Bluetooth, the other arms through the widget (or a manual entry of it). Other
+     * sources are left alone.
+     */
+    fun usesSource(mode: String, source: String): Boolean =
+        if (ExperimentEndpoint.allowsBle(mode)) source !in WIDGET_SOURCES else source != "ring_ble"
 
     /**
      * Compares arm [b] against arm [a]. Runs are paired in time order (the i-th of each arm); with

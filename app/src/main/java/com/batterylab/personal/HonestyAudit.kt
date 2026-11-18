@@ -336,7 +336,8 @@ object HonestyAuditor {
     /**
      * Minutes from Android showing a new (lower) percentage to the widget first showing it or lower.
      * 0 when a widget reading since the previous Android reading already shows it or lower. The
-     * scan stops at a widget charge or rise: a later match would belong to another discharge.
+     * scan stops at a widget charge or rise, or Android's next charge or rise: a later match would
+     * belong to another discharge. A drop with a widget charge or rise before it isn't timed.
      */
     fun widgetLags(android: List<Reading>, widget: List<Reading>): List<Double> {
         if (widget.isEmpty()) return emptyList()
@@ -345,19 +346,31 @@ object HonestyAuditor {
         // Drops come in time order, so the window's start only moves forward, and nothing past
         // 360 minutes is kept: this stays linear instead of rescanning all widget history per drop.
         var start = 0
-        for ((a, b) in android.sortedBy { it.timeMs }.zipWithNext()) {
+        val seq = android.sortedBy { it.timeMs }
+        // A widget charge or rise ends a discharge: a match past it belongs to another one.
+        fun boundary(i: Int) = w[i].charging == true || (i > 0 && w[i].percent > w[i - 1].percent)
+        for (k in 0 until seq.size - 1) {
+            val a = seq[k]; val b = seq[k + 1]
             if (b.percent >= a.percent || b.charging == true) continue
             while (start < w.size && w[start].timeMs < a.timeMs) start++
+            // Android's next charge (or rise) ends the scan too, for when the widget missed it.
+            var androidEnd = Long.MAX_VALUE
+            for (m in k + 2 until seq.size) {
+                if (seq[m].charging == true || seq[m].percent > seq[m - 1].percent) { androidEnd = seq[m].timeMs; break }
+            }
             // What the widget showed at the moment of the drop: already there means no lag.
             var shown: Reading? = null
+            var crossed = false
             var i = start
-            while (i < w.size && w[i].timeMs <= b.timeMs) { shown = w[i]; i++ }
-            if (shown != null && shown.percent <= b.percent && shown.charging != true) { out += 0.0; continue }
-            i = start
-            while (i < w.size && w[i].timeMs < b.timeMs - 60_000L) i++
+            while (i < w.size && w[i].timeMs <= b.timeMs) {
+                if (boundary(i)) { crossed = true; break }
+                shown = w[i]; i++
+            }
+            if (crossed) continue
+            if (shown != null && shown.percent <= b.percent) { out += 0.0; continue }
             var seen: Reading? = null
-            while (i < w.size && w[i].timeMs <= b.timeMs + 360 * 60_000L) {
-                if (w[i].charging == true || (i > 0 && w[i].percent > w[i - 1].percent)) break
+            while (i < w.size && w[i].timeMs <= b.timeMs + 360 * 60_000L && w[i].timeMs < androidEnd) {
+                if (boundary(i)) break
                 if (w[i].percent <= b.percent) { seen = w[i]; break }
                 i++
             }

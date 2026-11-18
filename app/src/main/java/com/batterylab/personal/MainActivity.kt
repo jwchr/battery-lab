@@ -801,9 +801,11 @@ class MainActivity : StyledActivity() {
         val wasMonitoring = PollScheduler.ringEnabled(app)
         PollScheduler.setRingEnabled(app, false)
         freshRingReading(mode, failed = { PollScheduler.setRingEnabled(app, wasMonitoring) }) { reading ->
-            store.startExperiment(reading.device, mode, reading)
-            PollScheduler.setRingBeforeTest(this, wasMonitoring)
-            PollScheduler.setRingEnabled(this, mode == "monitoring")
+            synchronized(PollScheduler.experimentLock) {
+                store.startExperiment(reading.device, mode, reading)
+                PollScheduler.setRingBeforeTest(this, wasMonitoring)
+                PollScheduler.setRingEnabled(this, mode == "monitoring")
+            }
             toast("${modeName(mode)} test started at ${reading.percent}%")
             render()
         }
@@ -815,26 +817,47 @@ class MainActivity : StyledActivity() {
             toast("Original Ring no longer selected")
             return
         }
+        // A test past the cap is set aside, as the screen says, rather than counted.
+        if (ExperimentEndpoint.pastCap(experiment.startMs, System.currentTimeMillis())) { setAsideOverdue(experiment); return }
         // Monitoring is switched off only once the final reading is saved; if the read fails the
         // test and its settings stay exactly as they were.
         freshRingReading(experiment.mode) { reading ->
-            store.finishExperiment(reading)
-            PollScheduler.setRingEnabled(this, false)
-            PollScheduler.setRingBeforeTest(this, null)
-            toast("Experiment finished")
+            // The reading may arrive late: check again, and finish only the test that asked for it.
+            if (ExperimentEndpoint.pastCap(experiment.startMs, System.currentTimeMillis())) { setAsideOverdue(experiment); return@freshRingReading }
+            val finished = synchronized(PollScheduler.experimentLock) {
+                store.finishExperiment(experiment.id, reading).also { done ->
+                    if (done) { PollScheduler.setRingEnabled(this, false); PollScheduler.setRingBeforeTest(this, null) }
+                }
+            }
+            toast(if (finished) "Experiment finished" else "That test is no longer running; nothing saved")
             render()
         }
     }
 
+    private fun setAsideOverdue(experiment: Experiment) {
+        abandon(experiment, "Ran past ${ExperimentEndpoint.MAX_RUN_MS / 3_600_000L} hours before Finish")
+        toast("This test ran past ${ExperimentEndpoint.MAX_RUN_MS / 3_600_000L} hours, so it was set aside without a result")
+        render()
+    }
+
     /** Ends the running test without a result, for when its finish can't be read (Ring dead or away). */
     private fun abandonTest() {
-        val experiment = store.activeExperiment() ?: return
-        store.abandonExperiment("Abandoned by hand")
-        PollScheduler.setRingEnabled(this, ExperimentEndpoint.monitoringAfterAbandon(experiment.mode,
-            PollScheduler.ringEnabled(this), PollScheduler.ringBeforeTest(this), byUser = true))
-        PollScheduler.setRingBeforeTest(this, null)
-        toast("Test abandoned; it won't count")
+        val experiment = store.activeExperiment()
+        // The background job may already have set it aside: show the Start buttons again.
+        if (experiment == null) { render(); return }
+        toast(if (abandon(experiment, "Abandoned by hand")) "Test abandoned; it won't count" else "That test is no longer running")
         render()
+    }
+
+    /** Removes [experiment] if it is still running and restores monitoring as the user would expect. */
+    private fun abandon(experiment: Experiment, reason: String): Boolean {
+        synchronized(PollScheduler.experimentLock) {
+            if (!store.abandonExperiment(experiment.id, reason)) return false
+            PollScheduler.setRingEnabled(this, ExperimentEndpoint.monitoringAfterAbandon(experiment.mode,
+                PollScheduler.ringEnabled(this), PollScheduler.ringBeforeTest(this), byUser = true))
+            PollScheduler.setRingBeforeTest(this, null)
+            return true
+        }
     }
 
     private fun export() {

@@ -150,6 +150,22 @@ object BatteryMath {
         stretches.filter { it.endMs >= fromMs }
 
     /**
+     * (hours, points dropped) inside the window starting at [fromMs]. A stretch that crosses the
+     * window's start counts only for the share of its time inside, assuming even drain.
+     */
+    fun windowTotals(stretches: List<DischargeStretch>, fromMs: Long): Pair<Double, Double> {
+        var hours = 0.0; var drop = 0.0
+        for (s in overlapping(stretches, fromMs)) {
+            val len = s.endMs - s.startMs
+            val inside = s.endMs - maxOf(s.startMs, fromMs)
+            if (len <= 0 || inside <= 0) continue
+            val f = inside.toDouble() / len
+            hours += s.hours * f; drop += s.drop * f
+        }
+        return hours to drop
+    }
+
+    /**
      * Full-charge runtime per week, weighted by percentage points discharged so long stretches
      * count more than short ones. [weekOf] maps a time to the start of its week. A stretch that
      * crosses into another week is split by time, assuming an even drain across it; it counts

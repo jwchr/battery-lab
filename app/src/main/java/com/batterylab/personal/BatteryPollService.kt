@@ -71,13 +71,22 @@ object PollScheduler {
      * monitoring off, never on, and reads nothing. Call off the main thread.
      */
     fun abandonOverdueTest(context: Context, store: BatteryStore, nowMs: Long) {
-        val e = store.activeExperiment() ?: return
-        if (!ExperimentEndpoint.pastCap(e.startMs, nowMs)) return
-        store.abandonExperiment("Ran past ${ExperimentEndpoint.MAX_RUN_MS / 3_600_000L} hours without a finish")
-        if (!ExperimentEndpoint.monitoringAfterAbandon(e.mode, ringEnabled(context), ringBeforeTest(context), byUser = false))
-            prefs(context).edit().putBoolean(RING_ENABLED, false).apply()
-        setRingBeforeTest(context, null)
+        synchronized(experimentLock) {
+            val e = store.activeExperiment() ?: return
+            if (!ExperimentEndpoint.pastCap(e.startMs, nowMs)) return
+            // Only the test checked above, and its monitoring cleanup only if it was the one removed.
+            if (!store.abandonExperiment(e.id, "Ran past ${ExperimentEndpoint.MAX_RUN_MS / 3_600_000L} hours without a finish")) return
+            if (!ExperimentEndpoint.monitoringAfterAbandon(e.mode, ringEnabled(context), ringBeforeTest(context), byUser = false))
+                prefs(context).edit().putBoolean(RING_ENABLED, false).apply()
+            setRingBeforeTest(context, null)
+        }
     }
+
+    /**
+     * Held while a test is started, finished or abandoned together with its monitoring settings,
+     * so the background abandon and the screen's buttons never interleave.
+     */
+    val experimentLock = Any()
 
     fun setRingEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(RING_ENABLED, enabled).apply()
@@ -126,7 +135,9 @@ class BatteryPollService : JobService() {
         val snapshot = try { SamsungWidgetSource.snapshot(this, includeIcons = false) to null } catch (e: Exception) { null to e }
         Background.io.execute {
             try {
-                CloudBackupAgent.importPending(this)
+                // A failed restore import must not skip the overdue check before the Ring decision.
+                try { CloudBackupAgent.importPending(this) }
+                catch (e: Exception) { store.logProbe("backup", "Restore import failed: ${e.javaClass.simpleName}") }
                 try { PollScheduler.abandonOverdueTest(this, store, System.currentTimeMillis()) }
                 catch (e: Exception) { store.logProbe("experiment", "Overdue test check failed: ${e.javaClass.simpleName}") }
                 logStandbyBucketChange(store)

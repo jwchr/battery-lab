@@ -453,6 +453,9 @@ class MainActivity : StyledActivity() {
         val other = when {
             last == null || !fresh -> null
             id == "phone" -> store.latest(SamsungWidgetSource.PHONE_WIDGET_DEVICE)
+            // The watch app's readings live under their own id, not in the widget's history.
+            id == SamsungWidgetSource.WATCH_DEVICE ->
+                store.companionWatchReadings(last.timeMs - 30 * 60_000L).maxByOrNull { it.timeMs }
             else -> recent.lastOrNull { it.source != last.source }
         }?.takeIf { kotlin.math.abs(it.timeMs - last!!.timeMs) <= 30 * 60_000L && it.percent != last.percent }
         val otherLabel = when (other?.source) {

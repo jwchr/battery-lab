@@ -51,7 +51,9 @@ object WatchReporter {
         }
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val state = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
-        val charging = state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL
+        // Plugged in counts as on the charger, as on the phone: a charge hold is not drain.
+        val charging = state == BatteryManager.BATTERY_STATUS_CHARGING || state == BatteryManager.BATTERY_STATUS_FULL ||
+            (intent?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) > 0
         // One item per sample: with a single shared path, every sample taken while the phone was
         // out of range overwrote the last, and only the newest ever reached it.
         val now = System.currentTimeMillis()

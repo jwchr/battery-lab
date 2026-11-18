@@ -55,6 +55,39 @@ object PollScheduler {
     /** One Ring history whatever the source; the Bluetooth address is never part of it. */
     @Suppress("UNUSED_PARAMETER")
     fun ringDeviceId(context: Context) = BatteryStore.RING_ID
+    /** Whether Ring monitoring was on before the running test started; null when unknown. */
+    const val RING_BEFORE_TEST = "ring_monitoring_before_test"
+    fun ringBeforeTest(context: Context): Boolean? =
+        prefs(context).let { if (it.contains(RING_BEFORE_TEST)) it.getBoolean(RING_BEFORE_TEST, false) else null }
+    fun setRingBeforeTest(context: Context, value: Boolean?) {
+        prefs(context).edit().apply { if (value == null) remove(RING_BEFORE_TEST) else putBoolean(RING_BEFORE_TEST, value) }.apply()
+    }
+
+    /**
+     * Abandons the running test once it is past [ExperimentEndpoint.MAX_RUN_MS], so a test whose
+     * finish keeps failing (Ring dead or out of range) can't keep monitoring on forever. Abandoning
+     * rather than finishing from the latest reading: an automatic end point could be a stale widget
+     * value and bias the result, while an abandoned run simply isn't counted. Only ever turns Ring
+     * monitoring off, never on, and reads nothing. Call off the main thread.
+     */
+    fun abandonOverdueTest(context: Context, store: BatteryStore, nowMs: Long) {
+        synchronized(experimentLock) {
+            val e = store.activeExperiment() ?: return
+            if (!ExperimentEndpoint.pastCap(e.startMs, nowMs)) return
+            // Only the test checked above, and its monitoring cleanup only if it was the one removed.
+            if (!store.abandonExperiment(e.id, "Ran past ${ExperimentEndpoint.MAX_RUN_MS / 3_600_000L} hours without a finish")) return
+            if (!ExperimentEndpoint.monitoringAfterAbandon(e.mode, ringEnabled(context), ringBeforeTest(context), byUser = false))
+                prefs(context).edit().putBoolean(RING_ENABLED, false).apply()
+            setRingBeforeTest(context, null)
+        }
+    }
+
+    /**
+     * Held while a test is started, finished or abandoned together with its monitoring settings,
+     * so the background abandon and the screen's buttons never interleave.
+     */
+    val experimentLock = Any()
+
     fun setRingEnabled(context: Context, enabled: Boolean) {
         prefs(context).edit().putBoolean(RING_ENABLED, enabled).apply()
         schedule(context)
@@ -102,7 +135,11 @@ class BatteryPollService : JobService() {
         val snapshot = try { SamsungWidgetSource.snapshot(this, includeIcons = false) to null } catch (e: Exception) { null to e }
         Background.io.execute {
             try {
-                CloudBackupAgent.importPending(this)
+                // A failed restore import must not skip the overdue check before the Ring decision.
+                try { CloudBackupAgent.importPending(this) }
+                catch (e: Exception) { store.logProbe("backup", "Restore import failed: ${e.javaClass.simpleName}") }
+                try { PollScheduler.abandonOverdueTest(this, store, System.currentTimeMillis()) }
+                catch (e: Exception) { store.logProbe("experiment", "Overdue test check failed: ${e.javaClass.simpleName}") }
                 logStandbyBucketChange(store)
                 PhoneBattery.read(this, "job")?.let(store::append)
                 snapshot.first?.let { SamsungWidgetSource.record(this, store, it) }

@@ -144,18 +144,28 @@ object DrainAnalysis {
         for (s in steps) {
             val inStep = index.mapValues { (_, ix) -> ix.overlap(s.from, s.to) }.filterValues { it > 0 }
             val stepMs = (s.to - s.from).toDouble()
+            // Screen-off time in the step is charged at the idle rate; what's left of the drop is
+            // spread over the on-screen time only, so app rates aren't diluted toward idle. Not
+            // clamped per step: a step that lost less than idle would explain carries the shortfall
+            // into the totals, which are clamped once below.
+            val screenMs = maxOf(s.onMs, inStep.values.sum()).toDouble()
+            val onDrop = s.drop - offRate * (stepMs - screenMs).coerceAtLeast(0.0) / HOUR
+            fun partFor(ms: Long) = if (screenMs > 0) onDrop * ms / screenMs else 0.0
             inStep.forEach { (app, ms) ->
                 fgMs[app] = (fgMs[app] ?: 0L) + ms
-                val part = s.drop * ms / stepMs
+                val part = partFor(ms)
                 activeDrop[app] = (activeDrop[app] ?: 0.0) + part
                 if (capacityMah != null && s.mvAvg != null) activeWh[app] = (activeWh[app] ?: 0.0) + part / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
             }
             // Screen on with no app in the history (lock screen, system UI) counts as Other.
             val bare = (s.onMs - inStep.values.sum()).coerceAtLeast(0L)
-            otherOnMs += bare; otherOnDrop += s.drop * bare / stepMs
+            otherOnMs += bare; otherOnDrop += partFor(bare)
             if (bare > 0 && capacityMah != null && s.mvAvg != null)
-                otherOnWh = (otherOnWh ?: 0.0) + s.drop * bare / stepMs / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
+                otherOnWh = (otherOnWh ?: 0.0) + partFor(bare) / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
         }
+        // Steps were pooled unclamped above; no total may go below zero.
+        activeDrop.replaceAll { _, v -> max(0.0, v) }; activeWh.replaceAll { _, v -> max(0.0, v) }
+        otherOnDrop = max(0.0, otherOnDrop); otherOnWh = otherOnWh?.let { max(0.0, it) }
         // Each app: drop while it was on screen beyond what idle would have used in that time.
         // Screen-off time is never given to an app. Shares are then scaled to add up to exactly
         // the drop above idle, so idle plus every row is 100%.

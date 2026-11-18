@@ -8,7 +8,9 @@ import kotlin.math.min
  * [observed] is false when the charge was only inferred from a jump between two unplugged
  * readings, so its real start, end and speed are unknown.
  */
-data class ChargeSession(val startMs: Long, val endMs: Long, val fromPct: Int, val toPct: Int, val observed: Boolean = true) {
+data class ChargeSession(val startMs: Long, val endMs: Long, val fromPct: Int, val toPct: Int, val observed: Boolean = true,
+    /** False when the charge was already under way at its first reading, so [fromPct] isn't the plug-in level. */
+    val plugInKnown: Boolean = true) {
     val gained: Int get() = toPct - fromPct
     val minutes: Double get() = (endMs - startMs) / 60_000.0
     /** Percent per minute; null when the charge wasn't watched or was too short to time. */
@@ -33,7 +35,7 @@ data class DeviceStats(
     val longestOnBatteryHours: Double,
 ) {
     val fullBatteriesUsed: Double get() = percentUsed / 100.0
-    val averagePlugIn: Double? get() = charges.map { it.fromPct }.takeIf { it.isNotEmpty() }?.average()
+    val averagePlugIn: Double? get() = charges.filter { it.plugInKnown }.map { it.fromPct }.takeIf { it.isNotEmpty() }?.average()
     val averageUnplug: Double? get() = charges.map { it.toPct }.takeIf { it.isNotEmpty() }?.average()
     val fastestCharge: ChargeSession? get() = charges.filter { it.ratePerMinute != null }.maxByOrNull { it.ratePerMinute!! }
     val hungriestHour: Int? get() = drainByHour.withIndex().filter { it.value != null }.maxByOrNull { it.value!! }?.index
@@ -89,11 +91,12 @@ object BatteryStats {
         val charges = mutableListOf<ChargeSession>()
         var chargeStart: Reading? = null
         var chargePeak: Reading? = null
+        var plugInKnown = true
 
         fun closeCharge() {
             val s = chargeStart; val p = chargePeak
-            if (s != null && p != null && p.percent > s.percent) charges += ChargeSession(s.timeMs, p.timeMs, s.percent, p.percent)
-            chargeStart = null; chargePeak = null
+            if (s != null && p != null && p.percent > s.percent) charges += ChargeSession(s.timeMs, p.timeMs, s.percent, p.percent, plugInKnown = plugInKnown)
+            chargeStart = null; chargePeak = null; plugInKnown = true
         }
 
         for (i in r.indices) {
@@ -130,7 +133,13 @@ object BatteryStats {
                     }
                 }
                 // Charges: watched (charging flag) or inferred (a jump up of more than 2 points).
-                if (isCharging && !prevCharging) { closeCharge(); chargeStart = prev; chargePeak = cur }
+                // After a gap the plug-in time and level are unknown, so the timed charge starts at
+                // this reading (also when the reading before the gap was charging too).
+                if (isCharging && (!prevCharging || dt > gaps.stepMs)) {
+                    closeCharge()
+                    if (dt > gaps.stepMs) { chargeStart = cur; plugInKnown = false } else chargeStart = prev
+                    chargePeak = cur
+                }
                 // ">" not ">=": time parked at the peak afterwards isn't charging speed.
                 else if (isCharging) { if (cur.percent > (chargePeak?.percent ?: -1)) chargePeak = cur }
                 else if (prevCharging) closeCharge()
@@ -143,6 +152,8 @@ object BatteryStats {
                     longest = max(longest, (cur.timeMs - streakStart!!) / HOUR)
                 }
             }
+            // History that starts mid-charge: time the charge from its first reading.
+            if (prev == null && isCharging) { chargeStart = cur; chargePeak = cur; plugInKnown = false }
             low = when {
                 isCharging -> null
                 prev != null && cur.percent > prev.percent + 2 -> cur.percent   // unseen charge: new baseline

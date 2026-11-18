@@ -274,7 +274,13 @@ object HonestyAuditor {
         )
     }
 
-    /** (minutes charging at "100%", mAh added after first showing 100%) per charge that reached 100%. */
+    /** BatteryManager.BATTERY_STATUS_FULL. */
+    private const val STATUS_FULL = 5
+
+    /**
+     * (minutes charging at "100%", mAh added after first showing 100%) per charge that reached
+     * 100%, up to the charger reporting full or the counter no longer rising.
+     */
     fun cvTaper(r: List<Reading>, gaps: GapLimits): List<Pair<Double, Double?>> {
         val out = mutableListOf<Pair<Double, Double?>>()
         var i = 0
@@ -282,7 +288,14 @@ object HonestyAuditor {
             if (!(r[i].percent == 100 && r[i].charging == true && (i == 0 || r[i - 1].percent < 100))) { i++; continue }
             var j = i
             while (j + 1 < r.size && r[j + 1].percent == 100 && r[j + 1].charging == true &&
-                r[j + 1].timeMs - r[j].timeMs <= gaps.stepMs) j++
+                r[j + 1].timeMs - r[j].timeMs <= gaps.stepMs) {
+                // A phone counts as charging whenever it is plugged in, so the finish ends when the
+                // charger reports full, or when the charge counter stops rising, whichever is known.
+                if (r[j].detail?.status == STATUS_FULL) break
+                val now = r[j].remainingUah; val next = r[j + 1].remainingUah
+                if (now != null && next != null && next <= now) break
+                j++
+            }
             val minutes = (r[j].timeMs - r[i].timeMs) / 60_000.0
             val start = r[i].remainingUah; val peak = r.subList(i, j + 1).mapNotNull { it.remainingUah }.maxOrNull()
             if (j > i) out += minutes to (if (start != null && peak != null) (peak - start) / 1000.0 else null)
@@ -320,7 +333,12 @@ object HonestyAuditor {
         }
     }
 
-    /** Minutes from Android showing a new (lower) percentage to the widget first showing it or lower. */
+    /**
+     * Minutes from Android showing a new (lower) percentage to the widget first showing it or lower.
+     * 0 when a widget reading since the previous Android reading already shows it or lower. The
+     * scan stops at a widget charge or rise, or Android's next charge or rise: a later match would
+     * belong to another discharge. A drop with a widget charge or rise before it isn't timed.
+     */
     fun widgetLags(android: List<Reading>, widget: List<Reading>): List<Double> {
         if (widget.isEmpty()) return emptyList()
         val w = widget.sortedBy { it.timeMs }
@@ -328,12 +346,31 @@ object HonestyAuditor {
         // Drops come in time order, so the window's start only moves forward, and nothing past
         // 360 minutes is kept: this stays linear instead of rescanning all widget history per drop.
         var start = 0
-        for ((a, b) in android.sortedBy { it.timeMs }.zipWithNext()) {
+        val seq = android.sortedBy { it.timeMs }
+        // A widget charge or rise ends a discharge: a match past it belongs to another one.
+        fun boundary(i: Int) = w[i].charging == true || (i > 0 && w[i].percent > w[i - 1].percent)
+        for (k in 0 until seq.size - 1) {
+            val a = seq[k]; val b = seq[k + 1]
             if (b.percent >= a.percent || b.charging == true) continue
-            while (start < w.size && w[start].timeMs < b.timeMs - 60_000L) start++
+            while (start < w.size && w[start].timeMs < a.timeMs) start++
+            // Android's next charge (or rise) ends the scan too, for when the widget missed it.
+            var androidEnd = Long.MAX_VALUE
+            for (m in k + 2 until seq.size) {
+                if (seq[m].charging == true || seq[m].percent > seq[m - 1].percent) { androidEnd = seq[m].timeMs; break }
+            }
+            // What the widget showed at the moment of the drop: already there means no lag.
+            var shown: Reading? = null
+            var crossed = false
             var i = start
+            while (i < w.size && w[i].timeMs <= b.timeMs) {
+                if (boundary(i)) { crossed = true; break }
+                shown = w[i]; i++
+            }
+            if (crossed) continue
+            if (shown != null && shown.percent <= b.percent) { out += 0.0; continue }
             var seen: Reading? = null
-            while (i < w.size && w[i].timeMs <= b.timeMs + 360 * 60_000L) {
+            while (i < w.size && w[i].timeMs <= b.timeMs + 360 * 60_000L && w[i].timeMs < androidEnd) {
+                if (boundary(i)) break
                 if (w[i].percent <= b.percent) { seen = w[i]; break }
                 i++
             }

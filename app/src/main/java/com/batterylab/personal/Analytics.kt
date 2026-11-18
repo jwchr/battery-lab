@@ -475,17 +475,39 @@ object ExperimentStats {
         val end = e.endMs
         val endpoint = BatteryMath.experimentDrain(e.startMs, e.endMs, e.startPct, e.endPct)
         if (end == null) return ExperimentResult(e, null, null, 0, "Still running")
-        val inRun = readings.filter { it.timeMs in e.startMs..end }.sortedBy { it.timeMs }
-        if (inRun.any { it.charging == true }) return ExperimentResult(e, endpoint, null, 0, "Charged during the run")
-        if (inRun.zipWithNext().any { (a, b) -> b.percent > a.percent + 2 }) return ExperimentResult(e, endpoint, null, 0, "Percentage rose mid-run")
+        // One Ring source per arm: widget and Bluetooth values alternate in the Ring's history and
+        // can differ by a few points, which read as rises and extra changes.
+        val inWindow = readings.filter { it.timeMs in e.startMs..end }
+        // Charging seen by any source sets the run aside, even one this arm's series leaves out.
+        if (inWindow.any { it.charging == true }) return ExperimentResult(e, endpoint, null, 0, "Charged during the run")
+        val inRun = inWindow.filter { usesSource(e.mode, it.source) }.sortedBy { it.timeMs }
+        // The stored start and end don't keep their source and may be widget values. The Bluetooth
+        // arm uses them only when a Bluetooth reading at that moment matches; otherwise it has no
+        // endpoint rate, and its fitted rate comes from its Bluetooth readings alone.
+        val ble = ExperimentEndpoint.allowsBle(e.mode)
+        fun matched(ms: Long, pct: Int?) = pct != null && inRun.any { it.timeMs == ms && it.percent == pct }
+        val endsKnown = !ble || (matched(e.startMs, e.startPct) && matched(end, e.endPct))
+        val armEndpoint = if (endsKnown) endpoint else null
+        if (inRun.zipWithNext().any { (a, b) -> b.percent > a.percent + 2 }) return ExperimentResult(e, armEndpoint, null, 0, "Percentage rose mid-run")
         // Only real changes count: a cached value repeating every check is one observation, not many.
         val changes = inRun.filterIndexed { i, r -> i == 0 || r.percent != inRun[i - 1].percent }
-        val pts = (listOf(BatteryPoint(e.startMs, e.startPct, false)) + changes.map { BatteryPoint.of(it) } +
-            listOf(BatteryPoint(end, e.endPct ?: inRun.lastOrNull()?.percent ?: e.startPct, false))).distinctBy { it.timeMs }
+        val first = if (ble) emptyList() else listOf(BatteryPoint(e.startMs, e.startPct, false))
+        val last = if (ble) emptyList() else listOf(BatteryPoint(end, e.endPct ?: inRun.lastOrNull()?.percent ?: e.startPct, false))
+        val pts = (first + changes.map { BatteryPoint.of(it) } + last).distinctBy { it.timeMs }
         val fit = if (pts.map { it.percent }.distinct().size >= 4)
             HonestyAuditor.ols(pts.map { (it.timeMs - e.startMs) / 3_600_000.0 }, pts.map { it.percent.toDouble() }) else null
-        return ExperimentResult(e, endpoint, fit?.first?.let { -it }?.takeIf { it >= 0 }, changes.size, null)
+        return ExperimentResult(e, armEndpoint, fit?.first?.let { -it }?.takeIf { it >= 0 }, changes.size, null)
     }
+
+    private val WIDGET_SOURCES = setOf(SamsungWidgetSource.SOURCE, "manual_widget")
+
+    /**
+     * Whether a reading from [source] belongs to an arm's series: the monitoring arm reads the
+     * Ring over Bluetooth, the other arms through the widget (or a manual entry of it). Other
+     * sources are left alone.
+     */
+    fun usesSource(mode: String, source: String): Boolean =
+        if (ExperimentEndpoint.allowsBle(mode)) source !in WIDGET_SOURCES else source != "ring_ble"
 
     /**
      * Compares arm [b] against arm [a]. Runs are paired in time order (the i-th of each arm); with

@@ -383,19 +383,27 @@ class BatteryStore private constructor(context: Context) :
         })
     }
 
-    fun finishExperiment(reading: Reading) {
-        val exp = activeExperiment() ?: error("No running experiment")
+    /**
+     * Finishes running test [id] with [reading]. False if that test is no longer running (it was
+     * abandoned, or another test replaced it), so a late reading can't finish the wrong test.
+     */
+    fun finishExperiment(id: Long, reading: Reading): Boolean {
+        val exp = activeExperiment()?.takeIf { it.id == id } ?: return false
         check(exp.device == reading.device) { "Select the same Ring as when the test began" }
-        writableDatabase.update("experiments", ContentValues().apply {
+        return writableDatabase.update("experiments", ContentValues().apply {
             put("end_ms", reading.timeMs); put("end_pct", reading.percent)
-        }, "id=? AND end_ms IS NULL", arrayOf(exp.id.toString()))
+        }, "id=? AND end_ms IS NULL", arrayOf(id.toString())) == 1
     }
 
-    /** Ends the running test without a result (for example when the final read failed). */
-    fun abandonExperiment(reason: String) {
-        val exp = activeExperiment() ?: return
-        writableDatabase.delete("experiments", "id=? AND end_ms IS NULL", arrayOf(exp.id.toString()))
-        logProbe("experiment", "Test abandoned: $reason")
+    /**
+     * Ends running test [id] without a result (for example when the final read failed). False if
+     * that test is no longer running. The log line is best effort: a failure there never undoes
+     * or blocks the caller's cleanup.
+     */
+    fun abandonExperiment(id: Long, reason: String): Boolean {
+        val deleted = writableDatabase.delete("experiments", "id=? AND end_ms IS NULL", arrayOf(id.toString())) == 1
+        if (deleted) try { logProbe("experiment", "Test abandoned: $reason") } catch (_: Exception) {}
+        return deleted
     }
 
     fun activeExperiment(): Experiment? = experiments(200).firstOrNull { it.endMs == null }

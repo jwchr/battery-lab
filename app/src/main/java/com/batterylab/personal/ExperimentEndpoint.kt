@@ -27,6 +27,23 @@ object ExperimentEndpoint {
 
     const val MANUAL_MAX_AGE_MS = 120_000L
 
+    /** A running test is abandoned automatically after this long: the 12-hour target plus 2 hours. */
+    const val MAX_RUN_MS = 14 * 3_600_000L
+
+    fun pastCap(startMs: Long, nowMs: Long) = nowMs - startMs > MAX_RUN_MS
+
+    /**
+     * Ring monitoring once a test is abandoned. The monitoring arm always turns it off. Abandoned
+     * by the user, the other arms go back to how monitoring was before the test (or stay as they
+     * are if that isn't known). Abandoned automatically, nothing else changes: a background step
+     * never turns Bluetooth on.
+     */
+    fun monitoringAfterAbandon(mode: String, current: Boolean, beforeTest: Boolean?, byUser: Boolean): Boolean = when {
+        allowsBle(mode) -> false
+        byUser -> beforeTest ?: current
+        else -> current
+    }
+
     sealed class Choice {
         /** Use this stored reading as the endpoint. */
         data class Use(val reading: Reading) : Choice()

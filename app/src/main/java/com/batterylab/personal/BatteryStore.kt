@@ -559,9 +559,11 @@ class BatteryStore private constructor(context: Context) :
     fun exportCsv(out: Writer) {
         val iso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         fun utc(ms: Long) = iso.format(Date(ms))
-        out.write(CSV_HEAD.joinToString(",") + "," + DETAIL_COLUMNS.joinToString(",") { it.first } + "\n")
-        // Audit columns go last so tools that read the original columns by position still work.
+        out.write(EXPORT_COLUMNS.joinToString(",") + "\n")
+        // Audit columns go last so tools that read the original columns by position still work;
+        // the journal and forecast columns come after them.
         val blanks = List(DETAIL_COLUMNS.size) { "" }
+        val contextBlanks = List(ContextRows.COLUMNS.size) { "" }
         // Paged by row id (the order readings were saved, which is nearly time order). One cursor
         // sorted by time had no index to use, and Android re-runs a cursor's query each time its
         // 2 MB window refills, so a long history was re-sorted dozens of times per export.
@@ -587,22 +589,25 @@ class BatteryStore private constructor(context: Context) :
                             DETAIL_COLUMNS[i].second == "TEXT" -> csv(c.getString(ix))
                             else -> c.getLong(ix).toString()
                         }
-                    }).joinToString(",") + "\n")
+                    }).plus(contextBlanks).joinToString(",") + "\n")
             }
         }
         for (e in experiments(5000).reversed()) {
             val rate = BatteryMath.experimentDrain(e.startMs, e.endMs, e.startPct, e.endPct)
             out.write(listOf("experiment", csv(e.device), e.mode, utc(e.startMs),
                 e.startPct.toString(), "", "", "", "", e.endMs?.let(::utc) ?: "",
-                e.endPct?.toString() ?: "", rate?.toString() ?: "").plus(blanks).joinToString(",") + "\n")
+                e.endPct?.toString() ?: "", rate?.toString() ?: "").plus(blanks).plus(contextBlanks).joinToString(",") + "\n")
             Unit
         }
+        for (e in journal(Int.MAX_VALUE).reversed()) out.write(ContextRows.line(EXPORT_COLUMNS, ContextRows.journalFields(e, ::utc)) + "\n")
+        for (f in forecasts()) out.write(ContextRows.line(EXPORT_COLUMNS, ContextRows.forecastFields(f, ::utc)) + "\n")
     }
 
     /**
      * Reads an export made by [exportCsv] (any version, columns matched by name) and inserts the
-     * readings and experiments that aren't already here. Nothing existing is changed or removed.
-     * Returns (readings added, experiments added).
+     * readings, experiments, journal entries and forecasts that aren't already here. Nothing
+     * existing is changed or removed. Exports made before journal and forecast rows existed
+     * import as before. Returns (readings added, experiments added).
      */
     fun importCsv(input: Reader): Pair<Int, Int> {
         val lines = input.buffered()
@@ -614,6 +619,8 @@ class BatteryStore private constructor(context: Context) :
             while (c.moveToNext()) existing += "${c.getString(0)}|${c.getString(1)}|${c.getLong(2)}"
         }
         val existingExp = experiments(100_000).associateBy { "${it.device}|${it.mode}|${it.startMs}" }.toMutableMap()
+        val existingJournal = journal(Int.MAX_VALUE).mapTo(HashSet(), ContextRows::journalKey)
+        val existingForecasts = forecasts().mapTo(HashSet(), ContextRows::forecastKey)
         var added = 0; var addedExp = 0
         val parseTime = CsvCodec.utcParser()
         val db = writableDatabase
@@ -627,6 +634,34 @@ class BatteryStore private constructor(context: Context) :
                 val time = get("timestamp_utc")?.let(parseTime) ?: continue
                 // Old exports may carry "ring:<address>"; v2 folded those into one Ring history.
                 val device = get("device")?.let { if (it.startsWith("ring:")) RING_ID else it } ?: continue
+                when (get("kind")) {
+                    "journal" -> {
+                        val e = ContextRows.journal(::get, parseTime)?.copy(device = device) ?: continue
+                        if (!existingJournal.add(ContextRows.journalKey(e))) continue
+                        db.insertOrThrow("context_journal", null, ContentValues().apply {
+                            put("time_ms", e.timeMs); e.windowStartMs?.let { put("window_start_ms", it) }
+                            put("device", e.device); put("category", e.category); put("title", e.title)
+                            e.detailsJson?.let { put("details_json", it) }
+                        })
+                        continue
+                    }
+                    "forecast" -> {
+                        val f = ContextRows.forecast(::get, parseTime)?.copy(device = device) ?: continue
+                        if (!existingForecasts.add(ContextRows.forecastKey(f))) continue
+                        db.insertOrThrow("forecasts", null, ContentValues().apply {
+                            put("device", f.device); put("issued_ms", f.issuedMs); put("start_pct", f.startPct)
+                            put("lab_rate_pp_per_hr", f.labRatePerHour); put("lab_hours_to_empty", f.labHoursToEmpty)
+                            f.androidHoursToEmpty?.let { put("android_hours_to_empty", it) }
+                            f.androidPersonalized?.let { put("android_personalized", if (it) 1 else 0) }
+                            put("model_version", f.modelVersion)
+                            f.actual2h?.let { put("actual_2h_pct", it) }
+                            f.actual4h?.let { put("actual_4h_pct", it) }
+                            f.actual8h?.let { put("actual_8h_pct", it) }
+                            put("status", f.status)
+                        })
+                        continue
+                    }
+                }
                 val pct = get("percentage")?.toIntOrNull()?.takeIf { it in 0..100 } ?: continue
                 when (get("kind")) {
                     "reading" -> {
@@ -702,6 +737,8 @@ class BatteryStore private constructor(context: Context) :
             "max_charging_ua" to "INTEGER", "max_charging_uv" to "INTEGER", "quality_flags" to "INTEGER",
             "rssi_dbm" to "INTEGER", "raw_extra" to "TEXT")
         private val DETAIL_COLUMNS = V3_COLUMNS + V4_COLUMNS + V5_COLUMNS + V6_COLUMNS
+        /** The export header, in order. */
+        internal val EXPORT_COLUMNS = CSV_HEAD + DETAIL_COLUMNS.map { it.first } + ContextRows.COLUMNS
         @Volatile private var shared: BatteryStore? = null
         fun get(context: Context): BatteryStore =
             shared ?: synchronized(this) { shared ?: BatteryStore(context).also { shared = it } }
@@ -771,6 +808,68 @@ object CsvCodec {
         val f = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         return { s -> try { f.parse(s)?.time } catch (e: Exception) { null } }
     }
+}
+
+/**
+ * Export rows for the context journal ("journal") and forecasts ("forecast"). Their fields have
+ * columns of their own at the end of the header, so tools that read the original columns, and
+ * older versions of the app (which skip these kinds), are unaffected. Pure so it can be tested.
+ */
+object ContextRows {
+    val JOURNAL_COLUMNS = listOf("window_start_utc", "journal_category", "journal_title", "journal_details")
+    val FORECAST_COLUMNS = listOf("lab_rate_pp_per_hr", "lab_hours_to_empty", "android_hours_to_empty",
+        "forecast_android_personalized", "model_version", "actual_2h_pct", "actual_4h_pct", "actual_8h_pct", "forecast_status")
+    val COLUMNS = JOURNAL_COLUMNS + FORECAST_COLUMNS
+
+    /** One CSV line for [header]: [fields] (already encoded) by column name, blank elsewhere. */
+    fun line(header: List<String>, fields: Map<String, String>): String = header.joinToString(",") { fields[it] ?: "" }
+
+    fun journalFields(e: JournalEntry, utc: (Long) -> String): Map<String, String> = buildMap {
+        put("kind", "journal"); put("device", CsvCodec.quote(e.device)); put("timestamp_utc", utc(e.timeMs))
+        e.windowStartMs?.let { put("window_start_utc", utc(it)) }
+        put("journal_category", CsvCodec.quote(e.category)); put("journal_title", CsvCodec.quote(e.title))
+        e.detailsJson?.let { put("journal_details", CsvCodec.quote(it)) }
+    }
+
+    fun forecastFields(f: Forecast, utc: (Long) -> String): Map<String, String> = buildMap {
+        put("kind", "forecast"); put("device", CsvCodec.quote(f.device)); put("timestamp_utc", utc(f.issuedMs))
+        put("percentage", f.startPct.toString())
+        put("lab_rate_pp_per_hr", f.labRatePerHour.toString()); put("lab_hours_to_empty", f.labHoursToEmpty.toString())
+        f.androidHoursToEmpty?.let { put("android_hours_to_empty", it.toString()) }
+        f.androidPersonalized?.let { put("forecast_android_personalized", it.toString()) }
+        put("model_version", CsvCodec.quote(f.modelVersion))
+        f.actual2h?.let { put("actual_2h_pct", it.toString()) }
+        f.actual4h?.let { put("actual_4h_pct", it.toString()) }
+        f.actual8h?.let { put("actual_8h_pct", it.toString()) }
+        put("forecast_status", CsvCodec.quote(f.status))
+    }
+
+    /** A journal row read back; [get] gives a column's non-empty value. Null if incomplete. The id is 0. */
+    fun journal(get: (String) -> String?, parseTime: (String) -> Long?): JournalEntry? {
+        val time = get("timestamp_utc")?.let(parseTime) ?: return null
+        val device = get("device") ?: return null
+        return JournalEntry(0, time, get("window_start_utc")?.let(parseTime), device,
+            get("journal_category") ?: "", get("journal_title") ?: "", get("journal_details"))
+    }
+
+    /** A forecast row read back, as [journal]. */
+    fun forecast(get: (String) -> String?, parseTime: (String) -> Long?): Forecast? {
+        val issued = get("timestamp_utc")?.let(parseTime) ?: return null
+        val device = get("device") ?: return null
+        val pct = get("percentage")?.toIntOrNull()?.takeIf { it in 0..100 } ?: return null
+        val rate = get("lab_rate_pp_per_hr")?.toDoubleOrNull() ?: return null
+        val hours = get("lab_hours_to_empty")?.toDoubleOrNull() ?: return null
+        return Forecast(0, device, issued, pct, rate, hours, get("android_hours_to_empty")?.toDoubleOrNull(),
+            get("forecast_android_personalized")?.toBooleanStrictOrNull(), get("model_version") ?: return null,
+            get("actual_2h_pct")?.toDoubleOrNull(), get("actual_4h_pct")?.toDoubleOrNull(),
+            get("actual_8h_pct")?.toDoubleOrNull(), get("forecast_status") ?: return null)
+    }
+
+    /** What makes two journal entries the same note, for skipping duplicates on import. */
+    fun journalKey(e: JournalEntry) = "${e.device}|${e.timeMs}|${e.title}"
+
+    /** A device issues at most one forecast at a time. */
+    fun forecastKey(f: Forecast) = "${f.device}|${f.issuedMs}"
 }
 
 /**

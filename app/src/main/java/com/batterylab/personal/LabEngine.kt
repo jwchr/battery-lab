@@ -168,19 +168,17 @@ object ForecastKeeper {
         val gaps = PollScheduler.gapLimits(context)
         for (id in devices) {
             val readings = BatteryStats.fullHoldAsCharging(store.since(id, now - 4 * 86_400_000L))
-            val last = readings.lastOrNull() ?: continue
             // Score anything due, from readings back to the oldest pending forecast (capped at 30
             // days): after a long gap in collection, the last 4 days would no longer reach its
-            // horizons. Horizons already scored are kept, never blanked.
+            // horizons. Horizons already scored are kept, never blanked. This runs even with no
+            // recent readings, so a device that stopped reporting has its forecasts closed as gaps
+            // instead of left pending.
             val pending = store.forecasts(id, "PENDING")
             val scoreFrom = maxOf(now - 30 * 86_400_000L, pending.minOfOrNull { it.issuedMs } ?: now)
             val scoring = if (scoreFrom >= now - 4 * 86_400_000L) readings
                 else BatteryStats.fullHoldAsCharging(store.since(id, scoreFrom))
-            for (f in pending) {
-                val s = ForecastScoring.keepScored(f, ForecastScoring.score(f, scoring.filter { it.timeMs >= f.issuedMs }, now))
-                if (s.status != "PENDING" || s.actual2h != f.actual2h || s.actual4h != f.actual4h)
-                    store.updateForecast(f.id, s.actual2h, s.actual4h, s.actual8h, s.status)
-            }
+            for ((f, s) in rescore(pending, scoring, now)) store.updateForecast(f.id, s.actual2h, s.actual4h, s.actual8h, s.status)
+            val last = readings.lastOrNull() ?: continue
             // Issue at most one per hour, only while on battery with a live estimate.
             if (last.charging == true || now - last.timeMs > 30 * 60_000L) continue
             if ((store.lastForecastMs(id) ?: 0L) > now - 3_600_000L) continue
@@ -197,6 +195,13 @@ object ForecastKeeper {
                 ForecastScoring.MODEL_VERSION, null, null, null, "PENDING"))
         }
     }
+
+    /** Pending forecasts whose score changed, with the new score. Pure; [readings] may be empty. */
+    fun rescore(pending: List<Forecast>, readings: List<Reading>, now: Long): List<Pair<Forecast, ForecastScore>> =
+        pending.mapNotNull { f ->
+            val s = ForecastScoring.keepScored(f, ForecastScoring.score(f, readings.filter { it.timeMs >= f.issuedMs }, now))
+            (f to s).takeIf { s.status != "PENDING" || s.actual2h != f.actual2h || s.actual4h != f.actual4h }
+        }
 }
 
 /** F8 — Battery Lab's own cost, logged per check. */

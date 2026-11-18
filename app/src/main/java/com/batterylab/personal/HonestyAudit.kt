@@ -230,7 +230,8 @@ object HonestyAuditor {
         }
 
         // E: cycle counter vs throughput.
-        val cycles = r.mapNotNull { it.detail?.cycleCount }
+        // Phones that don't fill the counter in report 0: that is unknown, not "no new cycles".
+        val cycles = r.mapNotNull { it.detail?.cycleCount }.filter { it > 0 }
         val dischargedMah = transitions.sumOf { (a, b) ->
             val ra = a.remainingUah; val rb = b.remainingUah
             if (ra != null && rb != null && ra > rb) (ra - rb) / 1000.0 else 0.0

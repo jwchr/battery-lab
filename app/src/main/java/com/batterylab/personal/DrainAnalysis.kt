@@ -140,7 +140,7 @@ object DrainAnalysis {
         // Whole-phone drop and energy during each app's on-screen time, for intensity and shares.
         val activeDrop = HashMap<String, Double>()
         val activeWh = HashMap<String, Double>()
-        var otherOnMs = 0L; var otherOnDrop = 0.0
+        var otherOnMs = 0L; var otherOnDrop = 0.0; var otherOnWh: Double? = null
         for (s in steps) {
             val inStep = index.mapValues { (_, ix) -> ix.overlap(s.from, s.to) }.filterValues { it > 0 }
             val stepMs = (s.to - s.from).toDouble()
@@ -153,13 +153,21 @@ object DrainAnalysis {
             // Screen on with no app in the history (lock screen, system UI) counts as Other.
             val bare = (s.onMs - inStep.values.sum()).coerceAtLeast(0L)
             otherOnMs += bare; otherOnDrop += s.drop * bare / stepMs
+            if (bare > 0 && capacityMah != null && s.mvAvg != null)
+                otherOnWh = (otherOnWh ?: 0.0) + s.drop * bare / stepMs / 100.0 * capacityMah * s.mvAvg / 1_000_000.0
         }
         // Each app: drop while it was on screen beyond what idle would have used in that time.
         // Screen-off time is never given to an app. Shares are then scaled to add up to exactly
         // the drop above idle, so idle plus every row is 100%.
         val raw = HashMap<String, Double>()
         fgMs.forEach { (app, ms) -> raw[app] = max(0.0, (activeDrop[app] ?: 0.0) - offRate * ms / HOUR) }
-        if (otherOnMs > 0) raw[UNATTRIBUTED] = (raw[UNATTRIBUTED] ?: 0.0) + max(0.0, otherOnDrop - offRate * otherOnMs / HOUR)
+        if (otherOnMs > 0) {
+            raw[UNATTRIBUTED] = (raw[UNATTRIBUTED] ?: 0.0) + max(0.0, otherOnDrop - offRate * otherOnMs / HOUR)
+            // The same screen time also counts toward Other's on-screen hours and intensity.
+            fgMs[UNATTRIBUTED] = (fgMs[UNATTRIBUTED] ?: 0L) + otherOnMs
+            activeDrop[UNATTRIBUTED] = (activeDrop[UNATTRIBUTED] ?: 0.0) + otherOnDrop
+            otherOnWh?.let { activeWh[UNATTRIBUTED] = (activeWh[UNATTRIBUTED] ?: 0.0) + it }
+        }
         val above = totalDrop - standby
         val rawSum = raw.values.sum()
         val share = HashMap<String, Double>()
@@ -200,6 +208,36 @@ object DrainAnalysis {
     }
 }
 
+/**
+ * Builds on-screen spans per package from activity events. The resumed activity is tracked by
+ * package and class: a late pause or stop from an activity that already gave way to another one
+ * (A1 paused, A2 resumed, then A1 stopped) must not end A2's span. Pure so it can be tested.
+ */
+class ForegroundSpans(private val out: MutableMap<String, MutableList<Span>> = HashMap()) {
+    private var pkg: String? = null
+    private var cls: String? = null
+    private var since = 0L
+
+    val spans: Map<String, List<Span>> get() = out
+
+    /** An activity came to the front. Moving between activities of the same app keeps its span. */
+    fun resumed(packageName: String, className: String?, t: Long) {
+        if (packageName != pkg) { close(t); pkg = packageName; since = t }
+        cls = className
+    }
+
+    /** Ends the span only if this is the activity currently on screen. */
+    fun pausedOrStopped(packageName: String, className: String?, t: Long) {
+        if (packageName == pkg && className == cls) close(t)
+    }
+
+    fun close(at: Long) {
+        val a = pkg ?: return
+        if (at > since) out.getOrPut(a) { mutableListOf() } += Span(since, at)
+        pkg = null; cls = null
+    }
+}
+
 /** Reads screen and app-on-screen history from Android's usage data (needs Usage access). */
 object UsageSource {
     fun granted(context: Context): Boolean {
@@ -224,15 +262,10 @@ object UsageSource {
         val apps = HashMap<String, MutableList<Span>>()
         var screenSince: Long? = null
         var screenKnown = false
-        var app: String? = null
-        var appSince = 0L
+        val foreground = ForegroundSpans(apps)
         val services = HashMap<String, MutableList<Span>>()
         val serviceSince = HashMap<String, Long>()
-        fun closeApp(at: Long) {
-            val a = app ?: return
-            if (at > appSince) apps.getOrPut(a) { mutableListOf() } += Span(appSince, at)
-            app = null
-        }
+        fun closeApp(at: Long) = foreground.close(at)
         while (events.hasNextEvent()) {
             events.getNextEvent(e)
             val t = e.timeStamp
@@ -248,10 +281,10 @@ object UsageSource {
                     closeApp(t)
                 }
                 UsageEvents.Event.ACTIVITY_RESUMED -> {
-                    if (screenKnown && e.packageName != app) { closeApp(t); app = e.packageName; appSince = t }
+                    if (screenKnown) foreground.resumed(e.packageName, e.className, t)
                 }
                 UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED ->
-                    if (e.packageName == app) closeApp(t)
+                    foreground.pausedOrStopped(e.packageName, e.className, t)
                 FOREGROUND_SERVICE_START -> serviceSince.putIfAbsent(e.packageName, t)
                 FOREGROUND_SERVICE_STOP -> serviceSince.remove(e.packageName)?.let {
                     if (t > it) services.getOrPut(e.packageName) { mutableListOf() } += Span(it, t)

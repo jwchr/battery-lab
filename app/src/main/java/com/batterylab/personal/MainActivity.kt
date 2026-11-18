@@ -273,13 +273,14 @@ class MainActivity : StyledActivity() {
             }
             for ((armA, armB) in listOf("baseline" to "monitoring", "ring_alone" to "ring_with_watch")) {
                 val c = ExperimentStats.compare(results, armA, armB)
-                if (c.meanA == null || c.meanB == null) continue
-                val ci = c.paired ?: c.welch
-                addView(label("${modeName(armB)} − ${modeName(armA)}: ${if (c.meanB - c.meanA > 0) "+" else ""}" +
-                    "${f(c.meanB - c.meanA)} pp/hour", 15f, ink, true))
+                val diff = c.difference ?: continue
+                // The headline and its range come from the same comparison.
+                val ci = c.chosen
+                addView(label("${modeName(armB)} − ${modeName(armA)}: ${if (diff > 0) "+" else ""}" +
+                    "${f(diff)} pp/hour", 15f, ink, true))
                 addView(label(buildString {
                     append("${c.nA} vs ${c.nB} runs. ")
-                    if (ci != null) append("95% range ${f(ci.low)} to ${f(ci.high)} (${if (c.paired != null) "paired" else "Welch"}). ")
+                    if (ci != null) append("95% range ${f(ci.low)} to ${f(ci.high)} (${if (ci === c.paired) "paired" else "Welch"}). ")
                     c.runtimeChange?.let { append("${modeName(armB)} lasts ${if (it >= 0) "${f(it * 100)}% longer" else "${f(-it * 100)}% shorter"}. ") }
                     if (ci == null) append("Needs at least 2 runs of each before there's a range.")
                     else if (ci.low <= 0 && ci.high >= 0) append("The range includes zero, so no clear difference yet.")
@@ -427,8 +428,11 @@ class MainActivity : StyledActivity() {
 
     /** One device: color gauge, name with a status pill, hours left on the right, a quiet meta line. */
     private fun deviceBoard(id: String, name: String, color: Int): View {
-        val recent = BatteryStats.fullHoldAsCharging(store.recent(id, 1000))
-        val last = recent.lastOrNull()
+        val history = store.recent(id, 1000)
+        val recent = BatteryStats.fullHoldAsCharging(history)
+        // The card shows the newest reading as read; charging inferred for a full hold is for the
+        // analysis only, so a wearable parked at 100% still shows "Full".
+        val last = DeviceCard.shown(history)
         val now = System.currentTimeMillis()
         // The phone's own job can sleep for hours in Doze, so it gets a long allowance. A wearable
         // that misses three checks in a row, or drops out of Samsung's widget, is treated as offline:
@@ -453,6 +457,9 @@ class MainActivity : StyledActivity() {
         val other = when {
             last == null || !fresh -> null
             id == "phone" -> store.latest(SamsungWidgetSource.PHONE_WIDGET_DEVICE)
+            // The watch app's readings live under their own id, not in the widget's history.
+            id == SamsungWidgetSource.WATCH_DEVICE ->
+                store.companionWatchReadings(last.timeMs - 30 * 60_000L).maxByOrNull { it.timeMs }
             else -> recent.lastOrNull { it.source != last.source }
         }?.takeIf { kotlin.math.abs(it.timeMs - last!!.timeMs) <= 30 * 60_000L && it.percent != last.percent }
         val otherLabel = when (other?.source) {
@@ -471,13 +478,12 @@ class MainActivity : StyledActivity() {
             last?.charging == true -> null   // shown as the big number on the right instead
             else -> androidEstimate.dischargeMs?.let { "Android: ${span(it)} left" }
         }
-        val (status, statusColor) = when {
-            last == null -> "No data yet" to Palette.quiet
-            !fresh -> "Offline" to Palette.amberInk
-            last.charging == true -> "Charging" to Palette.greenInk
-            // Widget shows a full wearable without a bolt whether or not it is still on the charger.
-            last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> "Full" to Palette.greenInk
-            else -> "On battery" to Palette.tintInk
+        val status = DeviceCard.status(last, fresh)
+        val statusColor = when (status) {
+            DeviceCard.NO_DATA -> Palette.quiet
+            DeviceCard.OFFLINE -> Palette.amberInk
+            DeviceCard.CHARGING, DeviceCard.FULL -> Palette.greenInk
+            else -> Palette.tintInk
         }
         return LinearLayout(this).apply {
             gravity = android.view.Gravity.CENTER_VERTICAL
@@ -552,7 +558,7 @@ class MainActivity : StyledActivity() {
                     text = unit
                     textSize = 11f; setTextColor(Palette.quiet)
                 })
-                if (projection != null || chargeMs != null || unit == "est. (history)") addView(TextView(this@MainActivity).apply {
+                if (projection != null || chargeMs != null || unit.endsWith("(est.)")) addView(TextView(this@MainActivity).apply {
                     text = if (chargeMs != null && projection == null) "Android" else "Battery Lab"
                     textSize = 9.5f; setTextColor(Palette.quiet)
                 })
@@ -870,6 +876,7 @@ class MainActivity : StyledActivity() {
                     input.reset()
                     val stream = if (gz) java.util.zip.GZIPInputStream(input) else input
                     val (rows, tests) = stream.bufferedReader().use(store::importCsv)
+                    PollScheduler.afterImport(this, store)
                     "Restored $rows readings and $tests tests (duplicates skipped)"
                 } catch (e: Exception) { "Restore failed: ${e.message ?: e.javaClass.simpleName}" }
                 Background.onMain { if (!isDestroyed) { toast(message); render() } }
@@ -1060,5 +1067,26 @@ class BatteryGraph(context: android.content.Context, private val series: List<Li
         canvas.drawText("2 days ago", left, h - 4f * d, paint)
         canvas.drawText("yesterday", (left + right) / 2 - 22f * d, h - 4f * d, paint)
         canvas.drawText("now", right - 20f * d, h - 4f * d, paint)
+    }
+}
+
+/** Main-card choices that need no Android; pure so they can be tested. */
+object DeviceCard {
+    const val NO_DATA = "No data yet"
+    const val OFFLINE = "Offline"
+    const val CHARGING = "Charging"
+    const val FULL = "Full"
+    const val ON_BATTERY = "On battery"
+
+    /** The newest reading exactly as read, without charging inferred by [BatteryStats.fullHoldAsCharging]. */
+    fun shown(history: List<Reading>): Reading? = history.sortedBy { it.timeMs }.lastOrNull()
+
+    fun status(last: Reading?, fresh: Boolean): String = when {
+        last == null -> NO_DATA
+        !fresh -> OFFLINE
+        last.charging == true -> CHARGING
+        // Widget shows a full wearable without a bolt whether or not it is still on the charger.
+        last.percent == 100 && last.source == SamsungWidgetSource.SOURCE -> FULL
+        else -> ON_BATTERY
     }
 }

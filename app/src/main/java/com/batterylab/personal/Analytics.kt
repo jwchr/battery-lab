@@ -459,6 +459,15 @@ data class ExperimentComparison(
 ) {
     /** Implied runtime change of B relative to A (+30% means B lasts 30% longer). */
     val runtimeChange: Double? get() = if (meanA != null && meanB != null && meanB > 0) meanA / meanB - 1 else null
+
+    /**
+     * The comparison to report. Paired only when both arms have the same number of runs: with
+     * unequal counts, pairing leaves the extra runs out. Otherwise Welch, which uses every run.
+     */
+    val chosen: Interval? get() = if (nA == nB) paired ?: welch else welch
+
+    /** Headline B − A difference, from the same comparison as [chosen]'s range. */
+    val difference: Double? get() = chosen?.estimate ?: if (meanA != null && meanB != null) meanB - meanA else null
 }
 
 object ExperimentStats {

@@ -51,8 +51,9 @@ object BatteryStats {
      * Samsung's widget drops a wearable's charging bolt once it reaches 100%, even while it sits on
      * the charger. So a run of widget readings at 100% right after a charging reading counts as still
      * charging, except the last one: the device came off somewhere between it and the first lower
-     * reading, so the drain clock starts there. Only the analysis sees this; stored history and the
-     * CSV export keep exactly what was read.
+     * reading, so the drain clock starts there. A run that reaches the end of the history has no
+     * lower reading yet, so all of it counts as charging. Only the analysis sees this; stored
+     * history and the CSV export keep exactly what was read.
      */
     fun fullHoldAsCharging(readings: List<Reading>): List<Reading> {
         val r = readings.sortedBy { it.timeMs }
@@ -62,7 +63,7 @@ object BatteryStats {
             if (r[i].charging != true) { i++; continue }
             var j = i + 1
             while (j < r.size && r[j].percent == 100 && r[j].charging != true && r[j].source == SamsungWidgetSource.SOURCE) j++
-            for (k in i + 1 until j - 1) out[k] = r[k].copy(charging = true)
+            for (k in i + 1 until (if (j == r.size) j else j - 1)) out[k] = r[k].copy(charging = true)
             i = maxOf(j, i + 1)
         }
         return out
@@ -70,8 +71,14 @@ object BatteryStats {
 
     /** [hourOf] maps a time to its local hour of day (0..23); injected so tests are timezone-free. */
     /** Steps longer than [GapLimits.stepMs] are gaps (phone off, job deferred) and are not counted as time. */
-    fun device(readings: List<Reading>, hourOf: (Long) -> Int, gaps: GapLimits = GapLimits()): DeviceStats {
-        val r = BatteryMath.withoutSpikes(readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs }, { it.percent }, { it.charging })
+    /**
+     * [utcOffsetMs] gives the local zone's offset from UTC at a time, so a step is split at local
+     * clock-hour boundaries (the same hours [hourOf] names), including in half-hour zones.
+     */
+    fun device(readings: List<Reading>, hourOf: (Long) -> Int, gaps: GapLimits = GapLimits(),
+               utcOffsetMs: (Long) -> Long = { java.util.TimeZone.getDefault().getOffset(it).toLong() }): DeviceStats {
+        val r = BatteryMath.withoutSpikes(readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs },
+            { it.percent }, { it.charging }, { it.timeMs }, gaps)
         var used = 0
         // Lowest level since the last charge. A drop only counts below it, so a widget wobbling
         // 50 → 51 → 50 adds nothing, and drain across a gap still counts (audit review, 2026-11-16).
@@ -96,7 +103,12 @@ object BatteryStats {
             if (prev != null) {
                 val dt = cur.timeMs - prev.timeMs
                 val prevCharging = prev.charging == true
-                val drop = if (prevCharging || isCharging) 0 else max(0, (low ?: prev.percent) - cur.percent)
+                val drop = when {
+                    isCharging -> 0
+                    // Unplugged within one check: what it lost since the charging reading is real use.
+                    prevCharging -> if (dt <= gaps.stepMs) max(0, prev.percent - cur.percent) else 0
+                    else -> max(0, (low ?: prev.percent) - cur.percent)
+                }
                 used += drop
                 if (dt <= gaps.stepMs) {
                     val h = dt / HOUR
@@ -108,7 +120,8 @@ object BatteryStats {
                         // Share the drop across the clock hours the interval spans, by time in each.
                         var t = prev.timeMs
                         while (t < cur.timeMs) {
-                            val next = minOf(cur.timeMs, (t / HOUR_MS + 1) * HOUR_MS)
+                            val off = utcOffsetMs(t)
+                            val next = minOf(cur.timeMs, (Math.floorDiv(t + off, HOUR_MS) + 1) * HOUR_MS - off)
                             val part = (next - t).toDouble() / dt
                             val hr = hourOf(t)
                             hourSum[hr] += drop * part; hourWeight[hr] += h * part

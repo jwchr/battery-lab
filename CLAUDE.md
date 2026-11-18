@@ -2,6 +2,10 @@
 
 The owner is Jeff. He is not a developer: write to him in short, plain American English, no em dashes, times in Eastern.
 
+## Permission (Jeff, 2026-11-18, all projects, permanent)
+
+Don't ask Jeff for permission. Ask only when an action is safety, security or financially sensitive; for anything else, decide and act. Jeff: "Make this rule global and persistent, forever."
+
 ## Reviews (Jeff's standing rule, restated 2026-11-18)
 
 1. **CodeRabbit** gets every review, unless the change is safety, security or finance sensitive, or complex.

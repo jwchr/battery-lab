@@ -88,4 +88,18 @@ class ArgonRound2Test {
         assertEquals((5 - 0.75) / 0.25, a.activePctPerHour!!, 1e-9)
         assertEquals(d.totalDrop, d.standbyDrop + d.apps.sumOf { it.percent }, 1e-9)
     }
+
+    // R5: a test with no finish is set aside after 14 hours, and only ever turns Bluetooth off.
+    @Test fun overdueTestCapAndMonitoringAfterAbandon() {
+        assertEquals(false, ExperimentEndpoint.pastCap(t, t + 14 * h))
+        assertTrue(ExperimentEndpoint.pastCap(t, t + 14 * h + 1))
+        // Monitoring arm: always off.
+        assertEquals(false, ExperimentEndpoint.monitoringAfterAbandon("monitoring", true, true, byUser = true))
+        assertEquals(false, ExperimentEndpoint.monitoringAfterAbandon("monitoring", true, null, byUser = false))
+        // Other arms by hand: back to how it was before the test.
+        assertTrue(ExperimentEndpoint.monitoringAfterAbandon("baseline", false, true, byUser = true))
+        assertEquals(false, ExperimentEndpoint.monitoringAfterAbandon("baseline", false, null, byUser = true))
+        // Automatically: never turned on.
+        assertEquals(false, ExperimentEndpoint.monitoringAfterAbandon("baseline", false, true, byUser = false))
+    }
 }

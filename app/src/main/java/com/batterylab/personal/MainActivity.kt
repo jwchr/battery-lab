@@ -251,8 +251,10 @@ class MainActivity : StyledActivity() {
             if (active != null) {
                 addView(label("ACTIVE: ${modeName(active.mode).uppercase(Locale.US)} · " +
                     "started ${BatteryStore.format(active.startMs)} at ${active.startPct}%", 14f, ink, true))
-                addView(label("Elapsed: ${f((System.currentTimeMillis() - active.startMs) / 3_600_000.0)}h · Target 12h", 13f, quiet))
+                addView(label("Elapsed: ${f((System.currentTimeMillis() - active.startMs) / 3_600_000.0)}h · Target 12h · " +
+                    "set aside without a result after ${ExperimentEndpoint.MAX_RUN_MS / 3_600_000L}h", 13f, quiet))
                 button("Finish active test") { finishTest() }
+                button("Abandon test (no result)") { abandonTest() }
             } else {
                 button("Start 12h baseline · monitoring OFF") { startTest("baseline") }
                 button("Start 12h monitored · monitoring ON") { startTest("monitoring") }
@@ -800,6 +802,7 @@ class MainActivity : StyledActivity() {
         PollScheduler.setRingEnabled(app, false)
         freshRingReading(mode, failed = { PollScheduler.setRingEnabled(app, wasMonitoring) }) { reading ->
             store.startExperiment(reading.device, mode, reading)
+            PollScheduler.setRingBeforeTest(this, wasMonitoring)
             PollScheduler.setRingEnabled(this, mode == "monitoring")
             toast("${modeName(mode)} test started at ${reading.percent}%")
             render()
@@ -817,9 +820,21 @@ class MainActivity : StyledActivity() {
         freshRingReading(experiment.mode) { reading ->
             store.finishExperiment(reading)
             PollScheduler.setRingEnabled(this, false)
+            PollScheduler.setRingBeforeTest(this, null)
             toast("Experiment finished")
             render()
         }
+    }
+
+    /** Ends the running test without a result, for when its finish can't be read (Ring dead or away). */
+    private fun abandonTest() {
+        val experiment = store.activeExperiment() ?: return
+        store.abandonExperiment("Abandoned by hand")
+        PollScheduler.setRingEnabled(this, ExperimentEndpoint.monitoringAfterAbandon(experiment.mode,
+            PollScheduler.ringEnabled(this), PollScheduler.ringBeforeTest(this), byUser = true))
+        PollScheduler.setRingBeforeTest(this, null)
+        toast("Test abandoned; it won't count")
+        render()
     }
 
     private fun export() {

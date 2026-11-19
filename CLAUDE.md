@@ -6,7 +6,7 @@ This app's SSOT rows: W098, W099.
 
 ## Battery Lab specifics
 - **Riskier reviews** (Codex): safety, security or finance sensitive, or complex changes. In this app that includes Bluetooth, backup and restore, and the database.
-- **Merging:** Claude may merge its own PRs when it decides they are ready: reviewed per the rule above with findings handled, and the quiet check passing (Jeff, Nov 18: "you have permission to merge on your own when you decide it's ready"). This repo has no automatic PR workflow (to save Actions minutes), so "green CI" means the quiet check below passes on the PR's head in a cloud build.
+- **Merging:** Claude may merge its own PRs when it decides they are ready: reviewed first (CodeRabbit for regular changes, Codex for the riskier ones above; the full rule is in `~/.claude/CLAUDE.md`, and a session that cannot load it still must not merge unreviewed) with findings handled, and the quiet check passing (Jeff, Nov 18: "you have permission to merge on your own when you decide it's ready"). This repo has no automatic PR workflow (to save Actions minutes), so "green CI" means the quiet check below passes on the PR's head in a local or cloud build.
 - **Argon API:** out of usage (monthly spending cap) as of Nov 18, so Argon reviews go to Jeff by hand.
 - **Never:** root the phone; modify, decompile or analyze Samsung's apps; use accessibility services; add the "trusted devices only" permission to Claude Code settings.
 - **Ring Bluetooth:** connect to the Ring only when the user starts something that needs it (monitoring they turned on, an A/B test they started, a "connect now" button). Never on a background schedule by default. Listening for the Ring's broadcasts is fine.

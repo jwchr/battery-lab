@@ -1,14 +1,8 @@
 # Battery Lab
 
-## Working rules (same in every app; Control Center, Nov 18, 2026)
-- Owner: Jeff, not a developer. Short plain American English, no em dashes, Eastern time. Verify, don't infer.
-- Permission (Jeff, Nov 18, all projects, permanent): don't ask Jeff for permission. Ask only when an action is safety, security or financially sensitive; for anything else, decide and act. Jeff: "Make this rule global and persistent, forever." Hands-on tests on his devices and product facts only he knows are questions, not approvals.
-- Reviews (Jeff's standing rule, restated Nov 18): (1) CodeRabbit gets every review, unless the change is safety, security or finance sensitive, or complex. (2) Those go to Codex (comment `@codex review` on the PR). (3) If Codex is unavailable, Argon (Gemini) via API. (4) If the Argon API is unavailable, Jeff gives it to Argon manually: hand him a `Review-<PR>-for-Gemini.txt` file and keep working. The author never reviews its own PR. CodeRabbit reviews each ready PR once; ask with one `@coderabbitai review` comment (`.coderabbit.yaml`). CodeRabbit after Nov 22: wait for Jeff's answer (the Control Center plans to ask him Nov 21; not yet asked as of Nov 18).
-- Up to 3 open PRs, oldest finished first.
-- Keep the chat small: quiet tests (failures and final count only), grep instead of reading whole files, subagents for big reads, never paste whole files or logs.
-- Current state lives only in the newest GitHub issue titled "Handoff note: <app> chat, <date>" (find it with an issue search on that title). Rules live here. Do not keep a second status file.
-- SSOT Tables spreadsheet 1G9kZJhYwc5nkw2xkvUDPHOwgPdZXDitjLc8gaCFEuv0, tab Active Work, this app's rows only (W098, W099); one Change Log line per change.
-- Report on GitHub and in SSOT; never send_message. The Control Center hands you off at 40% full: when asked, finish the current step, push, write the handoff note (done, in progress with branch and head, next, waiting on Jeff, must not do; under 400 words; no rules, no history) and stop.
+## Shared rules
+Jeff's standing rules for every chat (permission, reviews, PR limits, keeping the chat small, compaction at 60% instead of handoffs, SSOT) live only in `~/.claude/CLAUDE.md`, which Claude Code loads automatically. Do not copy them here; change them there.
+This app's SSOT rows: W098, W099.
 
 ## Battery Lab specifics
 - **Riskier reviews** (Codex): safety, security or finance sensitive, or complex changes. In this app that includes Bluetooth, backup and restore, and the database.

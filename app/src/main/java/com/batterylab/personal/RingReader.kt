@@ -66,6 +66,12 @@ class RingReader(
 
     fun cancel() = complete(null, "Cancelled")
 
+    private val toSubscribe = ArrayDeque<BluetoothGattCharacteristic>()
+    @Volatile private var subscribed = 0
+
+    private fun shortId(c: BluetoothGattCharacteristic) =
+        "${c.service.uuid.toString().take(8)}/${c.uuid.toString().take(8)}"
+
     /** Logs each step with no address, name or reading, so logs stay safe to share. */
     private fun step(name: String) {
         stage = name
@@ -130,45 +136,60 @@ class RingReader(
                 complete(null, "BLE services failed (status $status)")
                 return
             }
-            val service = g.getService(DATA_SERVICE)
-            val notify = service?.getCharacteristic(NOTIFY_UUID)
-            val write = service?.getCharacteristic(WRITE_UUID)
-            val cccd = notify?.getDescriptor(CCCD_UUID)
-            if (notify == null || write == null || cccd == null) {
+            val write = g.getService(DATA_SERVICE)?.getCharacteristic(WRITE_UUID)
+            if (write == null || g.getService(DATA_SERVICE)?.getCharacteristic(NOTIFY_UUID) == null) {
                 complete(null, "Ring DATA service unavailable on this firmware")
                 return
             }
-            if ((notify.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) == 0 ||
-                (write.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) == 0) {
+            if ((write.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) == 0) {
                 complete(null, "Unexpected Ring GATT characteristic properties")
                 return
             }
+            // The Ring may answer on a characteristic other than the DATA one (the public protocol
+            // notes list a twin service and a separate battery notification), so listen on every
+            // characteristic that notifies. Listening sends nothing to the Ring beyond the CCCD writes.
+            toSubscribe.clear()
+            g.services.forEach { svc -> svc.characteristics.forEach { c ->
+                if ((c.properties and BluetoothGattCharacteristic.PROPERTY_NOTIFY) != 0 &&
+                    c.getDescriptor(CCCD_UUID) != null) toSubscribe += c
+            } }
+            Log.i(LOG_TAG, "Ring read: ${toSubscribe.size} notifying characteristics")
+            step("subscribing to notifications")
+            subscribeNext(g)
+        }
+
+        /** One CCCD write at a time (Android allows one GATT operation in flight); then the request. */
+        private fun subscribeNext(g: BluetoothGatt) {
+            if (finished.get()) return
+            val c = toSubscribe.removeFirstOrNull()
+            if (c == null) { if (subscribed == 0) complete(null, "Could not subscribe to Ring notifications") else sendRequest(g); return }
             try {
-                step("subscribing to notifications")
-                if (!g.setCharacteristicNotification(notify, true)) {
-                    complete(null, "Could not enable Ring notifications")
-                    return
-                }
+                val cccd = c.getDescriptor(CCCD_UUID)
                 @Suppress("DEPRECATION")
                 cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                 @Suppress("DEPRECATION")
-                if (!g.writeDescriptor(cccd)) complete(null, "Could not subscribe to Ring notifications")
+                if (!g.setCharacteristicNotification(c, true) || !g.writeDescriptor(cccd)) {
+                    Log.i(LOG_TAG, "Ring read: skipped ${shortId(c)}")
+                    subscribeNext(g)
+                }
             } catch (e: SecurityException) { complete(null, "Bluetooth permission denied") }
         }
 
         override fun onDescriptorWrite(g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (finished.get() || descriptor.uuid != CCCD_UUID) return
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                complete(null, "Ring notification subscription failed ($status)")
-                return
-            }
+            if (status == BluetoothGatt.GATT_SUCCESS) subscribed++
+            else Log.i(LOG_TAG, "Ring read: subscribe ${shortId(descriptor.characteristic)} status $status")
+            subscribeNext(g)
+        }
+
+        private fun sendRequest(g: BluetoothGatt) {
             val characteristic = g.getService(DATA_SERVICE)?.getCharacteristic(WRITE_UUID)
             if (characteristic == null) {
                 complete(null, "Ring command characteristic missing")
                 return
             }
             try {
-                step("waiting for the battery reply")
+                step("waiting for the battery reply ($subscribed subscribed)")
                 // Channel 11, battery sync request only. No other device commands sent.
                 val batteryRequest = byteArrayOf(0x0b, 0x0b, 0x03)
                 if (Build.VERSION.SDK_INT >= 33) {
@@ -195,16 +216,19 @@ class RingReader(
 
         @Suppress("DEPRECATION")
         override fun onCharacteristicChanged(g: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            accept(characteristic.uuid, characteristic.value)
+            accept(characteristic, characteristic.value)
         }
 
         override fun onCharacteristicChanged(g: BluetoothGatt,
             characteristic: BluetoothGattCharacteristic, value: ByteArray) {
-            accept(characteristic.uuid, value)
+            accept(characteristic, value)
         }
 
-        private fun accept(uuid: UUID, value: ByteArray) {
-            if (finished.get() || uuid != NOTIFY_UUID) return
+        private fun accept(c: BluetoothGattCharacteristic, value: ByteArray) {
+            if (finished.get()) return
+            // Shape only (where it came from, size, first bytes), never the full packet.
+            Log.i(LOG_TAG, "Ring read: notification on ${shortId(c)}, ${value.size} bytes, starts " +
+                value.take(3).joinToString("") { "%02x".format(it.toInt() and 0xff) })
             val report = RingBatteryProtocol.parseDetailedReport(value) ?: return
             complete(Reading(BatteryStore.RING_ID, System.currentTimeMillis(), report.percent,
                 report.charging, "ring_ble", detail = ReadingDetail.clock(context, null)

@@ -294,7 +294,7 @@ class StatsActivity : StyledActivity() {
     }
 
     private fun renderHabits(phone: DeviceStats) {
-        if (phone.charges.isEmpty()) return
+        if (phone.charges.isEmpty() && phone.hoursAtOrAbove80 <= 0.0) return
         section("Charging habits", "How you charge your phone.").apply {
             val fast = phone.fastestCharge
             addTileList(listOfNotNull(
@@ -302,6 +302,9 @@ class StatsActivity : StyledActivity() {
                 phone.averageUnplug?.let { Tile("${it.roundToInt()}%", "average unplug", null, "\uD83D\uDE80") },
                 fast?.let { Tile("${(60 / it.ratePerMinute!!).roundToInt()} s", "per 1% at best", "fastest charge · ${shortWhen(it.startMs)}", "\u26A1") },
                 Tile("${f1(phone.hoursAt100)} h", "parked at 100%", "time plugged in and already full", "\uD83C\uDD7F\uFE0F"),
+                Tile("${f1(phone.hoursAtOrAbove80)} h", "at 80% or more", "plugged in or not", "\uD83D\uDD1D"),
+                phone.partialChargeShare?.let { Tile("${(it * 100).roundToInt()}%", "of charges stopped short",
+                    "unplugged before 100% (watched charges only)", "\u23F8\uFE0F") },
                 Tile("${f1(phone.hoursBelow20)} h", "spent under 20%", "living dangerously", "\uD83D\uDE2C"),
                 Tile("${pctOf(phone.hoursCharging, phone.hoursCharging + phone.hoursOnBattery)}%", "of time charging", null, "\uD83D\uDD52"),
             ))

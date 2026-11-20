@@ -65,6 +65,8 @@ class StatsActivity : StyledActivity() {
         val spread: List<DrainSpread?>,
         /** Per device: weekday and weekend drain over the last 30 days, or null with too little data. */
         val week: List<WeekSplit?>,
+        /** Per device: its observed discharge stretches, found off the main thread. */
+        val stretches: List<List<DischargeStretch>>,
     )
 
     /** The drain breakdown and the app names it shows, prepared off the main thread. */
@@ -140,7 +142,7 @@ class StatsActivity : StyledActivity() {
             if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList(),
             data.map { readings -> coverageRows(readings.map { it.timeMs }, now, gaps) },
             stretches.map { DrainSpreadMath.of(it, now - 30 * 86_400_000L) },
-            stretches.map { WeekSplitMath.of(it, now - 30 * 86_400_000L, isWeekend) })
+            stretches.map { WeekSplitMath.of(it, now - 30 * 86_400_000L, isWeekend) }, stretches)
     }
 
     private fun renderTitle() {
@@ -185,7 +187,7 @@ class StatsActivity : StyledActivity() {
         timed("hours") { renderHours(devices, stats) }
         timed("showdown") { renderShowdown(devices, data) }
         timed("headtohead") { renderHeadToHead(devices, stats) }
-        timed("rolling") { renderRolling(devices, data) }
+        timed("rolling") { renderRolling(devices, data, l.stretches) }
         timed("spread") { renderSpread(devices, l.spread) }
         timed("week") { renderWeek(devices, l.week) }
         timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
@@ -376,15 +378,16 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Full-charge runtime averaged over rolling windows, so recent use can be compared with the long run. */
-    private fun renderRolling(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>) {
+    private fun renderRolling(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>,
+                              allStretches: List<List<DischargeStretch>>) {
         val now = System.currentTimeMillis()
         val day = 86_400_000L
-        val windows = listOf("7 DAYS" to 7 * day, "30 DAYS" to 30 * day, "6 MONTHS" to 182 * day, "1 YEAR" to 365 * day, "ALL TIME" to Long.MAX_VALUE / 2)
+        val windows = listOf("24 HOURS" to day, "7 DAYS" to 7 * day, "30 DAYS" to 30 * day, "90 DAYS" to 90 * day, "6 MONTHS" to 182 * day, "1 YEAR" to 365 * day, "ALL TIME" to Long.MAX_VALUE / 2)
         section("Over time", "How long a full charge would last at the drain rate seen.", "Projected 100% → 0% from " +
             "the observed stretches of discharge in each window (each at least an hour long, not full cycles), weighted by " +
             "how much battery each used. Longer windows fill in as history grows.").apply {
             devices.forEachIndexed { i, (_, name, color) ->
-                val stretches = BatteryMath.dischargeStretches(data[i].map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = PollScheduler.gapLimits(this@StatsActivity))
+                val stretches = allStretches[i]
                 if (stretches.isEmpty()) return@forEachIndexed
                 val first = data[i].first().timeMs
                 val rows = windows.mapNotNull { (labelText, span) ->

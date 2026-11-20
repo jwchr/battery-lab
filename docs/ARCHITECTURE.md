@@ -116,3 +116,18 @@ wakeups, and the widget gives continuous baseline samples between the endpoints.
 **monitoring** arm still turns on the 15-minute BLE request, and requires choosing the paired
 Ring. Comparing the two arms gives a measurable estimate of the BLE fallback's battery cost.
 A sensible fallback cadence is decided from that data, not assumed.
+
+## RF Lab (Nov 2026)
+- `:rf` is a plain Kotlin library (package `com.batterylab.rf`, no Android classes, no
+  dependency on `:app`). It holds the stream interface, the session controller, the session
+  file format, simulated and replay streams, zip export and import, and the result card math.
+- `:app` holds the Android side in `com.batterylab.personal.rf`: `RfLabActivity` (one
+  non-exported activity), `RfRuntime` (the one controller per process, so rotation keeps a
+  session) and `WifiLinkStream` (ConnectivityManager network callback plus
+  `getNetworkCapabilities` once per second).
+- A session is a folder `files/rf/sessions/<id>/` with `session.properties` (format 1,
+  min_reader 1), `streams.csv`, `events.csv` and one `obs_<stream>.csv` per stream; a
+  `bin_<stream>.dat` is kept byte for byte. Statistics are computed from the obs rows when the
+  result card is shown and are never stored as observations.
+- Nothing runs outside a session: no service, receiver, job or timer. The battery database
+  gets only two `probe_events` lines per session, and its schema stays at version 7.

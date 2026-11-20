@@ -87,6 +87,17 @@ One file contains rows tagged `reading` and `experiment`. All timestamps are UTC
 Charging may be empty for manually entered Ring percentages or Ring firmware that does
 not expose it. Exported values preserve their data sources and actual timestamps.
 
+### RF Lab
+
+"Open RF Lab" on the main screen opens a separate screen that shows the phone's Wi-Fi link
+signal in dBm, once per second, for up to 10 minutes (90 seconds by default). It uses only
+the network-state permission the app already has and reads no network name. Sessions are
+files under the app's private `files/rf/` folder, which no backup includes, and can be
+marked, replayed, exported and imported as a zip through the system file dialogs. A
+simulated session shows how it works without a radio. Each session adds two lines to the
+diagnostics log (scope and length) and nothing else to the battery database. Bluetooth
+streams (Ring link and scanning) come in a later build.
+
 ## Design and security
 
 - Java/Kotlin Android API + Android SQLite, no third-party charting stack.

@@ -8,7 +8,7 @@ import java.io.File
 
 /**
  * Source checks for RF Lab in the app. T9 (isolation and forbidden calls), T10 (the manifest
- * permission list for PR A, backups), R12 (no background pieces) and R18 (two probe lines).
+ * permission list for PR B, backups), R12 (no background pieces) and R18 (two probe lines).
  */
 class RfLabGuardTest {
     private val rfDir = File("src/main/java/com/batterylab/personal/rf")
@@ -43,12 +43,15 @@ class RfLabGuardTest {
 
     private fun manifest() = File("src/main/AndroidManifest.xml").readText()
 
-    @Test fun manifestPermissionsAreUnchangedInPrA() {
+    @Test fun manifestPermissionsArePrAPlusTheThreeScanPermissions() {
         val perms = Regex("""<uses-permission\s+android:name="([^"]+)"([^>]*)/>""").findAll(manifest())
             .map { (it.groupValues[1] + " " + it.groupValues[2]).replace(Regex("\\s+"), " ").trim() }.toList()
         assertEquals(listOf(
             "android.permission.BLUETOOTH android:maxSdkVersion=\"30\"",
             "android.permission.BLUETOOTH_CONNECT",
+            "android.permission.BLUETOOTH_SCAN",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.ACCESS_COARSE_LOCATION",
             "android.permission.RECEIVE_BOOT_COMPLETED",
             "android.permission.ACCESS_NETWORK_STATE",
             "android.permission.BIND_APPWIDGET tools:ignore=\"ProtectedPermissions\"",
@@ -56,9 +59,10 @@ class RfLabGuardTest {
         ), perms)
         val text = manifest()
         assertFalse(text.contains("android.permission.INTERNET"))
-        // PR A adds no scanning permission; BLUETOOTH_SCAN arrives in PR B.
-        assertFalse(text.contains("BLUETOOTH_SCAN"))
-        assertFalse(text.contains("LOCATION"))
+        // R28: BLUETOOTH_SCAN with no usesPermissionFlags, and no background location.
+        assertFalse(text.contains("usesPermissionFlags"))
+        assertFalse(text.contains("neverForLocation"))
+        assertFalse(text.contains("ACCESS_BACKGROUND_LOCATION"))
         assertFalse(text.contains("NEARBY_WIFI_DEVICES"))
         assertFalse(text.contains("FOREGROUND_SERVICE"))
     }
@@ -109,19 +113,33 @@ class RfLabGuardTest {
             "requestLocationUpdates", "requestSingleUpdate", "getLastKnownLocation", "getCurrentLocation",
             "com.google.android.gms.location", "FusedLocation",
             // R12: no background collection.
-            "JobScheduler", "AlarmManager", "BroadcastReceiver", "registerReceiver", "startForeground", "Service()",
-            "WorkManager",
+            "JobScheduler", "AlarmManager", "startForeground", "Service()", "WorkManager",
+            // R17, R24: RF Lab never reads a device name or advertisement payload, and never pairs.
+            "getName", ".name ==", "device.name", "deviceName", "scanRecord", "getScanRecord", "alias", "setPairingConfirmation",
         )
         for (f in rfSources) {
             val text = code(f)
             for (word in forbidden) assertFalse("${f.name} uses $word", text.contains(word))
             // LocationManager only for isLocationEnabled.
-            Regex("""LocationManager[^\n]*""").findAll(text).forEach {
+            Regex("""LocationManager[^\n]*""").findAll(text.lines().filterNot { it.startsWith("import ") }.joinToString("\n")).forEach {
                 assertTrue("${f.name}: ${it.value}", it.value.contains("isLocationEnabled") || it.value.contains("LOCATION_SERVICE"))
             }
-            // connectGatt only in the ring_link adapter, which PR B adds.
-            if (!f.name.startsWith("RingLink")) assertFalse("${f.name} calls connectGatt", text.contains("connectGatt"))
+            // connectGatt only in the ring_link adapter; scanning only in the scan adapter.
+            if (f.name != "RingLinkAdapter.kt") assertFalse("${f.name} calls connectGatt", text.contains("connectGatt"))
+            if (f.name != "BleScanAdapter.kt") assertFalse("${f.name} starts a scan", text.contains("startScan"))
+            // R12: the one receiver is the session-only Bluetooth on/off watch.
+            if (f.name != "BluetoothWatch.kt") {
+                assertFalse("${f.name} registers a receiver", text.contains("registerReceiver"))
+                assertFalse("${f.name} has a receiver", text.contains("BroadcastReceiver"))
+            }
         }
+        // The ring_link adapter makes only the four allowed GATT calls.
+        val ring = code(File(rfDir, "RingLinkAdapter.kt"))
+        val gattCalls = Regex("""\bg(att)?\??\.(\w+)\(""").findAll(ring).map { it.groupValues[2] }.toSet()
+        assertEquals(setOf("disconnect", "close", "readRemoteRssi"), gattCalls)
+        assertTrue(ring.contains("connectGatt(app, false, callback, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, h)"))
+        // The receiver is unregistered by the same class that registers it.
+        assertTrue(code(File(rfDir, "BluetoothWatch.kt")).contains("unregisterReceiver"))
         // createBond nowhere in the app.
         appDir.walkTopDown().filter { it.extension == "kt" }.forEach { assertFalse(it.name, code(it).contains("createBond")) }
     }

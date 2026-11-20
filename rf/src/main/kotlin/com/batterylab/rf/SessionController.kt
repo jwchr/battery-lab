@@ -196,6 +196,15 @@ class SessionController(
         true
     }
 
+    /**
+     * R11: the screen left the foreground. A rotation (changing configurations) keeps the session;
+     * anything else ends it, off the caller's thread so the screen never waits on a stream.
+     */
+    fun screenStopped(changingConfigurations: Boolean) {
+        if (changingConfigurations || !running) return
+        Thread({ stop(StopReason.LEFT_SCREEN) }, "rf-leave").apply { isDaemon = true; start() }
+    }
+
     /** Ends the session. Safe to call twice and from any thread; streams get 3 seconds to stop. */
     fun stop(reason: String = StopReason.STOP) {
         val a: Active
@@ -305,6 +314,11 @@ class SessionController(
             if (!accepting()) return
             live.dropped += count
             a.writer.dropped(stream.id, count)
+        }
+
+        override fun othersSeen(count: Int) = synchronized(lock) {
+            if (!accepting()) return
+            a.writer.othersSeen(stream.id, count)
         }
 
         override fun failed(reason: String) {

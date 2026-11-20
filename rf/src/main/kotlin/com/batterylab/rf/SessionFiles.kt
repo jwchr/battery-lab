@@ -100,6 +100,7 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
         var lastValue: Int? = null
         var lastChangeNs: Long? = null
         val changeIntervalsMs = ArrayList<Long>()
+        var othersSeen: Int? = null
     }
 
     private val props = LinkedHashMap(initialProps)
@@ -189,6 +190,8 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
 
     fun dropped(streamId: String, count: Int) { streams[streamId]?.let { it.dropped += count } }
 
+    fun othersSeen(streamId: String, count: Int) { streams[streamId]?.let { it.othersSeen = count } }
+
     fun event(tBootNs: Long, tWallMs: Long, type: String, stream: String = "", value: String = "", text: String = ""): Boolean {
         eventSeq++
         val line = Csv.line(listOf(eventSeq.toString(), tBootNs.toString(), tWallMs.toString(), type, stream, value,
@@ -210,7 +213,7 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
         for (st in streams.values) {
             val interval = st.changeIntervalsMs.sorted().let { ResultMath.nearestRank(it, 50) }
             sb.append(Csv.line(listOf(st.id, st.kind, st.unit, FileNames.obs(st.id), Num.d(st.nominalRateHz),
-                st.rows.toString(), st.bytes.toString(), st.dropped.toString(), Num.opt(interval), "")))
+                st.rows.toString(), st.bytes.toString(), st.dropped.toString(), Num.opt(interval), st.othersSeen?.toString() ?: "")))
         }
         writeAtomically(File(dir, FileNames.STREAMS), sb.toString())
     }

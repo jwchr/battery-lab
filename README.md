@@ -89,14 +89,20 @@ not expose it. Exported values preserve their data sources and actual timestamps
 
 ### RF Lab
 
-"Open RF Lab" on the main screen opens a separate screen that shows the phone's Wi-Fi link
-signal in dBm, once per second, for up to 10 minutes (90 seconds by default). It uses only
-the network-state permission the app already has and reads no network name. Sessions are
+"Open RF Lab" on the main screen opens a separate screen that shows signal strength in dBm
+for up to 10 minutes (90 seconds by default). "My links" records the phone's Wi-Fi link
+(through the network-state permission the app already has, reading no network name) and the
+link signal of the Ring chosen in Battery Lab, read once per second over a connection that
+exists only during the session. "My devices" adds a Bluetooth scan: rows for the Ring only,
+and for every other device just a count and the strongest signal each second, with no
+address or name. Sessions are
 files under the app's private `files/rf/` folder, which no backup includes, and can be
 marked, replayed, exported and imported as a zip through the system file dialogs. A
 simulated session shows how it works without a radio. Each session adds two lines to the
-diagnostics log (scope and length) and nothing else to the battery database. Bluetooth
-streams (Ring link and scanning) come in a later build.
+diagnostics log (scope and length) and nothing else to the battery database.
+
+RF Lab scanning also needs Nearby devices and Precise location, because Android requires them
+for scan results. Battery Lab reads no GPS position.
 
 ## Design and security
 
@@ -105,7 +111,7 @@ streams (Ring link and scanning) come in a later build.
 - No health sensor data is accessed.
 - Ring device address is saved locally and in the exported device ID to preserve a distinct
   history if the user switches Rings. Review this field before sharing exported CSVs.
-- No BLE scanning: enumerates only already-bonded devices, with explicit manual selection.
+- Scanning happens only inside an RF Lab session you start, never in the background. The battery features still use only bonded devices you select.
 - On Ring BLE failure, sampling logs the error and does not attempt rapid reconnect loops.
 
 ## References

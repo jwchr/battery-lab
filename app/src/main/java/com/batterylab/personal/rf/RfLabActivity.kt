@@ -1,12 +1,15 @@
 package com.batterylab.personal.rf
 
+import android.Manifest
 import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -17,8 +20,11 @@ import android.widget.LinearLayout
 import android.widget.Toast
 import com.batterylab.personal.Background
 import com.batterylab.personal.Palette
+import com.batterylab.personal.PollScheduler
 import com.batterylab.personal.StyledActivity
+import com.batterylab.rf.BleScanHub
 import com.batterylab.rf.FileNames
+import com.batterylab.rf.IdleStream
 import com.batterylab.rf.ImportResult
 import com.batterylab.rf.Keys
 import com.batterylab.rf.Kinds
@@ -26,6 +32,8 @@ import com.batterylab.rf.Props
 import com.batterylab.rf.Provenance
 import com.batterylab.rf.Replay
 import com.batterylab.rf.ResultMath
+import com.batterylab.rf.RingLinkStream
+import com.batterylab.rf.Scheduler
 import com.batterylab.rf.Scope
 import com.batterylab.rf.SessionArchive
 import com.batterylab.rf.SessionController
@@ -35,6 +43,7 @@ import com.batterylab.rf.StartRequest
 import com.batterylab.rf.StartResult
 import com.batterylab.rf.Status
 import com.batterylab.rf.StopReason
+import com.batterylab.rf.Stream
 import com.batterylab.rf.StreamView
 import com.batterylab.rf.TracePoint
 import com.batterylab.rf.WindowStats
@@ -51,6 +60,7 @@ import java.util.Locale
 class RfLabActivity : StyledActivity() {
     private lateinit var rf: SessionController
     private var durationS = SessionController.DEFAULT_DURATION_S
+    private var scope = Scope.MY_LINKS
     private var liveBox: LinearLayout? = null
     private var resultId: String? = null
     private var result: SessionResult? = null
@@ -64,12 +74,14 @@ class RfLabActivity : StyledActivity() {
 
     private val EXPORT_ZIP = 201
     private val IMPORT_ZIP = 202
+    private val RF_PERMISSIONS = 203
     private val durations = listOf(90 to "90 s", 180 to "3 min", 300 to "5 min", 600 to "10 min")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         rf = RfRuntime.controller(this)
         durationS = savedInstanceState?.getInt("durationS", durationS) ?: durationS
+        scope = Scope.parse(savedInstanceState?.getString("scope"))?.takeIf { it != Scope.EVERYTHING_NEARBY } ?: scope
         pendingExportId = savedInstanceState?.getString("exportId")
         resultId = savedInstanceState?.getString("resultId") ?: rf.lastEndedId
         setUpPage()
@@ -78,6 +90,7 @@ class RfLabActivity : StyledActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putInt("durationS", durationS)
+        outState.putString("scope", scope.id)
         pendingExportId?.let { outState.putString("exportId", it) }
         resultId?.let { outState.putString("resultId", it) }
     }
@@ -97,7 +110,7 @@ class RfLabActivity : StyledActivity() {
     override fun onStop() {
         super.onStop()
         // Rotation keeps the session; leaving the screen ends it (R11), off the main thread.
-        if (!isChangingConfigurations && rf.running) Thread({ rf.stop(StopReason.LEFT_SCREEN) }, "rf-leave").start()
+        rf.screenStopped(isChangingConfigurations)
         if (!isChangingConfigurations) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
@@ -138,13 +151,17 @@ class RfLabActivity : StyledActivity() {
 
     private fun renderSetup() {
         section("New session", "Choose a scope", "The scope is fixed once the session starts.").apply {
-            addView(selectable("My links", selected = true) { })
-            addView(label("Your Wi-Fi link now. The Ring link arrives in the next build.", 12.5f))
-            addView(selectable("My devices: coming in a later build", selected = false, enabled = false) {
-                toast("Scanning arrives in a later build")
+            addView(selectable("My links", selected = scope == Scope.MY_LINKS) { scope = Scope.MY_LINKS; render() })
+            addView(label("Your Wi-Fi link and your Ring's link signal. No scanning.", 12.5f))
+            val canScan = Build.VERSION.SDK_INT >= 31
+            addView(selectable(if (canScan) "My devices" else "My devices: needs Android 12 or later",
+                selected = scope == Scope.MY_DEVICES, enabled = canScan) {
+                if (canScan) { scope = Scope.MY_DEVICES; render() } else toast("Scanning needs Android 12 or later")
             })
+            addView(label("Adds a Bluetooth scan. Rows are kept for your Ring only; for every other device, " +
+                "just a count and the strongest signal each second.", 12.5f))
             addView(selectable("Everything nearby: coming in a later build", selected = false, enabled = false) {
-                toast("Scanning arrives in a later build")
+                toast("Everything nearby arrives in a later build")
             })
             addView(label("Length", 13f, ink, bold = true).apply { setPadding(0, dp(12), 0, 0) })
             addView(chipRow(*durations.map { (s, text) ->
@@ -162,10 +179,64 @@ class RfLabActivity : StyledActivity() {
         render()
     }
 
+    private fun granted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
+
+    /**
+     * R27: the Ring link needs Nearby devices (connect), which Battery Lab already uses for Ring
+     * reads. The first use of a scanning scope explains why, then asks for scan and Precise location
+     * together. The session starts whatever the answer; a stream without its permission says so.
+     */
     private fun startLive() {
+        val needed = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= 31 && PollScheduler.ringAddress(this) != null &&
+            !granted(Manifest.permission.BLUETOOTH_CONNECT)) needed += Manifest.permission.BLUETOOTH_CONNECT
+        val scanMissing = scope == Scope.MY_DEVICES && Build.VERSION.SDK_INT >= 31 &&
+            SCAN_PERMISSIONS.any { !granted(it) }
+        if (scanMissing) needed += SCAN_PERMISSIONS
+        when {
+            needed.isEmpty() -> beginLive()
+            scanMissing -> AlertDialog.Builder(this).setTitle("Scanning")
+                .setMessage(SCAN_TEXT)
+                .setPositiveButton("Continue") { _, _ -> requestPermissions(needed.toTypedArray(), RF_PERMISSIONS) }
+                .setNegativeButton("Cancel", null)
+                .show()
+            else -> requestPermissions(needed.toTypedArray(), RF_PERMISSIONS)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == RF_PERMISSIONS && !rf.running) beginLive()
+    }
+
+    private fun beginLive() {
         val app = applicationContext
-        started(rf.start(StartRequest(Scope.MY_LINKS, Provenance.LIVE, durationS,
-            streams = { listOf(WifiLinkStream(app)) })))
+        val chosen = scope
+        val ring = PollScheduler.ringAddress(app)
+        started(rf.start(StartRequest(chosen, Provenance.LIVE, durationS, streams = { sch -> liveStreams(app, chosen, ring, sch) })))
+    }
+
+    /** The streams for a scope. The Ring's address stays in memory, for connecting and matching only. */
+    private fun liveStreams(app: Context, chosen: Scope, ring: String?, sch: Scheduler): List<Stream> {
+        val list = mutableListOf<Stream>(WifiLinkStream(app))
+        list += if (ring == null) IdleStream("ring_link", Kinds.RING_LINK, Status.NO_TARGET)
+            else RingLinkStream(RingLinkAdapter(app, ring), sch)
+        if (chosen == Scope.MY_DEVICES) {
+            val hub = BleScanHub(BleScanAdapter(app), sch, { ring != null && it.equals(ring, ignoreCase = true) })
+            list += hub.scanStream
+            list += hub.othersStream
+        }
+        return list
+    }
+
+    companion object {
+        private val SCAN_PERMISSIONS = listOf(Manifest.permission.BLUETOOTH_SCAN,
+            Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+
+        /** R27, word for word. */
+        const val SCAN_TEXT = "Scanning lists the Bluetooth and Wi-Fi devices near you. Android only gives apps " +
+            "these results when Precise location is allowed, and it can withhold them while Location is off. " +
+            "Battery Lab does not read your GPS position and has no internet access. Scan data stays on this phone."
     }
 
     private fun startSimulated() {
@@ -199,9 +270,6 @@ class RfLabActivity : StyledActivity() {
             addView(badges(snap.provenance, snap.scope, snap.imported))
             liveBox = LinearLayout(this@RfLabActivity).apply { orientation = LinearLayout.VERTICAL }
             addView(liveBox)
-            if (snap.scope == Scope.MY_LINKS && snap.provenance == Provenance.LIVE) {
-                addView(label("Ring link: coming in the next build.", 12.5f))
-            }
             button("Stop", primary = true) { Thread({ rf.stop() }, "rf-stop").start() }
         }
         section("Markers", null, "Tap when you change what you are doing. A marker window runs to the next " +
@@ -236,6 +304,8 @@ class RfLabActivity : StyledActivity() {
     private fun streamName(id: String, kind: String) = when (kind) {
         Kinds.WIFI_LINK -> "Wi-Fi link"
         Kinds.RING_LINK -> "Ring link"
+        Kinds.BLE_SCAN -> "Ring broadcasts (Bluetooth scan)"
+        Kinds.BLE_OTHERS -> "Other devices (strongest signal each second)"
         else -> id
     }
 
@@ -273,7 +343,8 @@ class RfLabActivity : StyledActivity() {
         Status.BUSY -> "Busy"
         Status.BLOCKED_BY_TEST -> "Blocked by a battery test"
         Status.NO_VALUE -> "Connected, but Android gave no signal value"
-        Status.UNSUPPORTED -> "Needs Android 10 or later"
+        Status.UNSUPPORTED -> "Not supported on this Android version"
+        Status.NO_TARGET -> "Choose your Ring in Battery Lab first"
         Status.ERROR -> "Stopped after an error"
         Status.STARTING -> "Starting"
         else -> "Waiting for the first reading"

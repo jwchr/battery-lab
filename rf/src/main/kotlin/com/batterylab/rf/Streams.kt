@@ -52,6 +52,7 @@ object Status {
     const val LOCATION_OFF = "location_off"
     const val BUSY = "busy"
     const val BLOCKED_BY_TEST = "blocked_by_test"
+    const val NO_TARGET = "no_target"
     const val UNSUPPORTED = "unsupported"
     const val ERROR = "error"
     const val ENDED = "ended"
@@ -81,6 +82,8 @@ interface StreamSink {
     /** A status change; written as an event only when it differs from the last one. */
     fun status(status: String, detail: String = "")
     fun dropped(count: Int)
+    /** Distinct other devices heard so far this session, for streams.csv (others_seen). */
+    fun othersSeen(count: Int) { }
     /** A stream error. Ends this stream only; the session and other streams continue. */
     fun failed(reason: String)
 }

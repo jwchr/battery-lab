@@ -220,6 +220,15 @@ class RingReader(
         private val WRITE_UUID = UUID.fromString("63e30bad-4206-4596-839f-e47cbf7a4b5d")
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
 
+        /**
+         * RF Lab's ring_link holds this same one-connection lock from before connect until after
+         * close (R7), so a battery read never overlaps it. True when the lock was free and is now held.
+         */
+        fun tryTakeRingGate(): Boolean = inFlight.compareAndSet(false, true)
+
+        /** Releases the lock taken by [tryTakeRingGate]. Called exactly once per successful take. */
+        fun releaseRingGate() = inFlight.set(false)
+
         /** Name-only hint for sorting the picker; never used to decide a device's identity. */
         fun looksLikeRing(name: String?): Boolean = name?.contains("ring", ignoreCase = true) == true
 

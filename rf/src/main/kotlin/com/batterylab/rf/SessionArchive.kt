@@ -46,8 +46,9 @@ object SessionArchive {
      * and only then renames that folder into rf/sessions/ under a new id, marked imported. On any
      * failure the temporary file and the staging folder are deleted and one reason is returned.
      */
+    /** [activeId] is read when old sessions are removed, so a recording in progress is never one of them. */
     fun import(input: InputStream, store: SessionStore, wallMs: Long,
-               maxArchiveBytes: Long = MAX_ARCHIVE_BYTES): ImportResult {
+               maxArchiveBytes: Long = MAX_ARCHIVE_BYTES, activeId: () -> String? = { null }): ImportResult {
         store.stagingDir.mkdirs()
         val tag = System.nanoTime().toString()
         val tmp = File(store.stagingDir, "import-$tag.zip")
@@ -64,7 +65,7 @@ object SessionArchive {
             }
             store.sessionsDir.mkdirs()
             Files.move(folder.toPath(), store.dir(id).toPath(), StandardCopyOption.ATOMIC_MOVE)
-            store.enforceRetention(keepId = id)
+            store.enforceRetention(keep = setOfNotNull(id, activeId()))
             return ImportResult.Imported(id)
         } catch (e: Reject) {
             return ImportResult.Rejected(e.reason)

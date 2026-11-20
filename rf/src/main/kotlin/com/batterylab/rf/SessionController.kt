@@ -1,6 +1,8 @@
 package com.batterylab.rf
 
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 class StartRequest(
     val scope: Scope,
@@ -85,6 +87,8 @@ class SessionController(
         val timers = mutableListOf<Cancellable>()
         var stopping = false
         var stopRequested = false
+        /** Counted down once every stream's start() has returned or been skipped. */
+        val startupDone = CountDownLatch(1)
     }
 
     private val lock = Any()
@@ -139,7 +143,7 @@ class SessionController(
             try {
                 writer = SessionWriter(store.dir(id), props, sizeLimitBytes)
                 streams = req.streams(scheduler)
-                for (s in streams) writer.addStream(s.id, s.kind, s.unit, s.nominalRateHz, s.extraColumns)
+                for (s in streams) writer.addStream(s.id, s.kind, s.unit, s.nominalRateHz, s.extraColumns, s.binary)
             } catch (e: Exception) {
                 scheduler.shutdown()
                 store.dir(id).deleteRecursively()
@@ -150,20 +154,26 @@ class SessionController(
             writer.event(startNs, startWall, EventType.SESSION, value = "start")
             active = a
         }
-        store.enforceRetention(keepId = a.id)
-        hooks?.started(a.scope, a.durationS)
-        for (s in a.streams) {
-            val sink = SinkImpl(a, s)
-            sink.status(Status.STARTING)
-            try { s.start(sink) } catch (e: SecurityException) {
-                sink.status(Status.PERMISSION_NEEDED); sink.failed("SecurityException")
-            } catch (e: Exception) { sink.failed(e.javaClass.simpleName) }
-        }
-        synchronized(lock) {
-            if (active !== a || a.stopping) return StartResult.Started(a.id)
-            a.timers += a.scheduler.schedule(a.durationS * SECOND_NS) { stop(StopReason.TIME_LIMIT) }
-            scheduleTick(a)
-            for ((offset, label) in req.replayMarkers) a.timers += a.scheduler.schedule(offset) { marker(label) }
+        try {
+            store.enforceRetention(keep = setOf(a.id))
+            hooks?.started(a.scope, a.durationS)
+            for (s in a.streams) {
+                // A stop that arrives during startup waits for this loop, then stops every stream.
+                if (synchronized(lock) { a.stopping }) break
+                val sink = SinkImpl(a, s)
+                sink.status(Status.STARTING)
+                try { s.start(sink) } catch (e: SecurityException) {
+                    sink.status(Status.PERMISSION_NEEDED); sink.failed("SecurityException")
+                } catch (e: Exception) { sink.failed(e.javaClass.simpleName) }
+            }
+            synchronized(lock) {
+                if (active !== a || a.stopping) return StartResult.Started(a.id)
+                a.timers += a.scheduler.schedule(a.durationS * SECOND_NS) { stopSession(a, StopReason.TIME_LIMIT) }
+                scheduleTick(a)
+                for ((offset, label) in req.replayMarkers) a.timers += a.scheduler.schedule(offset) { markerFor(a, label) }
+            }
+        } finally {
+            a.startupDone.countDown()
         }
         return StartResult.Started(a.id)
     }
@@ -185,9 +195,12 @@ class SessionController(
     }
 
     /** Adds a marker at the current time. Returns false outside a session. */
-    fun marker(label: String): Boolean = synchronized(lock) {
+    fun marker(label: String): Boolean = markerFor(null, label)
+
+    /** With [expected] set, adds the marker only while that session is the active one. */
+    private fun markerFor(expected: Active?, label: String): Boolean = synchronized(lock) {
         val a = active ?: return false
-        if (a.stopping) return false
+        if ((expected != null && a !== expected) || a.stopping) return false
         val now = a.scheduler.bootNs()
         if (!a.writer.event(now, a.scheduler.wallMs(), EventType.MARKER, text = label)) {
             requestStop(a, StopReason.SIZE_LIMIT); return false
@@ -206,40 +219,58 @@ class SessionController(
     }
 
     /** Ends the session. Safe to call twice and from any thread; streams get 3 seconds to stop. */
-    fun stop(reason: String = StopReason.STOP) {
+    fun stop(reason: String = StopReason.STOP) = stopSession(null, reason)
+
+    /**
+     * With [expected] set, stops only that session: a timer or request from an ended session that
+     * fires late can never stop the next one.
+     */
+    private fun stopSession(expected: Active?, reason: String) {
         val a: Active
         synchronized(lock) {
             a = active ?: return
+            if (expected != null && a !== expected) return
             if (a.stopping) return
             a.stopping = true
             a.timers.forEach { it.cancel() }
             a.timers.clear()
         }
+        // Streams still starting get stopped only after their start() returns (bounded).
+        try { a.startupDone.await(STOP_TIMEOUT_MS, TimeUnit.MILLISECONDS) } catch (_: InterruptedException) { }
         stopStreams(a.streams)
-        val actualS: Int
-        synchronized(lock) {
-            val end = a.scheduler.bootNs()
-            val endWall = a.scheduler.wallMs()
-            actualS = ((end - a.startNs) / SECOND_NS).toInt()
-            a.live.values.filter { !it.ended }.forEach {
-                it.status = Status.ENDED
-                a.writer.event(end, endWall, EventType.STATUS, it.id, Status.ENDED)
+        var actualS = 0
+        try {
+            synchronized(lock) {
+                val end = a.scheduler.bootNs()
+                val endWall = a.scheduler.wallMs()
+                actualS = ((end - a.startNs) / SECOND_NS).toInt()
+                var saved = try {
+                    a.live.values.filter { !it.ended }.forEach {
+                        it.status = Status.ENDED
+                        a.writer.event(end, endWall, EventType.STATUS, it.id, Status.ENDED)
+                    }
+                    a.writer.event(end, endWall, EventType.SESSION, value = "stop", text = reason)
+                    true
+                } catch (_: Exception) { false }
+                // A failed write is kept as interrupted, never reported as complete.
+                saved = try {
+                    a.writer.finish(mapOf(Keys.END_BOOT_NS to end.toString(), Keys.END_WALL_MS to endWall.toString(),
+                        Keys.STATE to if (saved) Keys.STATE_COMPLETE else Keys.STATE_INTERRUPTED, Keys.STOP_REASON to reason)) && saved
+                } catch (_: Exception) { false }
+                lastSnapshot = snapshotOf(a, end, running = false, stopReason = if (saved) reason else StopReason.INTERRUPTED)
             }
-            a.writer.event(end, endWall, EventType.SESSION, value = "stop", text = reason)
-            try {
-                a.writer.finish(mapOf(Keys.END_BOOT_NS to end.toString(), Keys.END_WALL_MS to endWall.toString(),
-                    Keys.STATE to Keys.STATE_COMPLETE, Keys.STOP_REASON to reason))
-            } catch (_: Exception) { }
-            lastSnapshot = snapshotOf(a, end, running = false, stopReason = reason)
-            lastEndedId = a.id
-            active = null
+        } finally {
+            synchronized(lock) {
+                lastEndedId = a.id
+                if (active === a) active = null
+            }
+            try { a.scheduler.shutdown() } catch (_: Exception) { }
         }
-        a.scheduler.shutdown()
         hooks?.ended(a.scope, actualS)
     }
 
+    /** Every stream stops on its own thread; the whole stop waits 3 seconds at most. */
     private fun stopStreams(streams: List<Stream>) {
-        if (streams.size == 1) { try { streams[0].stop() } catch (_: Exception) { }; return }
         val threads = streams.map { s ->
             Thread({ try { s.stop() } catch (_: Exception) { } }, "rf-stop-${s.id}").apply { isDaemon = true; start() }
         }
@@ -253,7 +284,7 @@ class SessionController(
     private fun requestStop(a: Active, reason: String) {
         if (a.stopRequested) return
         a.stopRequested = true
-        a.scheduler.schedule(0) { stop(reason) }
+        a.scheduler.schedule(0) { stopSession(a, reason) }
     }
 
     /** The running session, or the last one to end in this process. */
@@ -329,8 +360,9 @@ class SessionController(
                 live.detail = reason
                 live.ended = true
             }
-            // Off the caller's thread: the stream may be reporting from its own thread, which stop() joins.
-            a.scheduler.schedule(0) { try { stream.stop() } catch (_: Exception) { } }
+            // On its own thread: the stream may be reporting from a thread its stop() joins, and a stop
+            // that hangs must not hold the session's scheduler.
+            Thread({ try { stream.stop() } catch (_: Exception) { } }, "rf-fail-${stream.id}").apply { isDaemon = true; start() }
         }
     }
 }
@@ -381,6 +413,7 @@ class ReplayStream(
     override val unit = info.unit.ifEmpty { "dBm" }
     override val nominalRateHz = info.raw["nominal_rate_hz"]?.toDoubleOrNull() ?: 0.0
     override val extraColumns = table.header.filter { it !in Columns.OBS }
+    override val binary = bin != null
 
     @Volatile private var running = false
     private var task: Cancellable? = null

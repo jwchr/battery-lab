@@ -84,7 +84,8 @@ fun updateProperties(dir: File, change: (LinkedHashMap<String, String>) -> Unit)
 
 /**
  * Appends one session's rows. Not thread-safe by itself; the controller serializes calls.
- * Every write counts its bytes against [sizeLimitBytes]; a write past it is refused.
+ * Every byte on disk, headers and metadata included, counts against [sizeLimitBytes]; a write past
+ * it is refused. [META_RESERVE_BYTES] of the limit stays free for the final metadata rewrite.
  */
 class SessionWriter(val dir: File, initialProps: Map<String, String>, private val sizeLimitBytes: Long) {
     private class Out(val file: File) {
@@ -109,23 +110,40 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
     private val binOut = HashMap<String, Out>()
     private val eventsOut: Out
     private var eventSeq = 0L
+    /** The current size of the two files that are replaced rather than appended. */
+    private var propsBytes = 0L
+    private var streamsTableBytes = 0L
     var totalBytes = 0L
         private set
 
+    companion object {
+        const val META_RESERVE_BYTES = 16L * 1024
+    }
+
     init {
         dir.mkdirs()
-        writeAtomically(File(dir, FileNames.PROPERTIES), Props.write(props))
+        writeProps()
         eventsOut = Out(File(dir, FileNames.EVENTS))
         rawWrite(eventsOut, Csv.line(Columns.EVENTS))
-        totalBytes += File(dir, FileNames.PROPERTIES).length()
+    }
+
+    private fun writeProps() {
+        val text = Props.write(props)
+        writeAtomically(File(dir, FileNames.PROPERTIES), text)
+        val size = text.toByteArray(Charsets.UTF_8).size.toLong()
+        totalBytes += size - propsBytes
+        propsBytes = size
     }
 
     fun streamStates(): List<StreamState> = streams.values.toList()
 
-    fun addStream(id: String, kind: String, unit: String, nominalRateHz: Double, extraColumns: List<String>) {
+    /** A [binary] stream always gets the bin_offset and bin_length columns its rows point with. */
+    fun addStream(id: String, kind: String, unit: String, nominalRateHz: Double, extraColumns: List<String>,
+                  binary: Boolean = false) {
         require(FileNames.validStreamId(id)) { "Bad stream id" }
         require(id !in streams) { "Duplicate stream id" }
-        val cols = Columns.OBS + extraColumns.filter { it !in Columns.OBS }
+        val extra = extraColumns + (if (binary) listOf(Columns.BIN_OFFSET, Columns.BIN_LENGTH) else emptyList())
+        val cols = Columns.OBS + extra.filter { it !in Columns.OBS }.distinct()
         val st = StreamState(id, kind, unit, nominalRateHz, cols)
         streams[id] = st
         val out = Out(File(dir, FileNames.obs(id)))
@@ -134,14 +152,19 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
         writeStreamsTable()
     }
 
+    /** Header lines. Past the limit this throws, so the session does not start. */
     private fun rawWrite(out: Out, text: String): Int {
         val bytes = text.toByteArray(Charsets.UTF_8)
+        if (!fits(bytes.size)) throw java.io.IOException("The session size limit is too small for its headers")
         out.stream.write(bytes)
         totalBytes += bytes.size
         return bytes.size
     }
 
-    private fun fits(len: Int) = totalBytes + len <= sizeLimitBytes
+    /** Room kept for the final streams.csv and session.properties: 16 KB, or an eighth of a small limit. */
+    private val reserve = minOf(META_RESERVE_BYTES, sizeLimitBytes / 8)
+
+    private fun fits(len: Int) = totalBytes + len <= sizeLimitBytes - reserve
 
     /** Appends one obs row. Returns false, writing nothing, when the size limit would be passed. */
     fun writeObs(streamId: String, o: Obs): Boolean {
@@ -177,6 +200,8 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
     /** Appends [bytes] to bin_<stream>.dat unchanged and records where they landed. */
     fun writeBinary(streamId: String, tBootNs: Long, tWallMs: Long, bytes: ByteArray): Boolean {
         val st = streams[streamId] ?: return true
+        // Without its reference columns the payload could not be found again: count it as dropped.
+        if (Columns.BIN_OFFSET !in st.columns || Columns.BIN_LENGTH !in st.columns) { st.dropped++; return true }
         if (!fits(bytes.size + 96)) return false
         val offset = st.binBytes
         val out = binOut.getOrPut(streamId) { Out(File(dir, FileNames.bin(streamId))) }
@@ -215,16 +240,29 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
             sb.append(Csv.line(listOf(st.id, st.kind, st.unit, FileNames.obs(st.id), Num.d(st.nominalRateHz),
                 st.rows.toString(), st.bytes.toString(), st.dropped.toString(), Num.opt(interval), st.othersSeen?.toString() ?: "")))
         }
-        writeAtomically(File(dir, FileNames.STREAMS), sb.toString())
+        val text = sb.toString()
+        writeAtomically(File(dir, FileNames.STREAMS), text)
+        val size = text.toByteArray(Charsets.UTF_8).size.toLong()
+        totalBytes += size - streamsTableBytes
+        streamsTableBytes = size
     }
 
-    /** Closes every file and rewrites streams.csv and session.properties with the end state. */
-    fun finish(endProps: Map<String, String>) {
-        try { flush() } catch (_: Exception) { }
-        (obsOut.values + binOut.values + eventsOut).forEach { try { it.stream.close() } catch (_: Exception) { } }
+    /**
+     * Closes every file and rewrites streams.csv and session.properties with the end state.
+     * Returns false when a data file failed to flush or close; the session is then stored as
+     * interrupted instead of [endProps]'s state, because some accepted rows may be missing.
+     */
+    fun finish(endProps: Map<String, String>): Boolean {
+        var ok = try { flush(); true } catch (_: Exception) { false }
+        (obsOut.values + binOut.values + eventsOut).forEach { try { it.stream.close() } catch (_: Exception) { ok = false } }
         writeStreamsTable()
         props.putAll(endProps)
-        writeAtomically(File(dir, FileNames.PROPERTIES), Props.write(props))
+        if (!ok) {
+            props[Keys.STATE] = Keys.STATE_INTERRUPTED
+            props[Keys.STOP_REASON] = StopReason.INTERRUPTED
+        }
+        writeProps()
+        return ok
     }
 }
 
@@ -327,13 +365,16 @@ class SessionStore(val root: File) {
 
     fun sizeOf(id: String): Long = dir(id).walkBottomUp().filter { it.isFile }.sumOf { it.length() }
 
-    /** Keeps at most [maxCount] sessions and [maxBytes] in all, removing the oldest first. */
-    fun enforceRetention(keepId: String?, maxCount: Int = MAX_SESSIONS, maxBytes: Long = MAX_TOTAL_BYTES): List<String> {
+    /**
+     * Keeps at most [maxCount] sessions and [maxBytes] in all, removing the oldest first. Sessions in
+     * [keep] (the new one and any recording in progress) are never removed.
+     */
+    fun enforceRetention(keep: Set<String>, maxCount: Int = MAX_SESSIONS, maxBytes: Long = MAX_TOTAL_BYTES): List<String> {
         val ids = ids().toMutableList()
         val sizes = ids.associateWith { sizeOf(it) }.toMutableMap()
         val evicted = mutableListOf<String>()
         while (ids.size > maxCount || (sizes.values.sum() > maxBytes && ids.size > 1)) {
-            val victim = ids.firstOrNull { it != keepId } ?: break
+            val victim = ids.firstOrNull { it !in keep } ?: break
             dir(victim).deleteRecursively()
             ids.remove(victim); sizes.remove(victim); evicted.add(victim)
         }

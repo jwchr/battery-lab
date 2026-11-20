@@ -69,6 +69,7 @@ class SessionControllerTest {
         assertEquals(StopReason.SIZE_LIMIT, props(dir)[Keys.STOP_REASON])
         val rows = dir.listFiles()!!.filter { it.name.startsWith("obs_") }.sumOf { it.length() }
         assertTrue(rows < limit)
+        assertTrue("headers and metadata count too", dir.walkBottomUp().filter { it.isFile }.sumOf { it.length() } <= limit)
         assertEquals(16L * 1024 * 1024, SessionController.SIZE_LIMIT_BYTES)
     }
 
@@ -77,7 +78,7 @@ class SessionControllerTest {
         override val id = "flaky"
         override val kind = Kinds.SIMULATED
         override val nominalRateHz = 1.0
-        var stops = 0
+        @Volatile var stops = 0
         override fun start(sink: StreamSink) {
             sch.schedule(3 * SEC) { sink.failed("radio_error") }
         }
@@ -92,6 +93,9 @@ class SessionControllerTest {
         })) as StartResult.Started
         sch.advanceSeconds(5.0)
         assertTrue(c.running)
+        // The failed stream is stopped on its own thread.
+        val t0 = System.nanoTime()
+        while (flaky!!.stops == 0 && System.nanoTime() - t0 < 2_000_000_000L) Thread.sleep(5)
         assertEquals(1, flaky!!.stops)
         val rowsAt5 = c.snapshot()!!.streams.first { it.id == "steady" }.rows
         assertEquals(Status.ERROR, c.snapshot()!!.streams.first { it.id == "flaky" }.status)

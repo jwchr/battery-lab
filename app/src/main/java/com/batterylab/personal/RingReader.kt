@@ -13,6 +13,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -29,7 +30,9 @@ class RingReader(
     private val main = Handler(Looper.getMainLooper())
     private val finished = AtomicBoolean(false)
     @Volatile private var gatt: BluetoothGatt? = null
-    private val deadline = Runnable { complete(null, "Timed out after 20 seconds") }
+    /** The last step reached, so a timeout says where the read stalled. */
+    @Volatile private var stage = "starting"
+    private val deadline = Runnable { complete(null, "Timed out after 20 seconds while $stage") }
     private val closer = Runnable { closeGatt() }
     @Volatile private var rssi: Int? = null
     @Volatile private var holdsLock = false
@@ -54,6 +57,7 @@ class RingReader(
             }
             val device = adapter.getRemoteDevice(address)
             main.postDelayed(deadline, 20_000)
+            step("connecting")
             gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
         } catch (e: Exception) {
             complete(null, "Connection unavailable: ${e.javaClass.simpleName}")
@@ -62,11 +66,18 @@ class RingReader(
 
     fun cancel() = complete(null, "Cancelled")
 
+    /** Logs each step with no address, name or reading, so logs stay safe to share. */
+    private fun step(name: String) {
+        stage = name
+        Log.i(LOG_TAG, "Ring read: $name")
+    }
+
     /** Main thread only: the result waiting for the connection to close. */
     private var pending: Pair<Reading?, String?>? = null
 
     private fun complete(reading: Reading?, error: String?) {
         if (!finished.compareAndSet(false, true)) return
+        Log.i(LOG_TAG, if (reading != null) "Ring read: done" else "Ring read failed: $error")
         main.removeCallbacks(deadline)
         // Hang up now, but release the connection only once Android reports the link is down
         // (or after 2 s), so the Bluetooth stack isn't left holding a half-closed link.
@@ -104,6 +115,7 @@ class RingReader(
             }
             if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
                 try {
+                    step("discovering services")
                     g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
                     if (!g.discoverServices()) complete(null, "BLE service discovery did not start")
                 } catch (e: SecurityException) { complete(null, "Bluetooth permission denied") }
@@ -132,6 +144,7 @@ class RingReader(
                 return
             }
             try {
+                step("subscribing to notifications")
                 if (!g.setCharacteristicNotification(notify, true)) {
                     complete(null, "Could not enable Ring notifications")
                     return
@@ -155,6 +168,7 @@ class RingReader(
                 return
             }
             try {
+                step("waiting for the battery reply")
                 // Channel 11, battery sync request only. No other device commands sent.
                 val batteryRequest = byteArrayOf(0x0b, 0x0b, 0x03)
                 if (Build.VERSION.SDK_INT >= 33) {
@@ -199,6 +213,7 @@ class RingReader(
     }
 
     companion object {
+        private const val LOG_TAG = "BatteryLabRing"
         private val inFlight = AtomicBoolean(false)
         private val DATA_SERVICE = UUID.fromString("00001b1b-0000-1000-8000-00805f9b34fb")
         private val NOTIFY_UUID = UUID.fromString("797ae4e9-2e58-4fe8-b48d-b5c79599fb9b")

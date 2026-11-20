@@ -33,10 +33,15 @@ data class DeviceStats(
     /** Average drain (% per hour) for each local hour of the day, 0..23; null when unseen. */
     val drainByHour: List<Double?>,
     val longestOnBatteryHours: Double,
+    /** Hours spent at 80% or more, plugged in or not (audit #4 roadmap: time at high charge). */
+    val hoursAtOrAbove80: Double = 0.0,
 ) {
     val fullBatteriesUsed: Double get() = percentUsed / 100.0
     val averagePlugIn: Double? get() = charges.filter { it.plugInKnown }.map { it.fromPct }.takeIf { it.isNotEmpty() }?.average()
     val averageUnplug: Double? get() = charges.map { it.toPct }.takeIf { it.isNotEmpty() }?.average()
+    /** Watched charges that were unplugged before 100%, as a share of all watched charges; null with none. */
+    val partialChargeShare: Double? get() = charges.filter { it.observed }.takeIf { it.isNotEmpty() }
+        ?.let { list -> list.count { it.toPct < 100 }.toDouble() / list.size }
     val fastestCharge: ChargeSession? get() = charges.filter { it.ratePerMinute != null }.maxByOrNull { it.ratePerMinute!! }
     val hungriestHour: Int? get() = drainByHour.withIndex().filter { it.value != null }.maxByOrNull { it.value!! }?.index
     val calmestHour: Int? get() = drainByHour.withIndex().filter { it.value != null }.minByOrNull { it.value!! }?.index
@@ -85,7 +90,7 @@ object BatteryStats {
         // Lowest level since the last charge. A drop only counts below it, so a widget wobbling
         // 50 → 51 → 50 adds nothing, and drain across a gap still counts (audit review, 2026-11-16).
         var low: Int? = null
-        var below20 = 0.0; var at100 = 0.0; var charging = 0.0; var onBattery = 0.0
+        var below20 = 0.0; var at100 = 0.0; var high = 0.0; var charging = 0.0; var onBattery = 0.0
         var streakStart: Long? = null; var longest = 0.0
         val hourSum = DoubleArray(24); val hourWeight = DoubleArray(24)
         val charges = mutableListOf<ChargeSession>()
@@ -116,6 +121,7 @@ object BatteryStats {
                 if (dt <= gaps.stepMs) {
                     val h = dt / HOUR
                     if (prev.percent < 20) below20 += h
+                    if (prev.percent >= 80) high += h
                     if (prev.percent == 100 && prevCharging) at100 += h
                     if (prevCharging) charging += h else onBattery += h
                     // Rising steps (a wobble's up-leg, an unseen charge) aren't drain time.
@@ -164,7 +170,7 @@ object BatteryStats {
         val lowest = r.minByOrNull { it.percent }?.let { it.percent to it.timeMs }
         return DeviceStats(r.size, r.firstOrNull()?.timeMs, r.lastOrNull()?.timeMs, used, charges, lowest,
             below20, at100, charging, onBattery,
-            (0 until 24).map { if (hourWeight[it] >= 0.5) hourSum[it] / hourWeight[it] else null }, longest)
+            (0 until 24).map { if (hourWeight[it] >= 0.5) hourSum[it] / hourWeight[it] else null }, longest, high)
     }
 
     fun temperature(readings: List<Reading>): TempStats? {

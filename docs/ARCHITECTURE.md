@@ -133,6 +133,15 @@ A sensible fallback cadence is decided from that data, not assumed.
   `ble_others` (strongest other signal and distinct count per second, counted with a keyed
   hash whose key lives only in memory). `BluetoothWatch` is the session-only Bluetooth on/off
   receiver.
+- Everything nearby (milestone 2): `EmitterTable` numbers every Bluetooth device and Wi-Fi
+  network from 1 and writes `emitters.csv` every 10 s and at the end, with its worst-case size
+  reserved from the start. Each device's key is an HMAC under `InstallKey` (`files/rf/install.key`,
+  never in a session or export); `PinStore` (`files/rf/pins.csv`) maps keys to aliases and
+  `PinMatcher` gives pinned devices their alias in any scan. `WifiScanStream` drives
+  `WifiScanAdapter` (startScan at most every 31 s, a results receiver that exists only during
+  the session, never the connected network). Names are cleaned (`Names.clean`) and kept only in
+  named mode. Export renumbers devices, drops keys, and drops names unless asked. Delete all
+  removes the install key and every pin. `RadioCapabilities` reads feature flags only.
 - A session is a folder `files/rf/sessions/<id>/` with `session.properties` (format 1,
   min_reader 1), `streams.csv`, `events.csv` and one `obs_<stream>.csv` per stream; a
   `bin_<stream>.dat` is kept byte for byte. Statistics are computed from the obs rows when the

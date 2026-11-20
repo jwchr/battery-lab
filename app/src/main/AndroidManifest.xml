@@ -9,6 +9,9 @@
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- RF Lab "Everything nearby" Wi-Fi scan, only inside a session the user starts (R26). -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Read-only: is the phone on Wi-Fi or cellular at each check. Not internet access. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

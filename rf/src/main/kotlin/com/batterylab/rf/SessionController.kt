@@ -14,7 +14,19 @@ class StartRequest(
     val streams: (Scheduler) -> List<Stream>,
     /** Markers to add at these offsets from the start (replay). */
     val replayMarkers: List<Pair<Long, String>> = emptyList(),
+    /** "Everything nearby" only: the session's device table, written to emitters.csv. */
+    val emitters: EmitterTable? = null,
+    /** A replay of an "Everything nearby" session: the source's emitters.csv and identifier mode, copied as they are. */
+    val replayEmitters: String? = null,
+    val replayIdentifierMode: String? = null,
 ) {
+    /** Names are written only in named mode, which needs a device table. */
+    val identifierMode: String get() = replayIdentifierMode
+        ?: if (emitters?.named == true) Keys.MODE_NAMED else Keys.MODE_NONE
+
+    val emittersWorstCase: Long get() = emitters?.worstCaseBytes
+        ?: replayEmitters?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0
+
     /** Default 90 seconds, maximum 10 minutes. */
     val durationS: Int = durationS.coerceIn(1, SessionController.MAX_DURATION_S)
 }
@@ -64,6 +76,8 @@ class SessionController(
         const val STOP_TIMEOUT_MS = 3_000L
         const val TRACE_POINTS = 1_200
         private const val SECOND_NS = 1_000_000_000L
+        /** emitters.csv is rewritten this often, so an interrupted session keeps its device table. */
+        const val EMITTERS_EVERY_S = 10L
     }
 
     private class Live(val id: String, val kind: String) {
@@ -81,6 +95,7 @@ class SessionController(
     private inner class Active(
         val id: String, val scope: Scope, val provenance: Provenance, val durationS: Int,
         val startNs: Long, val scheduler: Scheduler, val writer: SessionWriter, val streams: List<Stream>,
+        val emitters: EmitterTable?,
     ) {
         val live = LinkedHashMap<String, Live>()
         val markers = mutableListOf<Marker>()
@@ -89,6 +104,9 @@ class SessionController(
         /** Set once the streams have stopped: until then a stream's last rows are still written. */
         var sinksClosed = false
         var stopRequested = false
+        var ticks = 0L
+        /** Devices numbered up to this are in emitters.csv on disk. */
+        var emittersOnDisk = 0
         /** Counted down once every stream's start() has returned or been skipped. */
         val startupDone = CountDownLatch(1)
     }
@@ -133,17 +151,20 @@ class SessionController(
             props.putAll(meta())
             props[Keys.PROVENANCE] = req.provenance.name
             props[Keys.SCOPE] = req.scope.id
-            // Milestone 1 writes no device names and no keys.
-            props[Keys.IDENTIFIER_MODE] = "none"
+            props[Keys.IDENTIFIER_MODE] = req.identifierMode
             props[Keys.STATE] = Keys.STATE_RECORDING
             props[Keys.STOP_REASON] = ""
             props[Keys.IMPORTED] = "false"
             props[Keys.DURATION_LIMIT_S] = req.durationS.toString()
             props.putAll(req.extraProps)
             val streams: List<Stream>
+            var emittersOnDisk = 0
             val writer: SessionWriter
             try {
-                writer = SessionWriter(store.dir(id), props, sizeLimitBytes)
+                writer = SessionWriter(store.dir(id), props, sizeLimitBytes, req.emittersWorstCase)
+                // The device table is on disk from the start, so no row ever points at a device it lacks.
+                req.emitters?.let { emittersOnDisk = it.snapshot().let { (text, n) -> writer.writeEmitters(text); n } }
+                req.replayEmitters?.let { writer.writeEmitters(it) }
                 streams = req.streams(scheduler)
                 for (s in streams) writer.addStream(s.id, s.kind, s.unit, s.nominalRateHz, s.extraColumns, s.binary)
             } catch (e: Exception) {
@@ -151,7 +172,8 @@ class SessionController(
                 store.dir(id).deleteRecursively()
                 return StartResult.Refused("Could not create the session: ${e.javaClass.simpleName}")
             }
-            a = Active(id, req.scope, req.provenance, req.durationS, startNs, scheduler, writer, streams)
+            a = Active(id, req.scope, req.provenance, req.durationS, startNs, scheduler, writer, streams, req.emitters)
+            a.emittersOnDisk = emittersOnDisk
             streams.forEach { a.live[it.id] = Live(it.id, it.kind) }
             writer.event(startNs, startWall, EventType.SESSION, value = "start")
             active = a
@@ -193,7 +215,14 @@ class SessionController(
             val a = active ?: return
             if (a.stopping) return
             try { a.writer.flush() } catch (_: Exception) { }
+            a.ticks++
+            if (a.ticks % EMITTERS_EVERY_S == 0L) a.emitters?.let { rewriteEmitters(a, it) }
         }
+    }
+
+    /** Lock held. The whole table: fresh counts and signals for the device list. */
+    private fun rewriteEmitters(a: Active, t: EmitterTable) {
+        try { val (text, n) = t.snapshot(); a.writer.writeEmitters(text); a.emittersOnDisk = n } catch (_: Exception) { }
     }
 
     /** Adds a marker at the current time. Returns false outside a session. */
@@ -253,8 +282,11 @@ class SessionController(
                         a.writer.event(end, endWall, EventType.STATUS, it.id, Status.ENDED)
                     }
                     a.writer.event(end, endWall, EventType.SESSION, value = "stop", text = reason)
+                    a.emitters?.let { a.writer.writeEmitters(it.snapshot().first) }
                     true
                 } catch (_: Exception) { false }
+                // R12: addresses and the key leave memory with the session.
+                a.emitters?.clear()
                 // A failed write is kept as interrupted, never reported as complete.
                 saved = try {
                     a.writer.finish(mapOf(Keys.END_BOOT_NS to end.toString(), Keys.END_WALL_MS to endWall.toString(),
@@ -320,11 +352,22 @@ class SessionController(
 
         override fun observe(obs: Obs) = synchronized(lock) {
             if (!accepting()) return
+            // A new device's line goes to disk before the row that points at it.
+            val t = a.emitters
+            if (t != null && obs.emitter > a.emittersOnDisk) try {
+                val (text, n) = t.linesAfter(a.emittersOnDisk)
+                a.writer.appendEmitters(text)
+                a.emittersOnDisk = n
+            } catch (_: Exception) { }
             val before = a.writer.totalBytes
             if (!a.writer.writeObs(stream.id, obs)) { requestStop(a, StopReason.SIZE_LIMIT); return }
             live.rows++
             live.bytes += a.writer.totalBytes - before
-            recordPoint(obs.tBootNs, obs.rssiDbm, obs.status == Status.OK)
+            // The Bluetooth scan's trace follows the Ring only; other devices and pins have the device list.
+            // A table with no alias column is from before milestone 2 and holds Ring rows only.
+            if (stream.kind != Kinds.BLE_SCAN || BleScanHub.ALIAS !in stream.extraColumns ||
+                obs.extra[BleScanHub.ALIAS] == PinStore.RING)
+                recordPoint(obs.tBootNs, obs.rssiDbm, obs.status == Status.OK)
         }
 
         override fun binary(tBootNs: Long, tWallMs: Long, bytes: ByteArray) = synchronized(lock) {
@@ -349,6 +392,13 @@ class SessionController(
             if (!accepting()) return
             live.dropped += count
             a.writer.dropped(stream.id, count)
+        }
+
+        override fun note(value: String, text: String) = synchronized(lock) {
+            if (!accepting()) return
+            if (!a.writer.event(a.scheduler.bootNs(), a.scheduler.wallMs(), EventType.NOTE, stream.id, value, text)) {
+                requestStop(a, StopReason.SIZE_LIMIT)
+            }
         }
 
         override fun othersSeen(count: Int) = synchronized(lock) {
@@ -393,6 +443,8 @@ object Replay {
             provenance = provenance,
             durationS = durationS,
             extraProps = mapOf(Keys.SOURCE_ID to info.id),
+            replayEmitters = java.io.File(dir, FileNames.EMITTERS).takeIf { it.isFile }?.readText(Charsets.UTF_8),
+            replayIdentifierMode = info.props[Keys.IDENTIFIER_MODE]?.takeIf { java.io.File(dir, FileNames.EMITTERS).isFile },
             streams = { sch ->
                 info.streams.map { s ->
                     val bin = java.io.File(dir, FileNames.bin(s.id)).takeIf { it.isFile }?.readBytes()

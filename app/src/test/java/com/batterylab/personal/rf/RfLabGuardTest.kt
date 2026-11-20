@@ -8,7 +8,7 @@ import java.io.File
 
 /**
  * Source checks for RF Lab in the app. T9 (isolation and forbidden calls), T10 (the manifest
- * permission list for PR B, backups), R12 (no background pieces) and R18 (two probe lines).
+ * permission list, backups), R12 (no background pieces) and R18 (two probe lines).
  */
 class RfLabGuardTest {
     private val rfDir = File("src/main/java/com/batterylab/personal/rf")
@@ -43,7 +43,7 @@ class RfLabGuardTest {
 
     private fun manifest() = File("src/main/AndroidManifest.xml").readText()
 
-    @Test fun manifestPermissionsArePrAPlusTheThreeScanPermissions() {
+    @Test fun manifestPermissionsArePrAPlusTheScanPermissions() {
         val perms = Regex("""<uses-permission\s+android:name="([^"]+)"([^>]*)/>""").findAll(manifest())
             .map { (it.groupValues[1] + " " + it.groupValues[2]).replace(Regex("\\s+"), " ").trim() }.toList()
         assertEquals(listOf(
@@ -52,6 +52,8 @@ class RfLabGuardTest {
             "android.permission.BLUETOOTH_SCAN",
             "android.permission.ACCESS_FINE_LOCATION",
             "android.permission.ACCESS_COARSE_LOCATION",
+            "android.permission.ACCESS_WIFI_STATE",
+            "android.permission.CHANGE_WIFI_STATE",
             "android.permission.RECEIVE_BOOT_COMPLETED",
             "android.permission.ACCESS_NETWORK_STATE",
             "android.permission.BIND_APPWIDGET tools:ignore=\"ProtectedPermissions\"",
@@ -103,8 +105,8 @@ class RfLabGuardTest {
 
     @Test fun theRfPackageMakesNoForbiddenCall() {
         val forbidden = listOf(
-            // R5: no connection info, no location info, no network name.
-            "getConnectionInfo", "connectionInfo", "FLAG_INCLUDE_LOCATION_INFO", "SSID", "getSsid", "ssid",
+            // R5: no connection info and no location info.
+            "getConnectionInfo", "connectionInfo", "FLAG_INCLUDE_LOCATION_INFO",
             // R6: no GATT discovery, tuning, notifications, bonding or characteristic access.
             "discoverServices", "requestConnectionPriority", "requestMtu", "setPreferredPhy",
             "setCharacteristicNotification", "createBond", "readCharacteristic", "writeCharacteristic",
@@ -114,21 +116,27 @@ class RfLabGuardTest {
             "com.google.android.gms.location", "FusedLocation",
             // R12: no background collection.
             "JobScheduler", "AlarmManager", "startForeground", "Service()", "WorkManager",
-            // R17, R24: RF Lab never reads a device name or advertisement payload, and never pairs.
-            "getName", ".name ==", "device.name", "deviceName", "scanRecord", "getScanRecord", "alias", "setPairingConfirmation",
+            // R17: never the paired name of a device, and never pairs.
+            "getName", ".name ==", "device.name", "getAlias", "setPairingConfirmation",
         )
+        // R17, R26: advertised names and payloads only in the two scan adapters; network names only in Wi-Fi.
+        val namesOk = setOf("BleScanAdapter.kt", "WifiScanAdapter.kt")
         for (f in rfSources) {
             val text = code(f)
             for (word in forbidden) assertFalse("${f.name} uses $word", text.contains(word))
+            if (f.name !in namesOk) for (word in listOf("deviceName", "scanRecord", "getScanRecord", "manufacturerSpecificData"))
+                assertFalse("${f.name} uses $word", text.contains(word))
+            if (f.name != "WifiScanAdapter.kt") for (word in listOf("SSID", "getSsid", "wifiSsid", "BSSID", "scanResults",
+                "getScanResults")) assertFalse("${f.name} uses $word", text.contains(word))
             // LocationManager only for isLocationEnabled.
             Regex("""LocationManager[^\n]*""").findAll(text.lines().filterNot { it.startsWith("import ") }.joinToString("\n")).forEach {
                 assertTrue("${f.name}: ${it.value}", it.value.contains("isLocationEnabled") || it.value.contains("LOCATION_SERVICE"))
             }
             // connectGatt only in the ring_link adapter; scanning only in the scan adapter.
             if (f.name != "RingLinkAdapter.kt") assertFalse("${f.name} calls connectGatt", text.contains("connectGatt"))
-            if (f.name != "BleScanAdapter.kt") assertFalse("${f.name} starts a scan", text.contains("startScan"))
-            // R12: the one receiver is the session-only Bluetooth on/off watch.
-            if (f.name != "BluetoothWatch.kt") {
+            if (f.name !in namesOk) assertFalse("${f.name} starts a scan", text.contains("startScan"))
+            // R12: the receivers are the session-only Bluetooth on/off watch and Wi-Fi results watch.
+            if (f.name != "BluetoothWatch.kt" && f.name != "WifiScanAdapter.kt") {
                 assertFalse("${f.name} registers a receiver", text.contains("registerReceiver"))
                 assertFalse("${f.name} has a receiver", text.contains("BroadcastReceiver"))
             }
@@ -138,8 +146,13 @@ class RfLabGuardTest {
         val gattCalls = Regex("""\bg(att)?\??\.(\w+)\(""").findAll(ring).map { it.groupValues[2] }.toSet()
         assertEquals(setOf("disconnect", "close", "readRemoteRssi"), gattCalls)
         assertTrue(ring.contains("connectGatt(app, false, callback, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, h)"))
-        // The receiver is unregistered by the same class that registers it.
+        // Each receiver is unregistered by the same class that registers it.
         assertTrue(code(File(rfDir, "BluetoothWatch.kt")).contains("unregisterReceiver"))
+        val wifiScan = code(File(rfDir, "WifiScanAdapter.kt"))
+        assertTrue(wifiScan.contains("unregisterReceiver"))
+        // The Wi-Fi scan reads results only: no connecting, no saved networks, no Wi-Fi toggling.
+        for (word in listOf("addNetwork", "enableNetwork", "setWifiEnabled", "configuredNetworks", "reconnect", "disconnect"))
+            assertFalse("WifiScanAdapter uses $word", wifiScan.contains(word))
         // createBond nowhere in the app.
         appDir.walkTopDown().filter { it.extension == "kt" }.forEach { assertFalse(it.name, code(it).contains("createBond")) }
     }

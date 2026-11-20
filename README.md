@@ -95,14 +95,21 @@ for up to 10 minutes (90 seconds by default). "My links" records the phone's Wi-
 link signal of the Ring chosen in Battery Lab, read once per second over a connection that
 exists only during the session. "My devices" adds a Bluetooth scan: rows for the Ring only,
 and for every other device just a count and the strongest signal each second, with no
-address or name. Sessions are
+address or name. "Everything nearby" (Android 12 or later) records every Bluetooth device and
+Wi-Fi network in range, including other people's, each with a number; a Wi-Fi scan is
+requested at most once every 31 seconds. Names are saved unless "Store names" is switched off
+for that session, and exports leave them out unless "Include device names" is ticked. A
+device list shows each one's strongest signal; "Pin as my device" gives a Bluetooth device a
+short name so My devices sessions keep its rows. Pinning never connects or pairs. A
+read-only card lists what this phone's radios support. Sessions are
 files under the app's private `files/rf/` folder, which no backup includes, and can be
 marked, replayed, exported and imported as a zip through the system file dialogs. A
 simulated session shows how it works without a radio. Each session adds two lines to the
 diagnostics log (scope and length) and nothing else to the battery database.
 
 RF Lab scanning also needs Nearby devices and Precise location, because Android requires them
-for scan results. Battery Lab reads no GPS position.
+for scan results, and the Wi-Fi scan uses the Wi-Fi state permissions (no internet access).
+Battery Lab reads no GPS position.
 
 ## Design and security
 

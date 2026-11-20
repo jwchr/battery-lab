@@ -110,5 +110,10 @@ class FileRulesTest {
         assertTrue(store.delete(ids[1], activeId = null))
         store.deleteAll(activeId = ids[2])
         assertEquals(listOf(ids[2]), store.ids())
+        // The session that kept recording has old device keys; it cannot be pinned from.
+        assertTrue(store.keysStale(ids[2]))
+        assertFalse(store.keysStale(null))
+        store.deleteAll(activeId = null)
+        assertFalse(store.keysStale(ids[2]))
     }
 }

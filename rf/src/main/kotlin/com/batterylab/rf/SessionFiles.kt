@@ -35,6 +35,10 @@ object Keys {
     /** The newest min_reader this build can read. */
     const val READER_VERSION = 1
 
+    /** identifier_mode: names are written only in [NAMED] mode ("Everything nearby" with names on). */
+    const val MODE_NAMED = "named"
+    const val MODE_NONE = "none"
+
     const val STATE_RECORDING = "recording"
     const val STATE_COMPLETE = "complete"
     const val STATE_INTERRUPTED = "interrupted"
@@ -66,6 +70,7 @@ object EventType {
     const val MARKER = "marker"
     const val PERMISSION = "permission"
     const val DROPPED = "dropped"
+    const val NOTE = "note"
 }
 
 private fun writeAtomically(file: File, text: String) {
@@ -87,7 +92,9 @@ fun updateProperties(dir: File, change: (LinkedHashMap<String, String>) -> Unit)
  * Every byte on disk, headers and metadata included, counts against [sizeLimitBytes]; a write past
  * it is refused. [META_RESERVE_BYTES] of the limit stays free for the final metadata rewrite.
  */
-class SessionWriter(val dir: File, initialProps: Map<String, String>, private val sizeLimitBytes: Long) {
+class SessionWriter(val dir: File, initialProps: Map<String, String>, private val sizeLimitBytes: Long,
+                    /** The most emitters.csv can ever take; kept free from the start ("Everything nearby"). */
+                    private val emittersWorstCase: Long = 0) {
     private class Out(val file: File) {
         val stream: OutputStream = BufferedOutputStream(FileOutputStream(file, true), 16 * 1024)
     }
@@ -113,6 +120,7 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
     /** The current size of the two files that are replaced rather than appended. */
     private var propsBytes = 0L
     private var streamsTableBytes = 0L
+    private var emittersBytes = 0L
     var totalBytes = 0L
         private set
 
@@ -164,7 +172,35 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
     /** Room kept for the final streams.csv and session.properties: 16 KB, or an eighth of a small limit. */
     private val reserve = minOf(META_RESERVE_BYTES, sizeLimitBytes / 8)
 
-    private fun fits(len: Int) = totalBytes + len <= sizeLimitBytes - reserve
+    /** emitters.csv is always counted at its worst case, so rewriting it can never pass the limit. */
+    private fun fits(len: Int) = totalBytes - emittersBytes + len <= sizeLimitBytes - reserve - emittersWorstCase
+
+    /**
+     * Replaces emitters.csv. [text] is at most the worst case given at construction, which [fits]
+     * has kept free, so this is never refused for size.
+     */
+    fun writeEmitters(text: String) {
+        val size = text.toByteArray(Charsets.UTF_8).size.toLong()
+        require(size <= emittersWorstCase) { "emitters.csv is larger than its reserve" }
+        writeAtomically(File(dir, FileNames.EMITTERS), text)
+        totalBytes += size - emittersBytes
+        emittersBytes = size
+    }
+
+    /**
+     * Appends device lines to emitters.csv, which must already exist, before the rows that point
+     * at them reach the disk. Counted inside the same worst-case reserve.
+     */
+    fun appendEmitters(text: String) {
+        if (text.isEmpty()) return
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        require(emittersBytes + bytes.size <= emittersWorstCase) { "emitters.csv is larger than its reserve" }
+        val f = File(dir, FileNames.EMITTERS)
+        require(f.isFile) { "emitters.csv has not been started" }
+        FileOutputStream(f, true).use { it.write(bytes) }
+        totalBytes += bytes.size
+        emittersBytes += bytes.size
+    }
 
     /** Appends one obs row. Returns false, writing nothing, when the size limit would be passed. */
     fun writeObs(streamId: String, o: Obs): Boolean {
@@ -343,6 +379,9 @@ object SessionReader {
 class SessionStore(val root: File) {
     val sessionsDir = File(root, "sessions")
     val stagingDir = File(root, "staging")
+    /** R17: the install key and the pins live beside the sessions, never inside one. */
+    val installKey = InstallKey(File(root, "install.key"))
+    val pins = PinStore(File(root, "pins.csv"))
 
     companion object {
         const val MAX_SESSIONS = 100
@@ -406,10 +445,24 @@ class SessionStore(val root: File) {
     }
 
     /**
-     * Deletes every session but the active one. In milestone 1 the install key of R17 lives only in
-     * memory, so there is no key file to destroy here.
+     * Deletes every session but the active one, then destroys the install key of R17 and with it
+     * every pin, so later keys match nothing from before.
+     */
+    private val staleKeysFile = File(root, "stale_keys_session")
+
+    /**
+     * Delete all. A session still recording keeps device keys made with the old install key, so
+     * that session is remembered and its devices cannot be pinned (a pin would never match again).
      */
     fun deleteAll(activeId: String?) {
         ids().filter { it != activeId }.forEach { dir(it).deleteRecursively() }
+        installKey.destroy()
+        pins.clear()
+        if (activeId != null) try { staleKeysFile.writeText(activeId) } catch (_: Exception) { }
+        else staleKeysFile.delete()
     }
+
+    /** True when [id]'s device keys came from an install key that Delete all has since replaced. */
+    fun keysStale(id: String?): Boolean = id != null &&
+        try { staleKeysFile.isFile && staleKeysFile.readText().trim() == id } catch (_: Exception) { true }
 }

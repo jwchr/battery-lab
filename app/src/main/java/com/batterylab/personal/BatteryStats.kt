@@ -10,7 +10,9 @@ import kotlin.math.min
  */
 data class ChargeSession(val startMs: Long, val endMs: Long, val fromPct: Int, val toPct: Int, val observed: Boolean = true,
     /** False when the charge was already under way at its first reading, so [fromPct] isn't the plug-in level. */
-    val plugInKnown: Boolean = true) {
+    val plugInKnown: Boolean = true,
+    /** False when no unplugged reading closed it: still charging at the last reading, or readings stopped mid-charge. */
+    val ended: Boolean = true) {
     val gained: Int get() = toPct - fromPct
     val minutes: Double get() = (endMs - startMs) / 60_000.0
     /** Percent per minute; null when the charge wasn't watched or was too short to time. */
@@ -39,8 +41,8 @@ data class DeviceStats(
     val fullBatteriesUsed: Double get() = percentUsed / 100.0
     val averagePlugIn: Double? get() = charges.filter { it.plugInKnown }.map { it.fromPct }.takeIf { it.isNotEmpty() }?.average()
     val averageUnplug: Double? get() = charges.map { it.toPct }.takeIf { it.isNotEmpty() }?.average()
-    /** Watched charges that were unplugged before 100%, as a share of all watched charges; null with none. */
-    val partialChargeShare: Double? get() = charges.filter { it.observed }.takeIf { it.isNotEmpty() }
+    /** Watched, ended charges unplugged before 100%, as a share of all watched, ended charges; null with none. */
+    val partialChargeShare: Double? get() = charges.filter { it.observed && it.ended }.takeIf { it.isNotEmpty() }
         ?.let { list -> list.count { it.toPct < 100 }.toDouble() / list.size }
     val fastestCharge: ChargeSession? get() = charges.filter { it.ratePerMinute != null }.maxByOrNull { it.ratePerMinute!! }
     val hungriestHour: Int? get() = drainByHour.withIndex().filter { it.value != null }.maxByOrNull { it.value!! }?.index
@@ -98,9 +100,9 @@ object BatteryStats {
         var chargePeak: Reading? = null
         var plugInKnown = true
 
-        fun closeCharge() {
+        fun closeCharge(ended: Boolean = true) {
             val s = chargeStart; val p = chargePeak
-            if (s != null && p != null && p.percent > s.percent) charges += ChargeSession(s.timeMs, p.timeMs, s.percent, p.percent, plugInKnown = plugInKnown)
+            if (s != null && p != null && p.percent > s.percent) charges += ChargeSession(s.timeMs, p.timeMs, s.percent, p.percent, plugInKnown = plugInKnown, ended = ended)
             chargeStart = null; chargePeak = null; plugInKnown = true
         }
 
@@ -142,7 +144,7 @@ object BatteryStats {
                 // After a gap the plug-in time and level are unknown, so the timed charge starts at
                 // this reading (also when the reading before the gap was charging too).
                 if (isCharging && (!prevCharging || dt > gaps.stepMs)) {
-                    closeCharge()
+                    closeCharge(ended = false)   // only an open charge here: readings stopped mid-charge
                     if (dt > gaps.stepMs) { chargeStart = cur; plugInKnown = false } else chargeStart = prev
                     chargePeak = cur
                 }
@@ -166,7 +168,7 @@ object BatteryStats {
                 else -> minOf(low ?: cur.percent, cur.percent)
             }
         }
-        closeCharge()
+        closeCharge(ended = false)   // still charging at the last reading
         val lowest = r.minByOrNull { it.percent }?.let { it.percent to it.timeMs }
         return DeviceStats(r.size, r.firstOrNull()?.timeMs, r.lastOrNull()?.timeMs, used, charges, lowest,
             below20, at100, charging, onBattery,

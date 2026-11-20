@@ -294,7 +294,7 @@ class StatsActivity : StyledActivity() {
     }
 
     private fun renderHabits(phone: DeviceStats) {
-        if (phone.charges.isEmpty()) return
+        if (phone.charges.isEmpty() && phone.hoursAtOrAbove80 <= 0.0) return
         section("Charging habits", "How you charge your phone.").apply {
             val fast = phone.fastestCharge
             addTileList(listOfNotNull(

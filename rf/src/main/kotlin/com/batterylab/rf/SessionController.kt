@@ -364,7 +364,9 @@ class SessionController(
             live.rows++
             live.bytes += a.writer.totalBytes - before
             // The Bluetooth scan's trace follows the Ring only; other devices and pins have the device list.
-            if (stream.kind != Kinds.BLE_SCAN || obs.extra[BleScanHub.ALIAS] == PinStore.RING)
+            // A table with no alias column is from before milestone 2 and holds Ring rows only.
+            if (stream.kind != Kinds.BLE_SCAN || BleScanHub.ALIAS !in stream.extraColumns ||
+                obs.extra[BleScanHub.ALIAS] == PinStore.RING)
                 recordPoint(obs.tBootNs, obs.rssiDbm, obs.status == Status.OK)
         }
 

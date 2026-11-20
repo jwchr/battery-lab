@@ -129,7 +129,7 @@ class PinStore(private val file: File) {
 object Names {
     const val MAX_BYTES = 96
     /** Six hex pairs with or without separators: anything that looks like a hardware address. */
-    private val address = Regex("""(?i)\b[0-9a-f]{2}([:\-.]?)[0-9a-f]{2}(\1[0-9a-f]{2}){4}\b""")
+    private val address = Regex("""(?i)(?<![0-9a-f])[0-9a-f]{2}([:\-.]?)[0-9a-f]{2}(\1[0-9a-f]{2}){4}(?![0-9a-f])""")
 
     /** Control characters removed, address-like text replaced, at most [MAX_BYTES] UTF-8 bytes. */
     fun clean(raw: String?): String? {

@@ -307,7 +307,8 @@ class RfLabActivity : StyledActivity() {
         const val NEARBY_TEXT = "Everything nearby records every Bluetooth device and Wi-Fi network your phone can " +
             "hear, including other people's, for the length of the session. Each gets a number. Their names are " +
             "saved too unless you switch Store names off, and exports leave names out unless you tick the box. " +
-            "Nothing is connected to or paired, and nothing is recorded after the session ends."
+            "Nearby devices are never connected to or paired. If your Ring is set, its Ring link still connects " +
+            "to your own Ring, as in My links. Nothing is recorded after the session ends."
 
         private val SCAN_PERMISSIONS = listOf(Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
@@ -390,7 +391,7 @@ class RfLabActivity : StyledActivity() {
         val devices = deviceBox ?: return
         val live = RfRuntime.liveTable?.takeIf { it.first == rf.activeId }?.second ?: return
         devices.removeAllViews()
-        fillDevices(devices, live.devices(), live = true)
+        fillDevices(devices, live.devices(), live = true, sessionId = rf.activeId)
     }
 
     // Device list (R31)
@@ -405,7 +406,7 @@ class RfLabActivity : StyledActivity() {
         }
     }
 
-    private fun fillDevices(box: LinearLayout, all: List<DeviceView>, live: Boolean) {
+    private fun fillDevices(box: LinearLayout, all: List<DeviceView>, live: Boolean, sessionId: String?) {
         val bt = all.count { it.kind == EmitterTable.BLE }
         box.addView(label("$bt Bluetooth devices · ${all.size - bt} Wi-Fi networks", 13f))
         box.addView(chipRow(
@@ -418,7 +419,7 @@ class RfLabActivity : StyledActivity() {
         for (d in sorted.take(limit)) {
             val where = if (d.kind == EmitterTable.WIFI) "Wi-Fi" + (d.band?.let { " $it GHz" } ?: "") else "Bluetooth"
             val signal = d.bestDbm?.let { "strongest $it dBm" } ?: "no signal value"
-            box.addView(makeButton("${deviceTitle(d)} · $where · $signal · ${d.rows} rows") { deviceMenu(d) },
+            box.addView(makeButton("${deviceTitle(d)} · $where · $signal · ${d.rows} rows") { deviceMenu(d, sessionId) },
                 LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
         }
         if (sorted.size > limit) {
@@ -431,8 +432,12 @@ class RfLabActivity : StyledActivity() {
     private fun refreshDevices() { if (rf.running) fillLive() else render() }
 
     /** R31: pin a Bluetooth device as yours. A pin stores a key and an alias; it never connects or pairs. */
-    private fun deviceMenu(d: DeviceView) {
+    private fun deviceMenu(d: DeviceView, sessionId: String?) {
         val pins = rf.store.pins
+        if (rf.store.keysStale(sessionId)) {
+            toast("Delete all ran during this session, so its devices cannot be pinned. Pin from a new session.")
+            return
+        }
         val pinnable = d.kind == EmitterTable.BLE && d.key.matches(Regex("[0-9a-f]{16}")) && d.alias != PinStore.RING
         if (!pinnable) {
             toast(if (d.kind == EmitterTable.WIFI) "Wi-Fi networks cannot be pinned" else "This device cannot be pinned here")
@@ -554,7 +559,7 @@ class RfLabActivity : StyledActivity() {
         if (resultDevices.isNotEmpty()) section("Devices", null, DEVICES_HINT).apply {
             val box = LinearLayout(this@RfLabActivity).apply { orientation = LinearLayout.VERTICAL }
             addView(box)
-            fillDevices(box, resultDevices, live = false)
+            fillDevices(box, resultDevices, live = false, sessionId = resultId)
         }
     }
 

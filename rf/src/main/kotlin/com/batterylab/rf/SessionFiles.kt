@@ -448,9 +448,21 @@ class SessionStore(val root: File) {
      * Deletes every session but the active one, then destroys the install key of R17 and with it
      * every pin, so later keys match nothing from before.
      */
+    private val staleKeysFile = File(root, "stale_keys_session")
+
+    /**
+     * Delete all. A session still recording keeps device keys made with the old install key, so
+     * that session is remembered and its devices cannot be pinned (a pin would never match again).
+     */
     fun deleteAll(activeId: String?) {
         ids().filter { it != activeId }.forEach { dir(it).deleteRecursively() }
         installKey.destroy()
         pins.clear()
+        if (activeId != null) try { staleKeysFile.writeText(activeId) } catch (_: Exception) { }
+        else staleKeysFile.delete()
     }
+
+    /** True when [id]'s device keys came from an install key that Delete all has since replaced. */
+    fun keysStale(id: String?): Boolean = id != null &&
+        try { staleKeysFile.isFile && staleKeysFile.readText().trim() == id } catch (_: Exception) { true }
 }

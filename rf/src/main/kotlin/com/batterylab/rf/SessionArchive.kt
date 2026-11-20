@@ -59,6 +59,9 @@ object SessionArchive {
         }
     }
 
+    /** A device number in one form ("01" and "1" are the same device), or null when it is not a number. */
+    private fun num(v: String?): String? = v?.trim()?.toIntOrNull()?.toString()
+
     /** Old device number to new, from 1 in first-seen order. */
     private fun renumbering(t: CsvTable): Map<String, String> {
         val rows = t.rows.mapNotNull { r ->
@@ -76,12 +79,12 @@ object SessionArchive {
         val header = keep.map { t.header[it] }
         val nameCol = header.indexOf("name")
         val sb = StringBuilder(Csv.line(header))
-        val rows = t.rows.filter { r -> t.cell(r, "emitter") in renumber }
-            .sortedBy { r -> renumber.getValue(t.cell(r, "emitter")!!).toInt() }
+        val rows = t.rows.filter { r -> num(t.cell(r, "emitter")) in renumber }
+            .sortedBy { r -> renumber.getValue(num(t.cell(r, "emitter"))!!).toInt() }
         for (r in rows) {
             val cells = keep.map { i ->
                 val v = r.getOrElse(i) { "" }
-                if (t.header[i] == "emitter") renumber.getValue(v) else v
+                if (t.header[i] == "emitter") renumber.getValue(num(v)!!) else v
             }
             sb.append(Csv.line(cells, if (nameCol >= 0) setOf(nameCol) else emptySet()))
         }
@@ -93,7 +96,7 @@ object SessionArchive {
         val col = t.header.indexOf("emitter")
         val sb = StringBuilder(Csv.line(t.header))
         for (r in t.rows) {
-            val cells = r.mapIndexed { i, v -> if (i == col && v != "0" && v.isNotEmpty()) renumber[v] ?: "" else v }
+            val cells = r.mapIndexed { i, v -> if (i == col && num(v) != "0" && v.isNotEmpty()) renumber[num(v)] ?: "" else v }
             sb.append(Csv.line(cells))
         }
         return sb.toString()

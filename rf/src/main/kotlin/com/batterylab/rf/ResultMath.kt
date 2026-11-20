@@ -45,6 +45,14 @@ object ResultMath {
         return sorted[rank - 1]
     }
 
+    /** The nearest-rank median of [total] buckets, of which only [nonZero] (sorted) have rows. */
+    private fun medianWithZeros(nonZero: List<Int>, total: Long): Int? {
+        if (total <= 0) return null
+        val rank = (50L * total + 99) / 100
+        val zeros = total - nonZero.size
+        return if (rank <= zeros) 0 else nonZero[(rank - zeros - 1).toInt()]
+    }
+
     fun windows(markers: List<Marker>, sessionStartNs: Long, sessionEndNs: Long): List<Window> {
         val inside = markers.filter { it.tBootNs in sessionStartNs until sessionEndNs }.sortedBy { it.tBootNs }
         return inside.mapIndexed { i, m ->
@@ -62,12 +70,14 @@ object ResultMath {
     fun stats(samples: List<Sample>, w: Window): WindowStats? {
         val inside = samples.filter { it.tBootNs >= w.startNs && it.tBootNs < w.endNs }
         if (inside.isEmpty()) return null
-        val lengthNs = w.endNs - w.startNs
-        val buckets = (lengthNs / SECOND_NS).toInt()
-        val counts = IntArray(buckets)
+        // An imported file can claim any span, so buckets are counted sparsely: memory follows the
+        // number of rows, never the window's length. Overflowing spans count as the longest possible.
+        val lengthNs = (w.endNs - w.startNs).let { if (it < 0) Long.MAX_VALUE else it }
+        val bucketCount = lengthNs / SECOND_NS
+        val counts = HashMap<Long, Int>()
         for (s in inside) {
-            val b = ((s.tBootNs - w.startNs) / SECOND_NS).toInt()
-            if (b < buckets) counts[b]++
+            val b = (s.tBootNs - w.startNs) / SECOND_NS
+            if (b in 0 until bucketCount) counts[b] = (counts[b] ?: 0) + 1
         }
         val values = inside.filter { it.ok }.mapNotNull { it.rssiDbm }.sorted()
         return WindowStats(
@@ -75,8 +85,8 @@ object ResultMath {
             rows = inside.size,
             okRows = inside.count { it.ok },
             meanRowsPerSecond = if (lengthNs > 0) inside.size * SECOND_NS.toDouble() / lengthNs else 0.0,
-            buckets = buckets,
-            medianRowsPerBucket = nearestRank(counts.sorted(), 50),
+            buckets = bucketCount.coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
+            medianRowsPerBucket = medianWithZeros(counts.values.sorted(), bucketCount),
             medianDbm = nearestRank(values, 50),
             p10Dbm = nearestRank(values, 10),
             p90Dbm = nearestRank(values, 90),

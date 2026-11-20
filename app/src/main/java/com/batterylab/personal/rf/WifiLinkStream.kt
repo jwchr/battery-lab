@@ -63,7 +63,8 @@ class WifiLinkStream(context: Context) : Stream {
         cm.registerNetworkCallback(NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(), cb, h)
         val origin = SystemClock.uptimeMillis()
-        var n = 0L
+        // Tick n runs at origin + n seconds: the first at 1 s, then one each second.
+        var n = 1L
         val tick = object : Runnable {
             override fun run() {
                 if (stopped.get()) return
@@ -72,7 +73,7 @@ class WifiLinkStream(context: Context) : Stream {
                 h.postAtTime(this, origin + 1000 * n)
             }
         }
-        h.postAtTime(tick, origin + 1000)
+        h.postAtTime(tick, origin + 1000 * n)
     }
 
     private fun sample(sink: StreamSink) {

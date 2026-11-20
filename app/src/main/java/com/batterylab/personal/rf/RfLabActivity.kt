@@ -57,6 +57,9 @@ class RfLabActivity : StyledActivity() {
     private var loadingResult: String? = null
     private var pendingExportId: String? = null
     private var wasRunning = false
+    /** Between onStart and onStop. A replay prepared in the background starts only while visible. */
+    private var visible = false
+    private var showAllSessions = false
     private val main = Handler(Looper.getMainLooper())
     private val refresh = object : Runnable {
         override fun run() { onTick(); main.postDelayed(this, 500) }
@@ -82,9 +85,17 @@ class RfLabActivity : StyledActivity() {
         resultId?.let { outState.putString("resultId", it) }
     }
 
+    override fun onStart() {
+        super.onStart()
+        visible = true
+    }
+
     override fun onResume() {
         super.onResume()
-        wasRunning = rf.running
+        // A session that ended while the screen was paused still gets its result card.
+        val running = rf.running
+        if (wasRunning && !running) { resultId = rf.lastEndedId; result = null }
+        wasRunning = running
         render()
         main.post(refresh)
     }
@@ -96,6 +107,7 @@ class RfLabActivity : StyledActivity() {
 
     override fun onStop() {
         super.onStop()
+        visible = false
         // Rotation keeps the session; leaving the screen ends it (R11), off the main thread.
         if (!isChangingConfigurations && rf.running) Thread({ rf.stop(StopReason.LEFT_SCREEN) }, "rf-leave").start()
         if (!isChangingConfigurations) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -179,7 +191,7 @@ class RfLabActivity : StyledActivity() {
         Background.io.execute {
             val req = try { Replay.request(dir) } catch (e: Exception) { null }
             Background.onMain {
-                if (isDestroyed) return@onMain
+                if (isDestroyed || !visible) return@onMain
                 if (req == null) toast("This session could not be read") else started(rf.start(req))
             }
         }
@@ -351,7 +363,7 @@ class RfLabActivity : StyledActivity() {
         val ids = store.ids().reversed()
         section("Saved sessions", if (ids.isEmpty()) "None yet" else "${ids.size} on this phone",
             "Up to ${com.batterylab.rf.SessionStore.MAX_SESSIONS} sessions or 200 MB; the oldest go first.").apply {
-            for (id in ids.take(20)) {
+            for (id in if (showAllSessions) ids else ids.take(20)) {
                 val props = try { Props.parse(File(store.dir(id), FileNames.PROPERTIES).readText()) } catch (_: Exception) { null }
                 val start = props?.get(Keys.START_WALL_MS)?.toLongOrNull()
                 val len = props?.let { p ->
@@ -365,7 +377,7 @@ class RfLabActivity : StyledActivity() {
                     sessionMenu(id)
                 }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
             }
-            if (ids.size > 20) addView(label("And ${ids.size - 20} older.", 12.5f))
+            if (ids.size > 20 && !showAllSessions) button("Show ${ids.size - 20} older sessions") { showAllSessions = true; render() }
             button("Import a session (.zip)") { pickImport() }
             if (ids.isNotEmpty()) button("Delete all sessions") { confirmDeleteAll() }
         }
@@ -424,7 +436,7 @@ class RfLabActivity : StyledActivity() {
             val store = rf.store
             Background.io.execute {
                 val r = try {
-                    resolver.openInputStream(uri)?.use { SessionArchive.import(it, store, System.currentTimeMillis()) }
+                    resolver.openInputStream(uri)?.use { SessionArchive.import(it, store, System.currentTimeMillis(), activeId = { rf.activeId }) }
                         ?: ImportResult.Rejected("The file could not be opened")
                 } catch (_: Exception) { ImportResult.Rejected("The file could not be opened") }
                 Background.onMain {

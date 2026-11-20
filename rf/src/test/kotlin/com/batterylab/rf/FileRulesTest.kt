@@ -97,7 +97,7 @@ class FileRulesTest {
         val store = SessionStore(newRoot())
         val ids = (0 until 5).map { fakeSession(store, 1_600_000_000_000L + it, bytes = 1000) }
         val per = store.sizeOf(ids[0])
-        val evicted = store.enforceRetention(keepId = ids[4], maxBytes = per * 3)
+        val evicted = store.enforceRetention(keep = setOf(ids[4]), maxBytes = per * 3)
         assertEquals(ids.take(2), evicted)
         assertEquals(ids.drop(2), store.ids())
     }

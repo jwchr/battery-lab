@@ -97,6 +97,8 @@ interface Stream {
     val nominalRateHz: Double
     /** Optional obs columns after the six fixed ones. */
     val extraColumns: List<String> get() = emptyList()
+    /** True for a stream that calls [StreamSink.binary]; its rows then carry bin_offset and bin_length. */
+    val binary: Boolean get() = false
     fun start(sink: StreamSink)
     fun stop()
 }

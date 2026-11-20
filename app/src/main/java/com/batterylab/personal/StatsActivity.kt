@@ -59,6 +59,8 @@ class StatsActivity : StyledActivity() {
         val forecasts: List<Forecast>,
         /** Watch-app readings, compared against the widget's in the audit. */
         val watchCompanion: List<Reading>,
+        /** Per device (same order as [devices]): each window's label and coverage, worked out off the main thread. */
+        val coverage: List<List<Pair<String, Coverage>>>,
     )
 
     /** The drain breakdown and the app names it shows, prepared off the main thread. */
@@ -127,7 +129,8 @@ class StatsActivity : StyledActivity() {
         }
         return Loaded(devices, data, gaps, stats, capacity, usage, idle,
             store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain, store.forecasts(),
-            if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList())
+            if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList(),
+            data.map { readings -> coverageRows(readings.map { it.timeMs }, now, gaps) })
     }
 
     private fun renderTitle() {
@@ -176,7 +179,7 @@ class StatsActivity : StyledActivity() {
         timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
         // The same capacity figure as the Phone battery capacity headline.
         timed("fun") { renderFun(stats[0], phoneCapacity(phone)?.first ?: capacity.combinedMah, phone) }
-        timed("coverage") { renderCoverage(devices, data, gaps) }
+        timed("coverage") { renderCoverage(devices, l.coverage, gaps) }
         timed("overhead") { renderOverhead() }
         timed("capabilities") { renderCapabilities() }
         // Which sections still cost main-thread time (audit #4 A6); only the slow ones are listed.
@@ -384,15 +387,16 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Audit #4 P0: how much of each recent window every device was actually read. */
-    private fun renderCoverage(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>, gaps: GapLimits) {
-        val now = System.currentTimeMillis()
+    private fun coverageRows(times: List<Long>, now: Long, gaps: GapLimits): List<Pair<String, Coverage>> {
         val day = 86_400_000L
-        val windows = listOf("24 HOURS" to day, "7 DAYS" to 7 * day, "30 DAYS" to 30 * day)
+        return listOf("24 HOURS" to day, "7 DAYS" to 7 * day, "30 DAYS" to 30 * day)
+            .mapNotNull { (w, span) -> CoverageMath.of(times, now - span, now, gaps.stepMs)?.let { w to it } }
+    }
+
+    private fun renderCoverage(devices: List<Triple<String, String, Int>>, coverage: List<List<Pair<String, Coverage>>>, gaps: GapLimits) {
         val limit = gapText(gaps.stepMs)
         val cards = devices.mapIndexedNotNull { i, (_, name, color) ->
-            val times = data[i].map { it.timeMs }
-            val rows = windows.mapNotNull { (w, span) -> CoverageMath.of(times, now - span, now, gaps.stepMs)?.let { w to it } }
-            if (rows.isEmpty()) null else Triple(name, color, rows)
+            coverage[i].takeIf { it.isNotEmpty() }?.let { Triple(name, color, it) }
         }
         if (cards.isEmpty()) return
         section("Data coverage", "How much of the time each device was being read.", "A stretch counts as covered " +

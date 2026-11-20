@@ -63,6 +63,8 @@ class StatsActivity : StyledActivity() {
         val coverage: List<List<Pair<String, Coverage>>>,
         /** Per device: drain spread over the last 30 days, or null with too few stretches. */
         val spread: List<DrainSpread?>,
+        /** Per device: weekday and weekend drain over the last 30 days, or null with too little data. */
+        val week: List<WeekSplit?>,
     )
 
     /** The drain breakdown and the app names it shows, prepared off the main thread. */
@@ -118,6 +120,10 @@ class StatsActivity : StyledActivity() {
         val phone = data[0]
         val capacity = HonestyAuditor.estimatePhoneCapacity(phone, gaps)
         val now = System.currentTimeMillis()
+        val stretches = data.map { readings ->
+            BatteryMath.dischargeStretches(readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = gaps) }
+        val isWeekend = { ms: Long -> Calendar.getInstance().apply { timeInMillis = ms }.get(Calendar.DAY_OF_WEEK)
+            .let { it == Calendar.SATURDAY || it == Calendar.SUNDAY } }
         val usage = if (UsageSource.granted(this)) UsageSource.load(this, now - 7 * 86_400_000L, now) else null
         val idle = IdleAnalysis.stretches(phone, usage?.screenOn, gaps = gaps, screenCoverageStartMs = usage?.coverageStartMs)
         // The drain analysis and package-manager label lookups took ~116 ms on the main thread.
@@ -133,8 +139,8 @@ class StatsActivity : StyledActivity() {
             store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain, store.forecasts(),
             if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList(),
             data.map { readings -> coverageRows(readings.map { it.timeMs }, now, gaps) },
-            data.map { readings -> DrainSpreadMath.of(BatteryMath.dischargeStretches(
-                readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = gaps), now - 30 * 86_400_000L) })
+            stretches.map { DrainSpreadMath.of(it, now - 30 * 86_400_000L) },
+            stretches.map { WeekSplitMath.of(it, now - 30 * 86_400_000L, isWeekend) })
     }
 
     private fun renderTitle() {
@@ -181,6 +187,7 @@ class StatsActivity : StyledActivity() {
         timed("headtohead") { renderHeadToHead(devices, stats) }
         timed("rolling") { renderRolling(devices, data) }
         timed("spread") { renderSpread(devices, l.spread) }
+        timed("week") { renderWeek(devices, l.week) }
         timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
         // The same capacity figure as the Phone battery capacity headline.
         timed("fun") { renderFun(stats[0], phoneCapacity(phone)?.first ?: capacity.combinedMah, phone) }
@@ -411,6 +418,33 @@ class StatsActivity : StyledActivity() {
                 d.bands.forEachIndexed { b, n ->
                     addView(barRow("${DrainSpreadMath.BAND_LABELS[b]}", n.toDouble() / top, "$n",
                         color, if (b == 0) "stretches by % per hour, ${d.stretches} in all" else null))
+                }
+            }
+        }
+    }
+
+    /** Audit #4 roadmap: weekday and weekend drain where the readings support it, worked out in [load]. */
+    private fun renderWeek(devices: List<Triple<String, String, Int>>, week: List<WeekSplit?>) {
+        if (week.all { it == null }) return
+        section("Weekdays vs weekends", "Whether your devices drain differently on Saturdays and Sundays.", "Each " +
+            "observed stretch of discharge from the last 30 days goes to weekdays or weekends by the local day of its " +
+            "midpoint. Each side's rate is its total points dropped over its total hours. A side shows only with at " +
+            "least ${WeekSplitMath.MIN_STRETCHES} stretches and ${WeekSplitMath.MIN_HOURS.roundToInt()} hours. A " +
+            "difference shows what happened, not why.").apply {
+            devices.forEachIndexed { i, (_, name, color) ->
+                val w = week[i] ?: return@forEachIndexed
+                addView(deviceBanner(name, color))
+                val top = listOfNotNull(w.weekdays, w.weekends).maxOf { it.percentPerHour }
+                listOf("WEEKDAYS" to w.weekdays, "WEEKENDS" to w.weekends).forEach { (side, g) ->
+                    if (g == null) addView(barRow(side, 0.0, "–", color, "not enough stretches yet"))
+                    else addView(barRow(side, g.percentPerHour / top, "${f1(g.percentPerHour)}%/h", color,
+                        "${g.stretches} stretch${if (g.stretches == 1) "" else "es"}, ${f1(g.hours)} h"))
+                }
+                w.weekendDifferencePct?.let { d ->
+                    val text = when { d >= 5 -> "Weekends drain ${d.roundToInt()}% faster."
+                        d <= -5 -> "Weekends drain ${(-d).roundToInt()}% slower."
+                        else -> "About the same on weekends and weekdays." }
+                    addView(label(text, 13f, Palette.body).apply { setPadding(0, dp(4), 0, dp(4)) })
                 }
             }
         }
@@ -1005,7 +1039,7 @@ class StatsActivity : StyledActivity() {
         val SECTION_ICONS = mapOf(
             "Phone battery capacity" to "\uD83D\uDD0B", "By the numbers" to "\uD83D\uDCCA",
             "Charging habits" to "\uD83D\uDD0C", "Around the clock" to "\uD83D\uDD70\uFE0F",
-            "Showdown" to "\uD83C\uDFC6", "Head to head" to "\uD83E\uDD4A", "Over time" to "\uD83D\uDCC8", "Data coverage" to "\uD83D\uDCE1", "Drain spread" to "\uD83D\uDCC9",
+            "Showdown" to "\uD83C\uDFC6", "Head to head" to "\uD83E\uDD4A", "Over time" to "\uD83D\uDCC8", "Data coverage" to "\uD83D\uDCE1", "Drain spread" to "\uD83D\uDCC9", "Weekdays vs weekends" to "\uD83D\uDCC5",
             "Temperature" to "\uD83C\uDF21\uFE0F", "What it costs" to "\uD83D\uDCB5",
             "Where it comes from" to "\uD83C\uDFED", "Just for fun" to "\uD83C\uDF89",
             "What's draining it" to "\uD83D\uDD0D", "Honesty audit" to "\uD83E\uDDD0",

@@ -176,6 +176,7 @@ class StatsActivity : StyledActivity() {
         timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
         // The same capacity figure as the Phone battery capacity headline.
         timed("fun") { renderFun(stats[0], phoneCapacity(phone)?.first ?: capacity.combinedMah, phone) }
+        timed("coverage") { renderCoverage(devices, data, gaps) }
         timed("overhead") { renderOverhead() }
         timed("capabilities") { renderCapabilities() }
         // Which sections still cost main-thread time (audit #4 A6); only the slow ones are listed.
@@ -380,6 +381,41 @@ class StatsActivity : StyledActivity() {
                 rows.forEach { (w, hours, cap) -> addView(barRow(w, hours / top, "${hours.roundToInt()} h", color, cap)) }
             }
         }
+    }
+
+    /** Audit #4 P0: how much of each recent window every device was actually read. */
+    private fun renderCoverage(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>, gaps: GapLimits) {
+        val now = System.currentTimeMillis()
+        val day = 86_400_000L
+        val windows = listOf("24 HOURS" to day, "7 DAYS" to 7 * day, "30 DAYS" to 30 * day)
+        val limit = gapText(gaps.stepMs)
+        val cards = devices.mapIndexedNotNull { i, (_, name, color) ->
+            val times = data[i].map { it.timeMs }
+            val rows = windows.mapNotNull { (w, span) -> CoverageMath.of(times, now - span, now, gaps.stepMs)?.let { w to it } }
+            if (rows.isEmpty()) null else Triple(name, color, rows)
+        }
+        if (cards.isEmpty()) return
+        section("Data coverage", "How much of the time each device was being read.", "A stretch counts as covered " +
+            "when two readings are no more than $limit apart (2.5 times the check interval, and at least an hour). " +
+            "Any longer step, including the time since the last reading, is a gap, and only its part inside the " +
+            "window counts. A window that starts before a device's first reading starts at that reading instead. " +
+            "Gaps are left out of every other number on this page.").apply {
+            cards.forEach { (name, color, rows) ->
+                addView(deviceBanner(name, color))
+                rows.forEach { (w, c) ->
+                    val gapsText = when (c.gaps) { 0 -> "no gaps"; 1 -> "1 gap of ${gapText(c.longestGapMs)}"
+                        else -> "${c.gaps} gaps, longest ${gapText(c.longestGapMs)}" }
+                    val since = if (c.startsAtFirstReading) " · since first reading" else ""
+                    addView(barRow(w, c.percent / 100, "${c.percent.roundToInt()}%", color,
+                        "$gapsText · ${c.readings} readings$since"))
+                }
+            }
+        }
+    }
+
+    private fun gapText(ms: Long): String {
+        val min = ms / 60_000.0
+        return when { min < 90 -> "${min.roundToInt()} min"; min < 48 * 60 -> "${f1(min / 60)} h"; else -> "${f1(min / 1440)} days" }
     }
 
     private fun renderTemperature(t: TempStats) {
@@ -936,7 +972,7 @@ class StatsActivity : StyledActivity() {
         val SECTION_ICONS = mapOf(
             "Phone battery capacity" to "\uD83D\uDD0B", "By the numbers" to "\uD83D\uDCCA",
             "Charging habits" to "\uD83D\uDD0C", "Around the clock" to "\uD83D\uDD70\uFE0F",
-            "Showdown" to "\uD83C\uDFC6", "Head to head" to "\uD83E\uDD4A", "Over time" to "\uD83D\uDCC8",
+            "Showdown" to "\uD83C\uDFC6", "Head to head" to "\uD83E\uDD4A", "Over time" to "\uD83D\uDCC8", "Data coverage" to "\uD83D\uDCE1",
             "Temperature" to "\uD83C\uDF21\uFE0F", "What it costs" to "\uD83D\uDCB5",
             "Where it comes from" to "\uD83C\uDFED", "Just for fun" to "\uD83C\uDF89",
             "What's draining it" to "\uD83D\uDD0D", "Honesty audit" to "\uD83E\uDDD0",

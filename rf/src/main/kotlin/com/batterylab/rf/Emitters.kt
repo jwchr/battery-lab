@@ -219,18 +219,34 @@ class EmitterTable(installKey: InstallKey, val named: Boolean, val cap: Int = MA
 
     val size: Int get() = synchronized(lock) { ordered.size }
 
-    fun csv(): String = synchronized(lock) {
+    /** Lock held. One device's line, never over [LINE_MAX] bytes. */
+    private fun line(d: Device): String {
+        fun cells(name: String) = listOf(d.number.toString(), d.kind, d.key, d.alias ?: "",
+            d.connectable?.toString() ?: "", Num.opt(d.vendorId), d.band ?: "", name,
+            d.firstNs.toString(), d.firstWall.toString(), d.lastNs.toString(), d.lastWall.toString(),
+            d.rows.toString(), Num.opt(d.best), Num.opt(d.last))
+        val line = Csv.line(cells(FreeText.encode(d.name ?: "")), setOf(NAME_COLUMN))
+        return if (line.toByteArray(Charsets.UTF_8).size > LINE_MAX) Csv.line(cells(""), setOf(NAME_COLUMN)) else line
+    }
+
+    fun csv(): String = snapshot().first
+
+    /** The whole file and the number of devices in it. */
+    fun snapshot(): Pair<String, Int> = synchronized(lock) {
         val sb = StringBuilder(Csv.line(COLUMNS))
-        for (d in ordered) {
-            fun cells(name: String) = listOf(d.number.toString(), d.kind, d.key, d.alias ?: "",
-                d.connectable?.toString() ?: "", Num.opt(d.vendorId), d.band ?: "", name,
-                d.firstNs.toString(), d.firstWall.toString(), d.lastNs.toString(), d.lastWall.toString(),
-                d.rows.toString(), Num.opt(d.best), Num.opt(d.last))
-            var line = Csv.line(cells(FreeText.encode(d.name ?: "")), setOf(NAME_COLUMN))
-            if (line.toByteArray(Charsets.UTF_8).size > LINE_MAX) line = Csv.line(cells(""), setOf(NAME_COLUMN))
-            sb.append(line)
-        }
-        sb.toString()
+        for (d in ordered) sb.append(line(d))
+        sb.toString() to ordered.size
+    }
+
+    /**
+     * Lines for the devices numbered above [after], to append to emitters.csv before any row that
+     * points at them is written, and the highest number included. Each device is appended at most
+     * once between full rewrites, so the file stays within [worstCaseBytes].
+     */
+    fun linesAfter(after: Int): Pair<String, Int> = synchronized(lock) {
+        val sb = StringBuilder()
+        for (i in after until ordered.size) sb.append(line(ordered[i]))
+        sb.toString() to ordered.size
     }
 
     fun devices(): List<DeviceView> = synchronized(lock) {
@@ -246,10 +262,20 @@ class EmitterTable(installKey: InstallKey, val named: Boolean, val cap: Int = MA
 
 /** Reads emitters.csv for the device list after a session (R31). */
 object EmitterFile {
+    /**
+     * One row per device number, the last one written. Between full rewrites a session appends
+     * new devices, and a session interrupted then can hold a device twice.
+     */
+    fun latest(t: CsvTable): CsvTable {
+        val byNumber = LinkedHashMap<String, List<String>>()
+        for (r in t.rows) { val n = t.cell(r, "emitter") ?: continue; byNumber.remove(n); byNumber[n] = r }
+        return CsvTable(t.header, byNumber.values.sortedBy { t.cell(it, "emitter")?.toIntOrNull() ?: Int.MAX_VALUE })
+    }
+
     fun read(dir: File): List<DeviceView> {
         val f = File(dir, FileNames.EMITTERS)
         if (!f.isFile) return emptyList()
-        val t = try { Csv.parse(f.readText(Charsets.UTF_8)) } catch (_: Exception) { return emptyList() }
+        val t = try { latest(Csv.parse(f.readText(Charsets.UTF_8))) } catch (_: Exception) { return emptyList() }
         return t.rows.mapNotNull { r ->
             val n = t.cell(r, "emitter")?.toIntOrNull() ?: return@mapNotNull null
             DeviceView(n, t.cell(r, "kind") ?: "", t.cell(r, "key") ?: "",

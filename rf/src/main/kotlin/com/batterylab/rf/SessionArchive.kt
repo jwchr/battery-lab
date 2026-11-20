@@ -37,7 +37,7 @@ object SessionArchive {
      */
     fun export(dir: File, out: OutputStream, includeNames: Boolean = false) {
         val files = dir.listFiles()?.filter { it.isFile && FileNames.allowed(it.name) }?.sortedBy { it.name } ?: emptyList()
-        val emitters = files.firstOrNull { it.name == FileNames.EMITTERS }?.let { Csv.parse(it.readText(Charsets.UTF_8)) }
+        val emitters = files.firstOrNull { it.name == FileNames.EMITTERS }?.let { EmitterFile.latest(Csv.parse(it.readText(Charsets.UTF_8))) }
         val renumber = emitters?.let { renumbering(it) }
         ZipOutputStream(out).use { zip ->
             for (f in files) {

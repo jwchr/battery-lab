@@ -410,6 +410,56 @@ class EverythingNearbyTest {
         n.c.stop()
     }
 
+    @Test fun aNewDeviceIsOnDiskBeforeAnyRowPointsAtIt() {
+        val n = nearby()
+        assertTrue(File(n.dir, FileNames.EMITTERS).isFile)
+        for (i in 1..3) n.hit(fakeAddress(i), -60)
+        n.sch.advanceSeconds(0.3)
+        // Drained into rows but no tick yet: an interrupted session already has all three.
+        assertEquals(listOf(1, 2, 3), EmitterFile.read(n.dir).map { it.number })
+        n.sch.advanceSeconds(10.5)
+        n.hit(fakeAddress(4), -61); n.hit(fakeAddress(1), -40)
+        n.sch.advanceSeconds(0.3)
+        val dev = EmitterFile.read(n.dir)
+        assertEquals(listOf(1, 2, 3, 4), dev.map { it.number })
+        // The file can hold a device twice between rewrites; readers and exports keep the last line.
+        n.hit(fakeAddress(5), -62)
+        n.sch.advanceSeconds(0.3)
+        val raw = Csv.parse(File(n.dir, FileNames.EMITTERS).readText())
+        val zip = unzip(ByteArrayOutputStream().also { SessionArchive.export(n.dir, it) }.toByteArray())
+        val e = Csv.parse(zip.getValue(FileNames.EMITTERS))
+        assertEquals((1..5).map { it.toString() }, e.rows.map { e.cell(it, "emitter") })
+        assertTrue(raw.rows.size >= 5)
+        n.c.stop()
+        val end = Csv.parse(File(n.dir, FileNames.EMITTERS).readText())
+        assertEquals(5, end.rows.size)
+        assertEquals(-40, EmitterFile.read(n.dir).first { it.number == 1 }.bestDbm)
+    }
+
+    @Test fun aDeviceWrittenTwiceReadsAsItsLastLine() {
+        val dir = newRoot().also { it.mkdirs() }
+        val h = Csv.line(EmitterTable.COLUMNS)
+        fun row(n: Int, rows: Int) = Csv.line(EmitterTable.COLUMNS.map { c -> when (c) {
+            "emitter" -> n.toString(); "kind" -> "ble"; "rows" -> rows.toString(); "first_boot_ns" -> n.toString(); else -> "" } },
+            setOf(EmitterTable.NAME_COLUMN))
+        File(dir, FileNames.EMITTERS).writeText(h + row(1, 1) + row(2, 1) + row(1, 9))
+        assertEquals(listOf(1 to 9L, 2 to 1L), EmitterFile.read(dir).map { it.number to it.rows })
+    }
+
+    @Test fun aReplayKeepsTheDeviceTable() {
+        val n = nearby().also { it.play() }
+        val req = Replay.request(n.dir)
+        val r = n.c.start(req) as StartResult.Started
+        n.sch.advanceSeconds(20.0)
+        val t0 = System.nanoTime()
+        while (n.c.running && System.nanoTime() - t0 < 3_000_000_000L) Thread.sleep(10)
+        val replay = n.c.store.dir(r.id)
+        assertEquals(EmitterFile.read(n.dir), EmitterFile.read(replay))
+        assertEquals(Keys.MODE_NAMED, SessionReader.read(replay).props[Keys.IDENTIFIER_MODE])
+        val ob = SessionReader.obs(replay, "ble_scan")
+        assertTrue(ob.rows.isNotEmpty() && ob.rows.all { (ob.cell(it, "emitter")!!.toInt()) in 1..8 })
+    }
+
     @Test fun namesAreCleanedAndCapped() {
         assertEquals("Tag [address]", Names.clean("Tag 02:00:00:00:00:09"))
         assertEquals("[address] x", Names.clean("0200000000AB x"))

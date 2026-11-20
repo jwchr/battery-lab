@@ -187,6 +187,21 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
         emittersBytes = size
     }
 
+    /**
+     * Appends device lines to emitters.csv, which must already exist, before the rows that point
+     * at them reach the disk. Counted inside the same worst-case reserve.
+     */
+    fun appendEmitters(text: String) {
+        if (text.isEmpty()) return
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        require(emittersBytes + bytes.size <= emittersWorstCase) { "emitters.csv is larger than its reserve" }
+        val f = File(dir, FileNames.EMITTERS)
+        require(f.isFile) { "emitters.csv has not been started" }
+        FileOutputStream(f, true).use { it.write(bytes) }
+        totalBytes += bytes.size
+        emittersBytes += bytes.size
+    }
+
     /** Appends one obs row. Returns false, writing nothing, when the size limit would be passed. */
     fun writeObs(streamId: String, o: Obs): Boolean {
         val st = streams[streamId] ?: return true

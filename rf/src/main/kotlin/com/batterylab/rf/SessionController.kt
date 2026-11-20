@@ -16,9 +16,16 @@ class StartRequest(
     val replayMarkers: List<Pair<Long, String>> = emptyList(),
     /** "Everything nearby" only: the session's device table, written to emitters.csv. */
     val emitters: EmitterTable? = null,
+    /** A replay of an "Everything nearby" session: the source's emitters.csv and identifier mode, copied as they are. */
+    val replayEmitters: String? = null,
+    val replayIdentifierMode: String? = null,
 ) {
     /** Names are written only in named mode, which needs a device table. */
-    val identifierMode: String get() = if (emitters?.named == true) Keys.MODE_NAMED else Keys.MODE_NONE
+    val identifierMode: String get() = replayIdentifierMode
+        ?: if (emitters?.named == true) Keys.MODE_NAMED else Keys.MODE_NONE
+
+    val emittersWorstCase: Long get() = emitters?.worstCaseBytes
+        ?: replayEmitters?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0
 
     /** Default 90 seconds, maximum 10 minutes. */
     val durationS: Int = durationS.coerceIn(1, SessionController.MAX_DURATION_S)
@@ -98,6 +105,8 @@ class SessionController(
         var sinksClosed = false
         var stopRequested = false
         var ticks = 0L
+        /** Devices numbered up to this are in emitters.csv on disk. */
+        var emittersOnDisk = 0
         /** Counted down once every stream's start() has returned or been skipped. */
         val startupDone = CountDownLatch(1)
     }
@@ -149,9 +158,13 @@ class SessionController(
             props[Keys.DURATION_LIMIT_S] = req.durationS.toString()
             props.putAll(req.extraProps)
             val streams: List<Stream>
+            var emittersOnDisk = 0
             val writer: SessionWriter
             try {
-                writer = SessionWriter(store.dir(id), props, sizeLimitBytes, req.emitters?.worstCaseBytes ?: 0)
+                writer = SessionWriter(store.dir(id), props, sizeLimitBytes, req.emittersWorstCase)
+                // The device table is on disk from the start, so no row ever points at a device it lacks.
+                req.emitters?.let { emittersOnDisk = it.snapshot().let { (text, n) -> writer.writeEmitters(text); n } }
+                req.replayEmitters?.let { writer.writeEmitters(it) }
                 streams = req.streams(scheduler)
                 for (s in streams) writer.addStream(s.id, s.kind, s.unit, s.nominalRateHz, s.extraColumns, s.binary)
             } catch (e: Exception) {
@@ -160,6 +173,7 @@ class SessionController(
                 return StartResult.Refused("Could not create the session: ${e.javaClass.simpleName}")
             }
             a = Active(id, req.scope, req.provenance, req.durationS, startNs, scheduler, writer, streams, req.emitters)
+            a.emittersOnDisk = emittersOnDisk
             streams.forEach { a.live[it.id] = Live(it.id, it.kind) }
             writer.event(startNs, startWall, EventType.SESSION, value = "start")
             active = a
@@ -202,8 +216,13 @@ class SessionController(
             if (a.stopping) return
             try { a.writer.flush() } catch (_: Exception) { }
             a.ticks++
-            if (a.ticks % EMITTERS_EVERY_S == 0L) a.emitters?.let { try { a.writer.writeEmitters(it.csv()) } catch (_: Exception) { } }
+            if (a.ticks % EMITTERS_EVERY_S == 0L) a.emitters?.let { rewriteEmitters(a, it) }
         }
+    }
+
+    /** Lock held. The whole table: fresh counts and signals for the device list. */
+    private fun rewriteEmitters(a: Active, t: EmitterTable) {
+        try { val (text, n) = t.snapshot(); a.writer.writeEmitters(text); a.emittersOnDisk = n } catch (_: Exception) { }
     }
 
     /** Adds a marker at the current time. Returns false outside a session. */
@@ -263,7 +282,7 @@ class SessionController(
                         a.writer.event(end, endWall, EventType.STATUS, it.id, Status.ENDED)
                     }
                     a.writer.event(end, endWall, EventType.SESSION, value = "stop", text = reason)
-                    a.emitters?.let { a.writer.writeEmitters(it.csv()) }
+                    a.emitters?.let { a.writer.writeEmitters(it.snapshot().first) }
                     true
                 } catch (_: Exception) { false }
                 // R12: addresses and the key leave memory with the session.
@@ -333,6 +352,13 @@ class SessionController(
 
         override fun observe(obs: Obs) = synchronized(lock) {
             if (!accepting()) return
+            // A new device's line goes to disk before the row that points at it.
+            val t = a.emitters
+            if (t != null && obs.emitter > a.emittersOnDisk) try {
+                val (text, n) = t.linesAfter(a.emittersOnDisk)
+                a.writer.appendEmitters(text)
+                a.emittersOnDisk = n
+            } catch (_: Exception) { }
             val before = a.writer.totalBytes
             if (!a.writer.writeObs(stream.id, obs)) { requestStop(a, StopReason.SIZE_LIMIT); return }
             live.rows++
@@ -415,6 +441,8 @@ object Replay {
             provenance = provenance,
             durationS = durationS,
             extraProps = mapOf(Keys.SOURCE_ID to info.id),
+            replayEmitters = java.io.File(dir, FileNames.EMITTERS).takeIf { it.isFile }?.readText(Charsets.UTF_8),
+            replayIdentifierMode = info.props[Keys.IDENTIFIER_MODE]?.takeIf { java.io.File(dir, FileNames.EMITTERS).isFile },
             streams = { sch ->
                 info.streams.map { s ->
                     val bin = java.io.File(dir, FileNames.bin(s.id)).takeIf { it.isFile }?.readBytes()

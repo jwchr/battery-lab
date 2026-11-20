@@ -430,7 +430,7 @@ class StatsActivity : StyledActivity() {
             "observed stretch of discharge from the last 30 days goes to weekdays or weekends by the local day of its " +
             "midpoint. Each side's rate is its total points dropped over its total hours. A side shows only with at " +
             "least ${WeekSplitMath.MIN_STRETCHES} stretches and ${WeekSplitMath.MIN_HOURS.roundToInt()} hours. A " +
-            "difference shows what happened, not why: weekends usually mean different use.").apply {
+            "difference shows what happened, not why.").apply {
             devices.forEachIndexed { i, (_, name, color) ->
                 val w = week[i] ?: return@forEachIndexed
                 addView(deviceBanner(name, color))

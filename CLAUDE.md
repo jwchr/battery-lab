@@ -14,9 +14,9 @@ This app's SSOT rows: W098, W099.
 - **Phone installs** (Jeff does them): `install -r` only, after backing up `databases/battery_lab.db`, `-wal` and `-shm` with `run-as`. Never uninstall, never install a build signed with another key (both wipe the history), never force-stop the app. Mac adb notes: `docs/MAC.md`.
 
 ## Build and test (Linux cloud)
-- Modules: `app` (phone), `wear` (Watch), `widgetprobe` (widget test tool). compileSdk 35, Java 17 target, Gradle 8.9 in CI.
+- Modules: `app` (phone), `rf` (RF Lab core, plain Kotlin, no Android), `wear` (Watch), `widgetprobe` (widget test tool). compileSdk 35, Java 17 target, Gradle 8.9 in CI.
 - SDK setup (cloud environment "battery-lab" allows dl.google.com): install the command-line tools into `$HOME/android-sdk`, then `sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"`.
-- Quiet check: `gradle --no-daemon -q :app:assembleDebug :app:testDebugUnitTest :wear:assembleDebug :widgetprobe:assembleDebug`. If Maven Central reports a missing dependency, rerun with `--refresh-dependencies`.
+- Quiet check: `gradle --no-daemon -q :rf:test :app:assembleDebug :app:testDebugUnitTest :wear:assembleDebug :widgetprobe:assembleDebug`. If Maven Central reports a missing dependency, rerun with `--refresh-dependencies`.
 - `.github/workflows/build-apks.yml` builds the phone and Watch APKs, manual run only. It costs GitHub Actions minutes, so run it only when Jeff needs APKs.
 
 ## Needs Jeff's devices

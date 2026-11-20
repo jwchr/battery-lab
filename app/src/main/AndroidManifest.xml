@@ -38,6 +38,7 @@
             </intent-filter>
         </activity>
         <activity android:name=".StatsActivity" android:exported="false" />
+        <activity android:name=".rf.RfLabActivity" android:exported="false" />
         <service android:name=".BatteryPollService"
             android:exported="true"
             android:permission="android.permission.BIND_JOB_SERVICE" />

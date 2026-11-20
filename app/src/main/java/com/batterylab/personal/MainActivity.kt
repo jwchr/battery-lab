@@ -207,6 +207,7 @@ class MainActivity : StyledActivity() {
         section("Stats", "For the curious", "Battery health, charging habits, hungriest hours, " +
             "rolling averages and some very nerdy conversions.").apply {
             button("Open stats", primary = true) { startActivity(Intent(this@MainActivity, StatsActivity::class.java)) }
+            button("Open RF Lab") { startActivity(Intent(this@MainActivity, com.batterylab.personal.rf.RfLabActivity::class.java)) }
         }
 
         section("Lab tools", "Sources, tests and your data", tag = if (labOpen) "Open" else null).apply {

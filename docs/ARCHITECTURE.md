@@ -125,9 +125,17 @@ A sensible fallback cadence is decided from that data, not assumed.
   non-exported activity), `RfRuntime` (the one controller per process, so rotation keeps a
   session) and `WifiLinkStream` (ConnectivityManager network callback plus
   `getNetworkCapabilities` once per second).
+- Bluetooth (PR B): `RingLinkStream` in `:rf` is the ring_link state machine; it drives
+  `RingLinkAdapter`, the only RF code that touches `BluetoothGatt` (connectGatt with its own
+  HandlerThread, disconnect, close, readRemoteRssi). It holds `RingReader`'s one-connection lock
+  from before connect until after close and stays off while a battery test runs. `BleScanHub`
+  in `:rf` turns one unfiltered scan (`BleScanAdapter`) into `ble_scan` (Ring rows only) and
+  `ble_others` (strongest other signal and distinct count per second, counted with a keyed
+  hash whose key lives only in memory). `BluetoothWatch` is the session-only Bluetooth on/off
+  receiver.
 - A session is a folder `files/rf/sessions/<id>/` with `session.properties` (format 1,
   min_reader 1), `streams.csv`, `events.csv` and one `obs_<stream>.csv` per stream; a
   `bin_<stream>.dat` is kept byte for byte. Statistics are computed from the obs rows when the
   result card is shown and are never stored as observations.
-- Nothing runs outside a session: no service, receiver, job or timer. The battery database
+- Nothing runs outside a session: no service, receiver, scan, GATT client, job or timer. The battery database
   gets only two `probe_events` lines per session, and its schema stays at version 7.

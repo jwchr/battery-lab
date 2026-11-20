@@ -86,6 +86,8 @@ class SessionController(
         val markers = mutableListOf<Marker>()
         val timers = mutableListOf<Cancellable>()
         var stopping = false
+        /** Set once the streams have stopped: until then a stream's last rows are still written. */
+        var sinksClosed = false
         var stopRequested = false
         /** Counted down once every stream's start() has returned or been skipped. */
         val startupDone = CountDownLatch(1)
@@ -209,6 +211,15 @@ class SessionController(
         true
     }
 
+    /**
+     * R11: the screen left the foreground. A rotation (changing configurations) keeps the session;
+     * anything else ends it, off the caller's thread so the screen never waits on a stream.
+     */
+    fun screenStopped(changingConfigurations: Boolean) {
+        if (changingConfigurations || !running) return
+        Thread({ stop(StopReason.LEFT_SCREEN) }, "rf-leave").apply { isDaemon = true; start() }
+    }
+
     /** Ends the session. Safe to call twice and from any thread; streams get 3 seconds to stop. */
     fun stop(reason: String = StopReason.STOP) = stopSession(null, reason)
 
@@ -232,6 +243,7 @@ class SessionController(
         var actualS = 0
         try {
             synchronized(lock) {
+                a.sinksClosed = true
                 val end = a.scheduler.bootNs()
                 val endWall = a.scheduler.wallMs()
                 actualS = ((end - a.startNs) / SECOND_NS).toInt()
@@ -296,7 +308,8 @@ class SessionController(
     private inner class SinkImpl(private val a: Active, private val stream: Stream) : StreamSink {
         private val live get() = a.live.getValue(stream.id)
 
-        private fun accepting(): Boolean = active === a && !a.stopping && !live.ended
+        /** Rows a stream writes while it is being stopped (its buffered tail) are kept. */
+        private fun accepting(): Boolean = active === a && !a.sinksClosed && !live.ended
 
         private fun recordPoint(t: Long, dbm: Int?, ok: Boolean) {
             val l = live
@@ -336,6 +349,11 @@ class SessionController(
             if (!accepting()) return
             live.dropped += count
             a.writer.dropped(stream.id, count)
+        }
+
+        override fun othersSeen(count: Int) = synchronized(lock) {
+            if (!accepting()) return
+            a.writer.othersSeen(stream.id, count)
         }
 
         override fun failed(reason: String) {

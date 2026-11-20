@@ -4,6 +4,11 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- RF Lab scanning, only inside a session the user starts (R28). No permission flags, because
+         Android withholds scan results without location. The app never asks for a location fix. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Read-only: is the phone on Wi-Fi or cellular at each check. Not internet access. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

@@ -61,6 +61,8 @@ class StatsActivity : StyledActivity() {
         val watchCompanion: List<Reading>,
         /** Per device (same order as [devices]): each window's label and coverage, worked out off the main thread. */
         val coverage: List<List<Pair<String, Coverage>>>,
+        /** Per device: drain spread over the last 30 days, or null with too few stretches. */
+        val spread: List<DrainSpread?>,
     )
 
     /** The drain breakdown and the app names it shows, prepared off the main thread. */
@@ -130,7 +132,9 @@ class StatsActivity : StyledActivity() {
         return Loaded(devices, data, gaps, stats, capacity, usage, idle,
             store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain, store.forecasts(),
             if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList(),
-            data.map { readings -> coverageRows(readings.map { it.timeMs }, now, gaps) })
+            data.map { readings -> coverageRows(readings.map { it.timeMs }, now, gaps) },
+            data.map { readings -> DrainSpreadMath.of(BatteryMath.dischargeStretches(
+                readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = gaps), now - 30 * 86_400_000L) })
     }
 
     private fun renderTitle() {
@@ -176,6 +180,7 @@ class StatsActivity : StyledActivity() {
         timed("showdown") { renderShowdown(devices, data) }
         timed("headtohead") { renderHeadToHead(devices, stats) }
         timed("rolling") { renderRolling(devices, data) }
+        timed("spread") { renderSpread(devices, l.spread) }
         timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
         // The same capacity figure as the Phone battery capacity headline.
         timed("fun") { renderFun(stats[0], phoneCapacity(phone)?.first ?: capacity.combinedMah, phone) }
@@ -387,6 +392,30 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Audit #4 P0: how much of each recent window every device was actually read. */
+    /** Audit #4 roadmap: how much the drain rate swings between stretches, worked out in [load]. */
+    private fun renderSpread(devices: List<Triple<String, String, Int>>, spread: List<DrainSpread?>) {
+        if (spread.all { it == null }) return
+        section("Drain spread", "How much your drain rate swings from one stretch to the next.", "Each observed " +
+            "stretch of discharge from the last 30 days (at least an hour and 4 points, the same stretches as Over time) " +
+            "gives one rate in percent per hour. Typical is the median; the range runs from the 10th to the 90th " +
+            "percentile, each the value at position ceil(p × n / 100) of the sorted rates. Needs at least " +
+            "${DrainSpreadMath.MIN_STRETCHES} stretches.").apply {
+            devices.forEachIndexed { i, (_, name, color) ->
+                val d = spread[i] ?: return@forEachIndexed
+                addView(deviceBanner(name, color))
+                addView(label("Typical ${f1(d.median)}% per hour; most stretches ${f1(d.p10)} to ${f1(d.p90)}. " +
+                    "Calmest ${f1(d.calmest.percentPerHour)}% per hour (${shortWhen(d.calmest.startMs)}, ${f1(d.calmest.hours)} h); " +
+                    "hungriest ${f1(d.hungriest.percentPerHour)}% per hour (${shortWhen(d.hungriest.startMs)}, ${f1(d.hungriest.hours)} h).",
+                    13f, Palette.body).apply { setPadding(0, dp(4), 0, dp(4)) })
+                val top = d.bands.max().coerceAtLeast(1)
+                d.bands.forEachIndexed { b, n ->
+                    addView(barRow("${DrainSpreadMath.BAND_LABELS[b]}", n.toDouble() / top, "$n",
+                        color, if (b == 0) "stretches by % per hour, ${d.stretches} in all" else null))
+                }
+            }
+        }
+    }
+
     private fun coverageRows(times: List<Long>, now: Long, gaps: GapLimits): List<Pair<String, Coverage>> {
         val day = 86_400_000L
         return listOf("24 HOURS" to day, "7 DAYS" to 7 * day, "30 DAYS" to 30 * day)
@@ -976,7 +1005,7 @@ class StatsActivity : StyledActivity() {
         val SECTION_ICONS = mapOf(
             "Phone battery capacity" to "\uD83D\uDD0B", "By the numbers" to "\uD83D\uDCCA",
             "Charging habits" to "\uD83D\uDD0C", "Around the clock" to "\uD83D\uDD70\uFE0F",
-            "Showdown" to "\uD83C\uDFC6", "Head to head" to "\uD83E\uDD4A", "Over time" to "\uD83D\uDCC8", "Data coverage" to "\uD83D\uDCE1",
+            "Showdown" to "\uD83C\uDFC6", "Head to head" to "\uD83E\uDD4A", "Over time" to "\uD83D\uDCC8", "Data coverage" to "\uD83D\uDCE1", "Drain spread" to "\uD83D\uDCC9",
             "Temperature" to "\uD83C\uDF21\uFE0F", "What it costs" to "\uD83D\uDCB5",
             "Where it comes from" to "\uD83C\uDFED", "Just for fun" to "\uD83C\uDF89",
             "What's draining it" to "\uD83D\uDD0D", "Honesty audit" to "\uD83E\uDDD0",

@@ -174,6 +174,25 @@ class BleScanTest {
         assertEquals(1, ringPort.gateReleased)
     }
 
+    @Test fun aStopBetweenDrainsKeepsQueuedResultsAndTheSecondInProgress() {
+        val (c, sch) = controller()
+        val scanPort = FakeScanPort()
+        val r = c.start(StartRequest(Scope.MY_DEVICES, Provenance.LIVE, 20, streams = { s ->
+            val h = BleScanHub(scanPort, s, { it == TARGET })
+            listOf(h.scanStream, h.othersStream)
+        })) as StartResult.Started
+        sch.advanceSeconds(2.1)
+        hit(scanPort, sch, TARGET, -52)
+        for (i in 0 until 4) hit(scanPort, sch, fakeAddress(i), -70)
+        c.stop()                            // before the next 250 ms drain
+        val dir = c.store.dir(r.id)
+        assertEquals(listOf("-52"), SessionReader.obs(dir, "ble_scan").let { t -> t.rows.map { t.cell(it, "rssi_dbm") } })
+        val others = SessionReader.obs(dir, "ble_others")
+        assertEquals("4", others.cell(others.rows.last(), BleScanHub.DEVICES))
+        val stopNs = sch.now
+        assertTrue(others.rows.all { others.cell(it, "t_boot_ns")!!.toLong() <= stopNs })
+    }
+
     @Test fun rotationKeepsTheSessionAndLeavingEndsItWithin3Seconds() {
         val (c, sch) = controller()
         c.start(StartRequest(Scope.MY_LINKS, Provenance.SIMULATED, 60, streams = { SimulatedStream.pair(1, it) }))

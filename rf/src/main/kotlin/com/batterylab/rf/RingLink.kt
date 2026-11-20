@@ -50,7 +50,9 @@ interface RingLinkEvents {
  *   15 seconds. On failure or a lost link: disconnect(), wait up to 2 seconds for the disconnect
  *   callback, close(), pause 10 seconds, try again while the session runs.
  * - While connected: one read per second, never two outstanding. No callback within 3 seconds is
- *   stored as timeout; three in a row count as a lost link. A late callback is counted and ignored.
+ *   stored as timeout; three in a row count as a lost link. Android's RSSI callback carries no
+ *   request id, so a timed-out read stays outstanding: no new read is issued until its late
+ *   callback arrives, which is counted and ignored, never stored as a fresh sample.
  * - Stop: disconnect(), wait up to 2 seconds, close() and release the gate, on every path.
  */
 class RingLinkStream(private val port: RingLinkPort, private val scheduler: Scheduler) : Stream, RingLinkEvents {
@@ -77,6 +79,8 @@ class RingLinkStream(private val port: RingLinkPort, private val scheduler: Sche
     private var readTimer: Cancellable? = null
     private var readId = 0
     private var outstanding = false
+    /** The outstanding read already timed out; its callback, if it ever comes, is stale. */
+    private var timedOut = false
     private var timeoutsInRow = 0
     private var ticks = 0L
     private var originNs = 0L
@@ -170,6 +174,7 @@ class RingLinkStream(private val port: RingLinkPort, private val scheduler: Sche
         state = State.CONNECTED
         timeoutsInRow = 0
         outstanding = false
+        timedOut = false
         say(Status.RECORDING)
         originNs = scheduler.bootNs()
         ticks = 0
@@ -196,22 +201,32 @@ class RingLinkStream(private val port: RingLinkPort, private val scheduler: Sche
         } catch (e: Exception) { false }
         if (!started) { row(null, READ_NOT_STARTED, null); return }
         outstanding = true
+        timedOut = false
         val id = ++readId
         readTimer = scheduler.schedule(READ_TIMEOUT_NS) { synchronized(lock) { readTimeout(l, id) } }
     }
 
-    /** Lock held. */
+    /**
+     * Lock held. The read stays outstanding, so no second read can overlap it; each further 3
+     * seconds without a callback is another timeout, and the third in a row ends the link.
+     */
     private fun readTimeout(l: Int, id: Int) {
         if (l != link || state != State.CONNECTED || !outstanding || id != readId) return
-        outstanding = false
+        timedOut = true
         row(null, READ_TIMEOUT, null)
         timeoutsInRow++
-        if (timeoutsInRow >= 3) failLink("three read timeouts")
+        if (timeoutsInRow >= 3) { failLink("three read timeouts"); return }
+        readTimer = scheduler.schedule(READ_TIMEOUT_NS) { synchronized(lock) { readTimeout(l, id) } }
     }
 
     override fun rssi(link: Int, value: Int, gattStatus: Int) { synchronized(lock) {
         if (stopped) return
-        if (link != this.link || state != State.CONNECTED || !outstanding) {
+        if (link != this.link || state != State.CONNECTED || !outstanding || timedOut) {
+            // The answer to a read that already timed out frees the link for the next read.
+            if (link == this.link && state == State.CONNECTED && outstanding) {
+                outstanding = false; timedOut = false
+                readTimer?.cancel(); readTimer = null
+            }
             late++
             say(shown, "late callbacks: $late")
             return
@@ -279,7 +294,7 @@ class RingLinkStream(private val port: RingLinkPort, private val scheduler: Sche
     private fun stopReads() {
         tick?.cancel(); tick = null
         readTimer?.cancel(); readTimer = null
-        outstanding = false
+        outstanding = false; timedOut = false
     }
 
     /** Lock held. Reports a status and remembers it, so a late-callback count keeps the current one. */

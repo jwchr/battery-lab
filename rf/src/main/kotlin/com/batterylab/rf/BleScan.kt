@@ -184,7 +184,12 @@ class BleScanHub(
         if (lost > 0) scanSink?.dropped(lost)
         while (true) accept(queue.poll() ?: break)
         if (bucket < 0) return
-        if (final) { flushBucket(); return }
+        if (final) {
+            // Every second up to now, then the second in progress, stamped now rather than in the future.
+            while (originNs + (bucket + 1) * NS_PER_S <= nowNs) { flushBucket(); bucket++ }
+            flushBucket(nowNs)
+            return
+        }
         while (originNs + (bucket + 1) * NS_PER_S <= nowNs - GRACE_NS) { flushBucket(); bucket++ }
     }
 
@@ -207,10 +212,10 @@ class BleScanHub(
     }
 
     /** Lock held. One ble_others row for the current second, then a fresh, empty second. */
-    private fun flushBucket() {
-        val end = originNs + (bucket + 1) * NS_PER_S
+    private fun flushBucket(atNs: Long? = null) {
+        val end = minOf(originNs + (bucket + 1) * NS_PER_S, atNs ?: Long.MAX_VALUE)
         val s = strongest
-        othersSink?.observe(Obs(end, originWallMs + (bucket + 1) * 1000, 0, s, if (s != null) Status.OK else Status.NO_VALUE,
+        othersSink?.observe(Obs(end, originWallMs + (end - originNs) / 1_000_000, 0, s, if (s != null) Status.OK else Status.NO_VALUE,
             mapOf(DEVICES to bucketSet.size.toString())))
         strongest = null
         bucketSet.clear()
@@ -224,14 +229,19 @@ class BleScanHub(
         return v
     }
 
-    /** Either stream's stop ends the scan. Safe to call twice. */
+    /**
+     * Either stream's stop ends the scan. Safe to call twice. Results already queued and the
+     * second in progress are written first, so a stop between drains loses nothing.
+     */
     private fun stopAll() { synchronized(lock) {
         if (stopped) return
-        stopped = true
         drainTask?.cancel(); drainTask = null
         restartTask?.cancel(); restartTask = null
         if (scanning) { try { port.stopScan() } catch (_: Exception) { } }
         scanning = false
+        if (started) { try { drainNow(scheduler.bootNs(), final = true) } catch (_: Exception) { } }
+        bucket = -1
+        stopped = true
         if (started) { try { port.unwatchBluetooth() } catch (_: Exception) { } }
         queue.clear()
         bucketSet.clear()

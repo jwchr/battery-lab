@@ -130,6 +130,26 @@ class RingLinkTest {
         s.stop()
     }
 
+    @Test fun theLateAnswerToATimedOutReadIsNeverStoredAsANewSample() {
+        val (s, port, p) = setup()
+        val (sch, sink) = p
+        port.up()
+        sch.advanceSeconds(1.0)            // read 1
+        sch.advanceSeconds(3.1)            // read 1 times out
+        assertEquals(1, sink.rows.count { it.status == RingLinkStream.READ_TIMEOUT })
+        sch.advanceSeconds(1.0)
+        assertEquals("no second read while the first may still answer", 1, port.reads)
+        port.answer(-40)                   // read 1's answer, late
+        assertTrue(sink.rows.none { it.rssiDbm == -40 })
+        assertTrue(sink.statuses.any { it.second == "late callbacks: 1" })
+        sch.advanceSeconds(1.0)            // read 2
+        assertEquals(2, port.reads)
+        port.answer(-61)
+        assertEquals(-61, sink.rows.last().rssiDbm)
+        assertEquals(1, port.maxOutstanding)
+        s.stop()
+    }
+
     @Test fun aConnectAttemptEndsAt15Seconds() {
         val (s, port, p) = setup()
         val (sch, _) = p

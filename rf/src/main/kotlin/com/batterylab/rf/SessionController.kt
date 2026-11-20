@@ -86,6 +86,8 @@ class SessionController(
         val markers = mutableListOf<Marker>()
         val timers = mutableListOf<Cancellable>()
         var stopping = false
+        /** Set once the streams have stopped: until then a stream's last rows are still written. */
+        var sinksClosed = false
         var stopRequested = false
         /** Counted down once every stream's start() has returned or been skipped. */
         val startupDone = CountDownLatch(1)
@@ -241,6 +243,7 @@ class SessionController(
         var actualS = 0
         try {
             synchronized(lock) {
+                a.sinksClosed = true
                 val end = a.scheduler.bootNs()
                 val endWall = a.scheduler.wallMs()
                 actualS = ((end - a.startNs) / SECOND_NS).toInt()
@@ -305,7 +308,8 @@ class SessionController(
     private inner class SinkImpl(private val a: Active, private val stream: Stream) : StreamSink {
         private val live get() = a.live.getValue(stream.id)
 
-        private fun accepting(): Boolean = active === a && !a.stopping && !live.ended
+        /** Rows a stream writes while it is being stopped (its buffered tail) are kept. */
+        private fun accepting(): Boolean = active === a && !a.sinksClosed && !live.ended
 
         private fun recordPoint(t: Long, dbm: Int?, ok: Boolean) {
             val l = live

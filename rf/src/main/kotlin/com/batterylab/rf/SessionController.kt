@@ -14,7 +14,12 @@ class StartRequest(
     val streams: (Scheduler) -> List<Stream>,
     /** Markers to add at these offsets from the start (replay). */
     val replayMarkers: List<Pair<Long, String>> = emptyList(),
+    /** "Everything nearby" only: the session's device table, written to emitters.csv. */
+    val emitters: EmitterTable? = null,
 ) {
+    /** Names are written only in named mode, which needs a device table. */
+    val identifierMode: String get() = if (emitters?.named == true) Keys.MODE_NAMED else Keys.MODE_NONE
+
     /** Default 90 seconds, maximum 10 minutes. */
     val durationS: Int = durationS.coerceIn(1, SessionController.MAX_DURATION_S)
 }
@@ -64,6 +69,8 @@ class SessionController(
         const val STOP_TIMEOUT_MS = 3_000L
         const val TRACE_POINTS = 1_200
         private const val SECOND_NS = 1_000_000_000L
+        /** emitters.csv is rewritten this often, so an interrupted session keeps its device table. */
+        const val EMITTERS_EVERY_S = 10L
     }
 
     private class Live(val id: String, val kind: String) {
@@ -81,6 +88,7 @@ class SessionController(
     private inner class Active(
         val id: String, val scope: Scope, val provenance: Provenance, val durationS: Int,
         val startNs: Long, val scheduler: Scheduler, val writer: SessionWriter, val streams: List<Stream>,
+        val emitters: EmitterTable?,
     ) {
         val live = LinkedHashMap<String, Live>()
         val markers = mutableListOf<Marker>()
@@ -89,6 +97,7 @@ class SessionController(
         /** Set once the streams have stopped: until then a stream's last rows are still written. */
         var sinksClosed = false
         var stopRequested = false
+        var ticks = 0L
         /** Counted down once every stream's start() has returned or been skipped. */
         val startupDone = CountDownLatch(1)
     }
@@ -133,8 +142,7 @@ class SessionController(
             props.putAll(meta())
             props[Keys.PROVENANCE] = req.provenance.name
             props[Keys.SCOPE] = req.scope.id
-            // Milestone 1 writes no device names and no keys.
-            props[Keys.IDENTIFIER_MODE] = "none"
+            props[Keys.IDENTIFIER_MODE] = req.identifierMode
             props[Keys.STATE] = Keys.STATE_RECORDING
             props[Keys.STOP_REASON] = ""
             props[Keys.IMPORTED] = "false"
@@ -143,7 +151,7 @@ class SessionController(
             val streams: List<Stream>
             val writer: SessionWriter
             try {
-                writer = SessionWriter(store.dir(id), props, sizeLimitBytes)
+                writer = SessionWriter(store.dir(id), props, sizeLimitBytes, req.emitters?.worstCaseBytes ?: 0)
                 streams = req.streams(scheduler)
                 for (s in streams) writer.addStream(s.id, s.kind, s.unit, s.nominalRateHz, s.extraColumns, s.binary)
             } catch (e: Exception) {
@@ -151,7 +159,7 @@ class SessionController(
                 store.dir(id).deleteRecursively()
                 return StartResult.Refused("Could not create the session: ${e.javaClass.simpleName}")
             }
-            a = Active(id, req.scope, req.provenance, req.durationS, startNs, scheduler, writer, streams)
+            a = Active(id, req.scope, req.provenance, req.durationS, startNs, scheduler, writer, streams, req.emitters)
             streams.forEach { a.live[it.id] = Live(it.id, it.kind) }
             writer.event(startNs, startWall, EventType.SESSION, value = "start")
             active = a
@@ -193,6 +201,8 @@ class SessionController(
             val a = active ?: return
             if (a.stopping) return
             try { a.writer.flush() } catch (_: Exception) { }
+            a.ticks++
+            if (a.ticks % EMITTERS_EVERY_S == 0L) a.emitters?.let { try { a.writer.writeEmitters(it.csv()) } catch (_: Exception) { } }
         }
     }
 
@@ -253,8 +263,11 @@ class SessionController(
                         a.writer.event(end, endWall, EventType.STATUS, it.id, Status.ENDED)
                     }
                     a.writer.event(end, endWall, EventType.SESSION, value = "stop", text = reason)
+                    a.emitters?.let { a.writer.writeEmitters(it.csv()) }
                     true
                 } catch (_: Exception) { false }
+                // R12: addresses and the key leave memory with the session.
+                a.emitters?.clear()
                 // A failed write is kept as interrupted, never reported as complete.
                 saved = try {
                     a.writer.finish(mapOf(Keys.END_BOOT_NS to end.toString(), Keys.END_WALL_MS to endWall.toString(),
@@ -324,7 +337,9 @@ class SessionController(
             if (!a.writer.writeObs(stream.id, obs)) { requestStop(a, StopReason.SIZE_LIMIT); return }
             live.rows++
             live.bytes += a.writer.totalBytes - before
-            recordPoint(obs.tBootNs, obs.rssiDbm, obs.status == Status.OK)
+            // The Bluetooth scan's trace follows the Ring only; other devices and pins have the device list.
+            if (stream.kind != Kinds.BLE_SCAN || obs.extra[BleScanHub.ALIAS] == PinStore.RING)
+                recordPoint(obs.tBootNs, obs.rssiDbm, obs.status == Status.OK)
         }
 
         override fun binary(tBootNs: Long, tWallMs: Long, bytes: ByteArray) = synchronized(lock) {
@@ -349,6 +364,13 @@ class SessionController(
             if (!accepting()) return
             live.dropped += count
             a.writer.dropped(stream.id, count)
+        }
+
+        override fun note(value: String, text: String) = synchronized(lock) {
+            if (!accepting()) return
+            if (!a.writer.event(a.scheduler.bootNs(), a.scheduler.wallMs(), EventType.NOTE, stream.id, value, text)) {
+                requestStop(a, StopReason.SIZE_LIMIT)
+            }
         }
 
         override fun othersSeen(count: Int) = synchronized(lock) {

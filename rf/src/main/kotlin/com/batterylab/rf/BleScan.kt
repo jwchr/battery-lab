@@ -6,8 +6,13 @@ import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
-/** One scan result as the adapter hands it over. [address] stays in memory and is never written. */
-class ScanHit(val address: String, val rssi: Int, val tBootNs: Long, val tWallMs: Long, val connectable: Boolean?)
+/**
+ * One scan result as the adapter hands it over. [address] stays in memory and is never written.
+ * [name] (from the advertisement) is written only in named mode; [vendorId] is the first
+ * manufacturer id in the advertisement.
+ */
+class ScanHit(val address: String, val rssi: Int, val tBootNs: Long, val tWallMs: Long, val connectable: Boolean?,
+              val name: String? = null, val vendorId: Int? = null)
 
 /** What the Bluetooth scan needs from Android (R24). */
 interface BleScanPort {
@@ -27,8 +32,10 @@ interface BleScanPort {
 }
 
 /**
- * One Bluetooth scan per session feeding two streams (R24, R25):
- * - ble_scan: a row for each result from the pinned target (the Ring, alias ring), nothing else.
+ * One Bluetooth scan per session feeding two streams (R24, R25, R26):
+ * - ble_scan: in "My devices", a row for each result from a pinned target (the Ring, alias ring, or
+ *   a device pinned in R31), nothing else. In "Everything nearby" ([emitters] set), a row for every
+ *   result, numbered by the device table; a pinned target's rows also carry its alias.
  * - ble_others: one row per second with the strongest non-target signal and how many distinct
  *   non-target devices were heard that second. No identifier is written.
  *
@@ -39,10 +46,12 @@ interface BleScanPort {
 class BleScanHub(
     private val port: BleScanPort,
     private val scheduler: Scheduler,
-    private val isTarget: (String) -> Boolean,
-    private val targetAlias: String = "ring",
+    /** The alias of a pinned target, or null for any other device. Called on the drain thread. */
+    private val aliasOf: (String) -> String?,
     capacity: Int = QUEUE_SIZE,
     key: ByteArray = ByteArray(32).also { SecureRandom().nextBytes(it) },
+    /** "Everything nearby": every result is stored with its device number. */
+    private val emitters: EmitterTable? = null,
 ) {
     companion object {
         const val QUEUE_SIZE = 8_192
@@ -195,9 +204,18 @@ class BleScanHub(
 
     /** Lock held. */
     private fun accept(hit: ScanHit) {
-        if (isTarget(hit.address)) {
+        val alias = aliasOf(hit.address)
+        val table = emitters
+        if (table != null) {
+            val n = table.see(EmitterTable.BLE, hit.address, hit.rssi, hit.tBootNs, hit.tWallMs, hit.connectable,
+                hit.vendorId, name = hit.name, alias = alias)
+            if (n == null) scanSink?.dropped(1)
+            else scanSink?.observe(Obs(hit.tBootNs, hit.tWallMs, n, hit.rssi, Status.OK,
+                mapOf(ALIAS to (alias ?: ""), CONNECTABLE to (hit.connectable?.toString() ?: ""))))
+            if (alias != null) return
+        } else if (alias != null) {
             scanSink?.observe(Obs(hit.tBootNs, hit.tWallMs, 0, hit.rssi, Status.OK,
-                mapOf(ALIAS to targetAlias, CONNECTABLE to (hit.connectable?.toString() ?: ""))))
+                mapOf(ALIAS to alias, CONNECTABLE to (hit.connectable?.toString() ?: ""))))
             return
         }
         if (bucket < 0) return

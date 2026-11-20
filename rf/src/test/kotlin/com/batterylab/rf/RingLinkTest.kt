@@ -66,6 +66,8 @@ class RecordingSink : StreamSink {
     }
     override fun dropped(count: Int) { dropped += count }
     override fun othersSeen(count: Int) { othersSeen = count }
+    val notes = mutableListOf<Pair<String, String>>()
+    override fun note(value: String, text: String) { notes += value to text }
     override fun failed(reason: String) { statuses += Status.ERROR to reason }
     fun last() = statuses.last().first
 }

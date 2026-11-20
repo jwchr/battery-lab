@@ -16,8 +16,11 @@ import com.batterylab.rf.Status
 
 /**
  * The Android side of ble_scan (R24): one unfiltered scan, started only inside a session. It
- * reads each result's address (kept in memory for matching and counting), signal and time, and
- * never a device name. Scanning needs Android 12 or later, Nearby devices and Precise location.
+ * reads each result's address (kept in memory for matching and counting), signal and time. For
+ * "Everything nearby" it also reads the name a device advertises and its first manufacturer id from
+ * the advertisement (never the paired name, so no connection is needed). This and WifiScanAdapter.kt
+ * are the only RF files that read names. Scanning needs Android 12 or later, Nearby devices and
+ * Precise location.
  */
 class BleScanAdapter(context: Context) : BleScanPort {
     private val app = context.applicationContext
@@ -58,7 +61,10 @@ class BleScanAdapter(context: Context) : BleScanPort {
 
     private fun hit(r: ScanResult): ScanHit {
         val wall = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() - r.timestampNanos) / 1_000_000
-        return ScanHit(r.device.address, r.rssi, r.timestampNanos, wall, r.isConnectable)
+        val record = r.scanRecord
+        val vendors = record?.manufacturerSpecificData
+        val vendor = if (vendors != null && vendors.size() > 0) vendors.keyAt(0) else null
+        return ScanHit(r.device.address, r.rssi, r.timestampNanos, wall, r.isConnectable, record?.deviceName, vendor)
     }
 
     override fun stopScan() {

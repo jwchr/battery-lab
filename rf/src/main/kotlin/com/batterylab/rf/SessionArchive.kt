@@ -29,16 +29,74 @@ object SessionArchive {
 
     private class Reject(val reason: String) : Exception(reason)
 
-    /** Writes every allowlisted file of the session, unchanged, as one flat zip. */
-    fun export(dir: File, out: OutputStream) {
+    /**
+     * Writes every allowlisted file of the session as one flat zip. A session with a device table
+     * (R17) leaves the phone without keys: devices are renumbered from 1 in first-seen order, the
+     * key column is dropped, and names are kept only when [includeNames] is set. Every other file
+     * is copied unchanged.
+     */
+    fun export(dir: File, out: OutputStream, includeNames: Boolean = false) {
         val files = dir.listFiles()?.filter { it.isFile && FileNames.allowed(it.name) }?.sortedBy { it.name } ?: emptyList()
+        val emitters = files.firstOrNull { it.name == FileNames.EMITTERS }?.let { Csv.parse(it.readText(Charsets.UTF_8)) }
+        val renumber = emitters?.let { renumbering(it) }
         ZipOutputStream(out).use { zip ->
             for (f in files) {
                 zip.putNextEntry(ZipEntry(f.name))
-                f.inputStream().use { it.copyTo(zip) }
+                when {
+                    emitters != null && renumber != null && f.name == FileNames.EMITTERS ->
+                        zip.write(exportEmitters(emitters, renumber, includeNames).toByteArray(Charsets.UTF_8))
+                    renumber != null && FileNames.streamOfObs(f.name) != null ->
+                        zip.write(renumberObs(Csv.parse(f.readText(Charsets.UTF_8)), renumber).toByteArray(Charsets.UTF_8))
+                    renumber != null && !includeNames && f.name == FileNames.PROPERTIES -> {
+                        val props = Props.parse(f.readText(Charsets.UTF_8))
+                        props[Keys.IDENTIFIER_MODE] = Keys.MODE_NONE
+                        zip.write(Props.write(props).toByteArray(Charsets.UTF_8))
+                    }
+                    else -> f.inputStream().use { it.copyTo(zip) }
+                }
                 zip.closeEntry()
             }
         }
+    }
+
+    /** Old device number to new, from 1 in first-seen order. */
+    private fun renumbering(t: CsvTable): Map<String, String> {
+        val rows = t.rows.mapNotNull { r ->
+            val n = t.cell(r, "emitter")?.toIntOrNull() ?: return@mapNotNull null
+            Triple(n, t.cell(r, "first_boot_ns")?.toLongOrNull() ?: Long.MAX_VALUE, r)
+        }.sortedWith(compareBy({ it.second }, { it.first }))
+        val m = LinkedHashMap<String, String>()
+        rows.forEachIndexed { i, (n, _, _) -> m[n.toString()] = (i + 1).toString() }
+        return m
+    }
+
+    private fun exportEmitters(t: CsvTable, renumber: Map<String, String>, includeNames: Boolean): String {
+        val drop = setOf("key") + (if (includeNames) emptySet() else setOf("name"))
+        val keep = t.header.indices.filter { t.header[it] !in drop }
+        val header = keep.map { t.header[it] }
+        val nameCol = header.indexOf("name")
+        val sb = StringBuilder(Csv.line(header))
+        val rows = t.rows.filter { r -> t.cell(r, "emitter") in renumber }
+            .sortedBy { r -> renumber.getValue(t.cell(r, "emitter")!!).toInt() }
+        for (r in rows) {
+            val cells = keep.map { i ->
+                val v = r.getOrElse(i) { "" }
+                if (t.header[i] == "emitter") renumber.getValue(v) else v
+            }
+            sb.append(Csv.line(cells, if (nameCol >= 0) setOf(nameCol) else emptySet()))
+        }
+        return sb.toString()
+    }
+
+    /** Emitter 0 (the stream's own device) stays 0; a number with no device becomes empty. */
+    private fun renumberObs(t: CsvTable, renumber: Map<String, String>): String {
+        val col = t.header.indexOf("emitter")
+        val sb = StringBuilder(Csv.line(t.header))
+        for (r in t.rows) {
+            val cells = r.mapIndexed { i, v -> if (i == col && v != "0" && v.isNotEmpty()) renumber[v] ?: "" else v }
+            sb.append(Csv.line(cells))
+        }
+        return sb.toString()
     }
 
     /**

@@ -10,7 +10,7 @@ enum class Provenance { LIVE, REPLAY, SIMULATED;
     }
 }
 
-/** Chosen before Start and fixed for the session. Only [MY_LINKS] runs in this build. */
+/** Chosen before Start and fixed for the session (R27). */
 enum class Scope(val id: String, val label: String) {
     MY_LINKS("my_links", "My links"),
     MY_DEVICES("my_devices", "My devices"),
@@ -84,6 +84,8 @@ interface StreamSink {
     fun dropped(count: Int)
     /** Distinct other devices heard so far this session, for streams.csv (others_seen). */
     fun othersSeen(count: Int) { }
+    /** A one-off event for this stream, such as a refused Wi-Fi scan request (written to events.csv). */
+    fun note(value: String, text: String = "") { }
     /** A stream error. Ends this stream only; the session and other streams continue. */
     fun failed(reason: String)
 }

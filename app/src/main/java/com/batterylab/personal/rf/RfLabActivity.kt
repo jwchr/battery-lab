@@ -15,6 +15,7 @@ import android.os.Handler
 import android.os.Looper
 import android.view.View
 import android.view.WindowManager
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Toast
@@ -23,11 +24,17 @@ import com.batterylab.personal.Palette
 import com.batterylab.personal.PollScheduler
 import com.batterylab.personal.StyledActivity
 import com.batterylab.rf.BleScanHub
+import com.batterylab.rf.DeviceView
+import com.batterylab.rf.EmitterFile
+import com.batterylab.rf.EmitterTable
 import com.batterylab.rf.FileNames
 import com.batterylab.rf.IdleStream
 import com.batterylab.rf.ImportResult
 import com.batterylab.rf.Keys
 import com.batterylab.rf.Kinds
+import com.batterylab.rf.NearbyDefaults
+import com.batterylab.rf.PinMatcher
+import com.batterylab.rf.PinStore
 import com.batterylab.rf.Props
 import com.batterylab.rf.Provenance
 import com.batterylab.rf.Replay
@@ -46,6 +53,7 @@ import com.batterylab.rf.StopReason
 import com.batterylab.rf.Stream
 import com.batterylab.rf.StreamView
 import com.batterylab.rf.TracePoint
+import com.batterylab.rf.WifiScanStream
 import com.batterylab.rf.WindowStats
 import java.io.File
 import java.text.SimpleDateFormat
@@ -70,6 +78,13 @@ class RfLabActivity : StyledActivity() {
     /** Between onStart and onStop. A replay prepared in the background starts only while visible. */
     private var visible = false
     private var showAllSessions = false
+    /** "Everything nearby": store names this session (on by default, Jeff's decision of Nov 19). */
+    private var storeNames = NearbyDefaults.STORE_NAMES
+    private var strongestFirst = true
+    private var showAllDevices = false
+    private var deviceBox: LinearLayout? = null
+    private var resultDevices: List<DeviceView> = emptyList()
+    private var pendingExportNames = false
     private val main = Handler(Looper.getMainLooper())
     private val refresh = object : Runnable {
         override fun run() { onTick(); main.postDelayed(this, 500) }
@@ -84,8 +99,11 @@ class RfLabActivity : StyledActivity() {
         super.onCreate(savedInstanceState)
         rf = RfRuntime.controller(this)
         durationS = savedInstanceState?.getInt("durationS", durationS) ?: durationS
-        scope = Scope.parse(savedInstanceState?.getString("scope"))?.takeIf { it != Scope.EVERYTHING_NEARBY } ?: scope
+        scope = Scope.parse(savedInstanceState?.getString("scope"))
+            ?.takeIf { Build.VERSION.SDK_INT >= 31 || it == Scope.MY_LINKS } ?: scope
+        storeNames = savedInstanceState?.getBoolean("storeNames", storeNames) ?: storeNames
         pendingExportId = savedInstanceState?.getString("exportId")
+        pendingExportNames = savedInstanceState?.getBoolean("exportNames", false) ?: false
         resultId = savedInstanceState?.getString("resultId") ?: rf.lastEndedId
         setUpPage()
     }
@@ -94,6 +112,8 @@ class RfLabActivity : StyledActivity() {
         super.onSaveInstanceState(outState)
         outState.putInt("durationS", durationS)
         outState.putString("scope", scope.id)
+        outState.putBoolean("storeNames", storeNames)
+        outState.putBoolean("exportNames", pendingExportNames)
         pendingExportId?.let { outState.putString("exportId", it) }
         resultId?.let { outState.putString("resultId", it) }
     }
@@ -136,6 +156,7 @@ class RfLabActivity : StyledActivity() {
         syncScreenOn(running)
         if (running) fillLive()
         if (wasRunning && !running) { resultId = rf.lastEndedId; result = null; render() }
+        if (!running) RfRuntime.liveTable = null
         wasRunning = running
     }
 
@@ -145,6 +166,7 @@ class RfLabActivity : StyledActivity() {
         val oldScroll = scroll.scrollY
         body.removeAllViews()
         liveBox = null
+        deviceBox = null
         section("RF Lab", "Signal strength in dBm", "Watch your own links for up to 10 minutes. " +
             "Sessions stay on this phone in their own files; the battery history and backups do not change.")
         if (rf.running) renderLive() else renderSetup()
@@ -172,15 +194,34 @@ class RfLabActivity : StyledActivity() {
             })
             addView(label("Adds a Bluetooth scan. Rows are kept for your Ring only; for every other device, " +
                 "just a count and the strongest signal each second.", 12.5f))
-            addView(selectable("Everything nearby: coming in a later build", selected = false, enabled = false) {
-                toast("Everything nearby arrives in a later build")
+            addView(selectable(if (canScan) "Everything nearby" else "Everything nearby: needs Android 12 or later",
+                selected = scope == Scope.EVERYTHING_NEARBY, enabled = canScan) {
+                if (canScan) { scope = Scope.EVERYTHING_NEARBY; render() } else toast("Scanning needs Android 12 or later")
             })
+            addView(label("Every Bluetooth device and Wi-Fi network in range, each with a number. " +
+                "Other people's devices are included.", 12.5f))
+            if (scope == Scope.EVERYTHING_NEARBY) {
+                addView(selectable(if (storeNames) "Store names: on" else "Store names: off", selected = storeNames) {
+                    storeNames = !storeNames; render()
+                })
+                addView(label(if (storeNames) "Device and network names are saved with this session. " +
+                    "Exports leave them out unless you tick the box." else "Devices are saved by number only.", 12.5f))
+            }
             addView(label("Length", 13f, ink, bold = true).apply { setPadding(0, dp(12), 0, 0) })
             addView(chipRow(*durations.map { (s, text) ->
                 selectable(text, selected = s == durationS) { durationS = s; render() }
             }.toTypedArray()))
             button("Start", primary = true) { startLive() }
             button("Start a simulated session") { startSimulated() }
+        }
+        renderRadios()
+    }
+
+    /** R31: what this phone's radios support. Feature checks only. */
+    private fun renderRadios() {
+        section("This phone's radios", null, "What Android reports this phone supports. Nothing is scanned to find out.").apply {
+            for ((name, yes) in RadioCapabilities.list(this@RfLabActivity))
+                addView(label("$name: ${when (yes) { true -> "yes"; false -> "no"; null -> "unknown" }}", 12.5f))
         }
     }
 
@@ -199,10 +240,19 @@ class RfLabActivity : StyledActivity() {
      * together. The session starts whatever the answer; a stream without its permission says so.
      */
     private fun startLive() {
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        if (scope == Scope.EVERYTHING_NEARBY && !prefs.getBoolean(NEARBY_OK, false)) {
+            AlertDialog.Builder(this).setTitle("Everything nearby")
+                .setMessage(NEARBY_TEXT)
+                .setPositiveButton("Continue") { _, _ -> prefs.edit().putBoolean(NEARBY_OK, true).apply(); startLive() }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
         val needed = mutableListOf<String>()
         if (Build.VERSION.SDK_INT >= 31 && PollScheduler.ringAddress(this) != null &&
             !granted(Manifest.permission.BLUETOOTH_CONNECT)) needed += Manifest.permission.BLUETOOTH_CONNECT
-        val scanMissing = scope == Scope.MY_DEVICES && Build.VERSION.SDK_INT >= 31 &&
+        val scanMissing = scope != Scope.MY_LINKS && Build.VERSION.SDK_INT >= 31 &&
             SCAN_PERMISSIONS.any { !granted(it) }
         if (scanMissing) needed += SCAN_PERMISSIONS
         when {
@@ -225,25 +275,47 @@ class RfLabActivity : StyledActivity() {
         val app = applicationContext
         val chosen = scope
         val ring = PollScheduler.ringAddress(app)
-        started(rf.start(StartRequest(chosen, Provenance.LIVE, durationS, streams = { sch -> liveStreams(app, chosen, ring, sch) })))
+        val table = if (chosen == Scope.EVERYTHING_NEARBY) EmitterTable(rf.store.installKey, storeNames) else null
+        val r = rf.start(StartRequest(chosen, Provenance.LIVE, durationS, emitters = table,
+            streams = { sch -> liveStreams(app, chosen, ring, table, sch) }))
+        if (r is StartResult.Started && table != null) RfRuntime.liveTable = r.id to table
+        started(r)
     }
 
-    /** The streams for a scope. The Ring's address stays in memory, for connecting and matching only. */
-    private fun liveStreams(app: Context, chosen: Scope, ring: String?, sch: Scheduler): List<Stream> {
+    /**
+     * The streams for a scope. The Ring's address stays in memory, for connecting and matching only.
+     * Pinned devices are matched by key; "Everything nearby" numbers every device in [table].
+     */
+    private fun liveStreams(app: Context, chosen: Scope, ring: String?, table: EmitterTable?, sch: Scheduler): List<Stream> {
         val list = mutableListOf<Stream>(WifiLinkStream(app))
         list += if (ring == null) IdleStream("ring_link", Kinds.RING_LINK, Status.NO_TARGET)
             else RingLinkStream(RingLinkAdapter(app, ring), sch)
-        if (chosen == Scope.MY_DEVICES) {
-            val hub = BleScanHub(BleScanAdapter(app), sch, { ring != null && it.equals(ring, ignoreCase = true) })
+        if (chosen != Scope.MY_LINKS) {
+            val store = rf.store
+            val hub = BleScanHub(BleScanAdapter(app), sch, PinMatcher(store.installKey, store.pins.all(), ring), emitters = table)
             list += hub.scanStream
             list += hub.othersStream
         }
+        if (chosen == Scope.EVERYTHING_NEARBY && table != null) list += WifiScanStream(WifiScanAdapter(app), sch, table)
         return list
     }
 
     companion object {
+        private const val PREFS = "rf_lab"
+        private const val NEARBY_OK = "nearby_confirmed"
+
+        const val NEARBY_TEXT = "Everything nearby records every Bluetooth device and Wi-Fi network your phone can " +
+            "hear, including other people's, for the length of the session. Each gets a number. Their names are " +
+            "saved too unless you switch Store names off, and exports leave names out unless you tick the box. " +
+            "Nothing is connected to or paired, and nothing is recorded after the session ends."
+
         private val SCAN_PERMISSIONS = listOf(Manifest.permission.BLUETOOTH_SCAN,
             Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+
+        const val DEVICES_HINT = "Tap a Bluetooth device to pin it as yours. Pinned devices get their own rows " +
+            "in My devices sessions."
+        const val PIN_TEXT = "Give it a short name. Pinning only remembers this device on this phone; it never " +
+            "connects to or pairs with it. Delete all sessions removes every pin."
 
         /** R27, word for word. */
         const val SCAN_TEXT = "Scanning lists the Bluetooth and Wi-Fi devices near you. Android only gives apps " +
@@ -284,6 +356,10 @@ class RfLabActivity : StyledActivity() {
             addView(liveBox)
             button("Stop", primary = true) { Thread({ rf.stop() }, "rf-stop").start() }
         }
+        if (snap.scope == Scope.EVERYTHING_NEARBY) section("Devices", null, DEVICES_HINT).apply {
+            deviceBox = LinearLayout(this@RfLabActivity).apply { orientation = LinearLayout.VERTICAL }
+            addView(deviceBox)
+        }
         section("Markers", null, "Tap when you change what you are doing. A marker window runs to the next " +
             "marker or the end of the session.").apply {
             for (l in listOf("near", "moving", "far")) button("Mark: $l") { mark(l) }
@@ -311,6 +387,72 @@ class RfLabActivity : StyledActivity() {
         box.addView(label("$elapsed s of ${snap.durationS} s · ${snap.markers.size} " +
             (if (snap.markers.size == 1) "marker" else "markers"), 13f))
         for (s in snap.streams) addStream(box, s, snap.nowNs)
+        val devices = deviceBox ?: return
+        val live = RfRuntime.liveTable?.takeIf { it.first == rf.activeId }?.second ?: return
+        devices.removeAllViews()
+        fillDevices(devices, live.devices(), live = true)
+    }
+
+    // Device list (R31)
+
+    private fun deviceTitle(d: DeviceView): String {
+        val code = if (d.kind == EmitterTable.WIFI) "Wi-Fi network ${d.number}" else "Bluetooth device ${d.number}"
+        return when {
+            d.alias == PinStore.RING -> "Your Ring"
+            d.alias != null -> "${d.alias} (pinned)"
+            d.name != null -> "${d.name} (${d.number})"
+            else -> code
+        }
+    }
+
+    private fun fillDevices(box: LinearLayout, all: List<DeviceView>, live: Boolean) {
+        val bt = all.count { it.kind == EmitterTable.BLE }
+        box.addView(label("$bt Bluetooth devices · ${all.size - bt} Wi-Fi networks", 13f))
+        box.addView(chipRow(
+            selectable("Strongest first", selected = strongestFirst) { strongestFirst = true; refreshDevices() },
+            selectable("First seen", selected = !strongestFirst) { strongestFirst = false; refreshDevices() },
+        ))
+        val sorted = if (strongestFirst) all.sortedWith(compareByDescending<DeviceView> { it.bestDbm ?: Int.MIN_VALUE }.thenBy { it.number })
+            else all.sortedBy { it.number }
+        val limit = if (live) 30 else if (showAllDevices) 500 else 50
+        for (d in sorted.take(limit)) {
+            val where = if (d.kind == EmitterTable.WIFI) "Wi-Fi" + (d.band?.let { " $it GHz" } ?: "") else "Bluetooth"
+            val signal = d.bestDbm?.let { "strongest $it dBm" } ?: "no signal value"
+            box.addView(makeButton("${deviceTitle(d)} · $where · $signal · ${d.rows} rows") { deviceMenu(d) },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+        }
+        if (sorted.size > limit) {
+            if (!live && !showAllDevices) box.addView(makeButton("Show more devices") { showAllDevices = true; render() },
+                LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
+            else box.addView(label("${sorted.size - limit} more not shown", 12f))
+        }
+    }
+
+    private fun refreshDevices() { if (rf.running) fillLive() else render() }
+
+    /** R31: pin a Bluetooth device as yours. A pin stores a key and an alias; it never connects or pairs. */
+    private fun deviceMenu(d: DeviceView) {
+        val pins = rf.store.pins
+        val pinnable = d.kind == EmitterTable.BLE && d.key.matches(Regex("[0-9a-f]{16}")) && d.alias != PinStore.RING
+        if (!pinnable) {
+            toast(if (d.kind == EmitterTable.WIFI) "Wi-Fi networks cannot be pinned" else "This device cannot be pinned here")
+            return
+        }
+        val current = pins.aliasOf(d.key)
+        if (current != null) {
+            AlertDialog.Builder(this).setTitle(deviceTitle(d)).setMessage("Pinned as \"$current\".")
+                .setPositiveButton("Unpin") { _, _ -> pins.unpin(d.key); toast("Unpinned"); refreshDevices() }
+                .setNegativeButton("Close", null).show()
+            return
+        }
+        val edit = EditText(this).apply { hint = "Short name, like keys or earbuds"; setSingleLine() }
+        AlertDialog.Builder(this).setTitle("Pin as my device").setMessage(PIN_TEXT).setView(edit)
+            .setPositiveButton("Pin") { _, _ ->
+                val alias = edit.text.toString().trim().lowercase(Locale.US).replace(' ', '_')
+                if (pins.pin(d.key, alias)) { toast("Pinned as \"$alias\""); refreshDevices() }
+                else toast("Not pinned. Use 1 to 24 letters, digits or _, not ring, and not a name already in use.")
+            }
+            .setNegativeButton("Cancel", null).show()
     }
 
     private fun streamName(id: String, kind: String) = when (kind) {
@@ -318,6 +460,7 @@ class RfLabActivity : StyledActivity() {
         Kinds.RING_LINK -> "Ring link"
         Kinds.BLE_SCAN -> "Ring broadcasts (Bluetooth scan)"
         Kinds.BLE_OTHERS -> "Other devices (strongest signal each second)"
+        Kinds.WIFI_SCAN -> "Wi-Fi scan (all networks together)"
         else -> id
     }
 
@@ -378,10 +521,12 @@ class RfLabActivity : StyledActivity() {
                 val dir = rf.store.dir(id)
                 Background.io.execute {
                     val computed = try { ResultMath.compute(dir) } catch (_: Exception) { null }
+                    val devices = try { EmitterFile.read(dir) } catch (_: Exception) { emptyList() }
                     Background.onMain {
                         loadingResult = null
                         if (isDestroyed || resultId != id) return@onMain
-                        if (computed == null) { resultId = null; toast("That session could not be read") } else result = computed
+                        if (computed == null) { resultId = null; toast("That session could not be read") }
+                        else { result = computed; resultDevices = devices; showAllDevices = false }
                         render()
                     }
                 }
@@ -403,8 +548,13 @@ class RfLabActivity : StyledActivity() {
             }
             if (r.streams.none { it.stream.kind == Kinds.RING_LINK || it.stream.kind == Kinds.BLE_SCAN }) {
                 addView(label("G0 Ring tests: this session has no Ring link or Bluetooth scan stream. " +
-                    "They arrive in the next build. G0 as a whole needs three sessions.", 12.5f))
+                    "G0 as a whole needs three sessions.", 12.5f))
             }
+        }
+        if (resultDevices.isNotEmpty()) section("Devices", null, DEVICES_HINT).apply {
+            val box = LinearLayout(this@RfLabActivity).apply { orientation = LinearLayout.VERTICAL }
+            addView(box)
+            fillDevices(box, resultDevices, live = false)
         }
     }
 
@@ -459,7 +609,7 @@ class RfLabActivity : StyledActivity() {
             when (which) {
                 0 -> { resultId = id; result = null; render() }
                 1 -> startReplay(id)
-                2 -> pickExport(id)
+                2 -> chooseExport(id)
                 3 -> {
                     if (rf.store.delete(id, rf.activeId)) { if (resultId == id) resultId = null; render() }
                     else toast("A running session cannot be deleted")
@@ -470,12 +620,27 @@ class RfLabActivity : StyledActivity() {
 
     private fun confirmDeleteAll() {
         AlertDialog.Builder(this).setTitle("Delete all RF Lab sessions?")
-            .setMessage("This removes every saved session on this phone. Your battery history is not touched.")
+            .setMessage("This removes every saved session and every pinned device on this phone, and device numbers " +
+                "start fresh. Your battery history is not touched.")
             .setPositiveButton("Delete all") { _, _ -> rf.store.deleteAll(rf.activeId); resultId = null; render() }
             .setNegativeButton("Cancel", null).show()
     }
 
-    private fun pickExport(id: String) {
+    /** R17: names leave the phone only when the box is ticked. Off by default. */
+    private fun chooseExport(id: String) {
+        val mode = try { Props.parse(File(rf.store.dir(id), FileNames.PROPERTIES).readText())[Keys.IDENTIFIER_MODE] }
+            catch (_: Exception) { null }
+        if (mode != Keys.MODE_NAMED) { pickExport(id, false); return }
+        val box = CheckBox(this).apply { text = "Include device names"; isChecked = false }
+        AlertDialog.Builder(this).setTitle("Export").setMessage("This session holds the names of nearby devices and " +
+            "networks, including other people's. The export leaves them out unless you tick the box.")
+            .setView(box)
+            .setPositiveButton("Export") { _, _ -> pickExport(id, box.isChecked) }
+            .setNegativeButton("Cancel", null).show()
+    }
+
+    private fun pickExport(id: String, includeNames: Boolean) {
+        pendingExportNames = includeNames
         pendingExportId = id
         startActivityForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
             .setType("application/zip").putExtra(Intent.EXTRA_TITLE, "rf-session-$id.zip"), EXPORT_ZIP)
@@ -496,10 +661,12 @@ class RfLabActivity : StyledActivity() {
         if (requestCode == EXPORT_ZIP) {
             val id = pendingExportId ?: return
             pendingExportId = null
+            val names = pendingExportNames
+            pendingExportNames = false
             val dir = rf.store.dir(id)
             Background.io.execute {
                 val ok = try {
-                    resolver.openOutputStream(uri, "wt")?.use { SessionArchive.export(dir, it) } != null
+                    resolver.openOutputStream(uri, "wt")?.use { SessionArchive.export(dir, it, names) } != null
                 } catch (_: Exception) { false }
                 Background.onMain { toast(if (ok) "Session exported" else "Export failed") }
             }

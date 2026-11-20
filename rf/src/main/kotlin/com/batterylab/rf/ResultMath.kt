@@ -66,6 +66,14 @@ object ResultMath {
         Sample(t, v, table.cell(row, "status") == Status.OK && v != null)
     }
 
+    /**
+     * A Bluetooth scan holds pinned devices and, in "Everything nearby", every device; its numbers
+     * and its G0 test use the Ring's rows only. A session without the alias column is all Ring.
+     */
+    fun ringOnly(kind: String, table: CsvTable): CsvTable =
+        if (kind != Kinds.BLE_SCAN || !table.has(BleScanHub.ALIAS)) table
+        else CsvTable(table.header, table.rows.filter { table.cell(it, BleScanHub.ALIAS) == PinStore.RING })
+
     /** Null for an empty window: no result. */
     fun stats(samples: List<Sample>, w: Window): WindowStats? {
         val inside = samples.filter { it.tBootNs >= w.startNs && it.tBootNs < w.endNs }
@@ -137,7 +145,7 @@ object ResultMath {
         val end = info.endBootNs ?: (lastRow?.plus(1) ?: start)
         val windows = windows(SessionReader.markers(dir), start, end)
         val results = info.streams.map { s ->
-            val samples = samples(tables.getValue(s.id))
+            val samples = samples(ringOnly(s.kind, tables.getValue(s.id)))
             val whole = stats(samples, Window("", start, end))
             val per = windows.map { it to stats(samples, it) }
             val g0 = when (s.kind) {

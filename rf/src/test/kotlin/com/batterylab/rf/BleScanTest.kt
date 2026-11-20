@@ -30,13 +30,15 @@ class FakeScanPort : BleScanPort {
 /** Synthetic, locally administered addresses: never a real device. */
 fun fakeAddress(i: Int) = "02:00:00:00:%02X:%02X".format((i shr 8) and 0xff, i and 0xff)
 const val TARGET = "02:00:00:00:FF:FF"
+/** The milestone 1 target rule: only the Ring's address, under the alias ring. */
+val ringOnly: (String) -> String? = { if (it.equals(TARGET, ignoreCase = true)) "ring" else null }
 
 /** T15 (the scan stream), T8 (privacy) and T13 (lifecycle). */
 class BleScanTest {
     private val macPattern = Regex("""(?i)\b[0-9a-f]{2}([:-])[0-9a-f]{2}(\1[0-9a-f]{2}){4}\b""")
 
     private fun hub(port: FakeScanPort, sch: FakeScheduler, capacity: Int = BleScanHub.QUEUE_SIZE, key: ByteArray = ByteArray(32) { 7 }) =
-        BleScanHub(port, sch, { it.equals(TARGET, ignoreCase = true) }, capacity = capacity, key = key)
+        BleScanHub(port, sch, ringOnly, capacity = capacity, key = key)
 
     private fun hit(port: FakeScanPort, sch: FakeScheduler, address: String, rssi: Int) =
         port.onHit!!(ScanHit(address, rssi, sch.now, sch.wall, true))
@@ -147,7 +149,7 @@ class BleScanTest {
         val scanPort = FakeScanPort()
         val ringPort = FakeRingPort()
         val r = c.start(StartRequest(Scope.MY_DEVICES, Provenance.LIVE, 20, streams = { s ->
-            val h = BleScanHub(scanPort, s, { it == TARGET }, key = key)
+            val h = BleScanHub(scanPort, s, ringOnly, key = key)
             listOf(SimulatedStream.pair(3, s).first(), RingLinkStream(ringPort, s), h.scanStream, h.othersStream)
         })) as StartResult.Started
         ringPort.up()
@@ -178,7 +180,7 @@ class BleScanTest {
         val (c, sch) = controller()
         val scanPort = FakeScanPort()
         val r = c.start(StartRequest(Scope.MY_DEVICES, Provenance.LIVE, 20, streams = { s ->
-            val h = BleScanHub(scanPort, s, { it == TARGET })
+            val h = BleScanHub(scanPort, s, ringOnly)
             listOf(h.scanStream, h.othersStream)
         })) as StartResult.Started
         sch.advanceSeconds(2.1)
@@ -210,7 +212,7 @@ class BleScanTest {
         val (c, sch) = controller()
         val scanPort = FakeScanPort(); val ringPort = FakeRingPort()
         val r = c.start(StartRequest(Scope.MY_DEVICES, Provenance.LIVE, 60, streams = { s ->
-            val h = BleScanHub(scanPort, s, { it == TARGET })
+            val h = BleScanHub(scanPort, s, ringOnly)
             listOf(SimulatedStream.pair(3, s).first(), RingLinkStream(ringPort, s), h.scanStream, h.othersStream)
         })) as StartResult.Started
         ringPort.up()

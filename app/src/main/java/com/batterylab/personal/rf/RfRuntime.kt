@@ -27,6 +27,8 @@ object AndroidClock : Clock {
  */
 object RfRuntime {
     @Volatile private var instance: SessionController? = null
+    /** The running "Everything nearby" session's device table, for the live device list. */
+    @Volatile var liveTable: Pair<String, com.batterylab.rf.EmitterTable>? = null
 
     fun controller(context: Context): SessionController = instance ?: synchronized(this) {
         instance ?: build(context.applicationContext).also { instance = it }

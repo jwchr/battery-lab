@@ -30,6 +30,7 @@ object StatsComparison {
             val start = subset.maxOf { it.second.first().timeMs }
             val end = subset.minOf { it.second.last().timeMs }
             if (end - start < 2 * 86_400_000L) continue
+            if (subset.any { (_, history) -> history.count { it.timeMs in start..end } < 2 }) continue
             if (subset.size > chosen.size ||
                 (subset.size == chosen.size && end - start > to - from)) {
                 chosen = subset
@@ -54,6 +55,6 @@ object StatsComparison {
             if (stretches.isNotEmpty()) runtime += RuntimeComparison(index,
                 100.0 * stretches.sumOf { it.hours } / stretches.sumOf { it.drop })
         }
-        return MatchedStats(from, to, chosen.map { it.first }, daily, runtime)
+        return MatchedStats(from, to, daily.map { it.deviceIndex }, daily, runtime)
     }
 }

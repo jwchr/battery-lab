@@ -34,6 +34,16 @@ class StatsWearableHonestyTest {
         assertEquals(30 * 24 * hour, result.toMs)
     }
 
+    @Test fun ringGapWithOnlyOneSharedReadingKeepsTheFullPhoneAndWatchWindow() {
+        val ring = listOf(reading(5 * 24, 90), reading(12 * 24, 80))
+        val result = StatsComparison.matched(listOf(historyDays(0, 10), historyDays(0, 10), ring), gaps)!!
+        assertEquals(listOf(0, 1), result.deviceIndexes)
+        assertEquals(listOf(0, 1), result.daily.map { it.deviceIndex })
+        assertEquals(listOf(0, 1), result.runtime.map { it.deviceIndex })
+        assertEquals(0L, result.fromMs)
+        assertEquals(10 * 24 * hour, result.toMs)
+    }
+
     @Test fun longestPairWinsWhenWatchAndRingHistoriesDoNotOverlap() {
         val result = StatsComparison.matched(listOf(historyDays(0, 30), historyDays(0, 3),
             historyDays(10, 30)), gaps)!!

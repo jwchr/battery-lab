@@ -206,15 +206,15 @@ object Glossary {
 
         section = "Showdown"
         entry("Full-charge hours and rank", "Projected full-to-empty runtime for each device, ordered longest first.",
-            "Multiply total discharge-stretch hours by 100 and divide by total points lost. Stretches need at least 1 hour and 4 points of loss; charging, a rise over 2 points, or a gap over the stretch allowance ends one. The allowance is at least 8 hours or 3 check intervals; show the comparison only with at least two devices.")
+            "Use only readings inside the shared first-to-last history overlap of devices with at least two valid readings. Multiply discharge-stretch hours by 100 and divide by points lost. Stretches need 1 hour and 4 points; a charge, rise over 2 points, or gap over the stretch allowance ends one. Show at least two qualifying devices. This projects runtime from percent loss, not measured capacity or a full-to-empty run; coverage and charging time can differ.")
 
         section = "Head to head"
         entry("Battery used per day", "Observed loss per calendar day, with 100% meaning one full battery's worth.",
-            "Divide each device's total points used by days between its first and last included readings. Each device needs at least 2 days, and the card needs at least two devices. These days include gaps; full batteries per day is the result divided by 100.")
+            "Use only readings inside the shared first-to-last history overlap of devices with at least two valid readings. Divide each device's observed points used by the same overlap duration in days. Need at least 2 shared days and two devices with two readings inside. Days include gaps, so coverage differences can undercount use; full batteries per day is the result divided by 100.")
         entry("Charges a week", "Detected charges scaled to a week at the observed pace.",
-            "Divide the device's detected charge count by its own first-to-last tracked days and multiply by 7. Detected charges include inferred jumps and observed runs with a gain.")
+            "Detect charges using only readings inside the same shared period as Battery used per day. Divide the count by that shared duration in days and multiply by 7. Detected charges include inferred jumps and observed runs with a gain; sessions outside the period are excluded.")
         entry("Usually apart", "The middle elapsed time between detected charge starts.",
-            "Sort charge start times and find the hours between each adjacent pair. Take the middle interval, averaging the two middle values for an even count. This needs at least two detected charges and can include gaps in collection.")
+            "Use charges detected from readings inside the shared comparison period. Sort their start times and find the hours between adjacent pairs. Take the middle interval, averaging the two middle values for an even count. Needs at least two detected charges and can include gaps in collection.")
 
         section = "Over time"
         for ((term, span) in listOf("24 hours" to "1 day", "7 days" to "7 days", "30 days" to "30 days", "90 days" to "90 days", "6 months" to "182 days", "1 year" to "365 days", "All time" to "all recorded history")) {
@@ -302,8 +302,6 @@ object Glossary {
             Triple("Flights of stairs", "Pure lifting work for a 75-kilogram person climbing 3-meter floors.", "Multiply Wh by 3,600 for joules, then divide by 75 times 9.81 times 3 for floors."),
             Triple("Bananas", "Equivalent food energy in bananas, without allowing for muscle efficiency.", "Divide total Wh by 122 Wh per banana, corresponding to about 105 food Calories."),
             Triple("Laptop charges", "Equivalent full charges of a 50-Wh laptop battery.", "Divide total Wh by 50 Wh per charge."),
-            Triple("Smartwatch charges", "Equivalent full charges of a 1.6-Wh watch battery.", "Divide total Wh by 1.6 Wh per charge."),
-            Triple("Smart ring charges", "Equivalent full charges of a 0.08-Wh ring battery.", "Divide total Wh by 0.08 Wh per charge."),
             Triple("TV", "Time running a typical 100-watt LED TV.", "Divide total Wh by 100 watts for hours, then multiply by 3,600 for seconds.")
         )) {
             entry(term, meaning, "$rule Use the total battery Wh described above. These are fixed, rough comparisons rather than measurements of those activities.")
@@ -332,11 +330,11 @@ object Glossary {
             "Use the last poll event's recorded database bytes, which include the main database and its write-ahead log of pending changes. Divide by 1,048,576 to display MB.")
 
         section = "What each device can report"
-        entry("Fields recorded", "How many capability rows are marked as having stored data, out of all rows in the inventory.",
-            "Count rows with recorded status and compare with the full inventory size. The inventory is refreshed from the last 14 days, using up to the last 400 phone readings for most phone fields. A recorded status is based on availability, not proof that a value is accurate.")
+        entry("Fields recorded", "How many displayed capability rows are marked as having stored data, out of all displayed rows.",
+            "First omit wearable radio diagnostics and mark unmeasured wearable battery fields unavailable, then count recorded rows and all displayed rows. The saved inventory uses the last 14 days, with up to 400 recent phone readings for most phone fields. Recorded means available, not proven accurate.")
         entry("Field status", "Whether a battery field was recorded, needs permission, is off, is unavailable, or has unknown age.",
-            "Use the saved inventory status for each field. Most phone fields are recorded if any non-empty value exists; otherwise 3 readings with extra details are enough to mark them unavailable. Wearable widget percentages have unknown age because the widget does not expose when they were measured.")
-        entry("Observed step", "The smallest nonzero change seen in a numeric phone field, in that field's stored units.",
-            "Take the absolute differences between consecutive available numeric values, remove zeros, and keep the smallest. This describes observed resolution, not guaranteed sensor accuracy.")
+            "Use the saved inventory status for phone fields; most are recorded if any value exists, or unavailable after 3 detailed readings without one. Watch and Ring battery fields other than percent and charging are shown as unavailable, even in older inventories; radio diagnostics are omitted. Widget percent has unknown age because its measurement time is not exposed.")
+        entry("Observed step", "The smallest saved nonzero change in a reported battery field, in its stored units.",
+            "Take absolute differences between consecutive available numeric phone values, remove zeros, and keep the smallest. Saved wearable percent steps can be shown, but steps for unmeasured wearable fields are removed. This describes observed resolution, not guaranteed sensor accuracy.")
     }
 }

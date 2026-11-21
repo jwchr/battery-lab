@@ -67,6 +67,7 @@ class StatsActivity : StyledActivity() {
         val week: List<WeekSplit?>,
         /** Per device: its observed discharge stretches, found off the main thread. */
         val stretches: List<List<DischargeStretch>>,
+        val comparison: MatchedStats?,
     )
 
     /** The drain breakdown and the app names it shows, prepared off the main thread. */
@@ -142,7 +143,8 @@ class StatsActivity : StyledActivity() {
             if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList(),
             data.map { readings -> coverageRows(readings.map { it.timeMs }, now, gaps) },
             stretches.map { DrainSpreadMath.of(it, now - 30 * 86_400_000L) },
-            stretches.map { WeekSplitMath.of(it, now - 30 * 86_400_000L, isWeekend) }, stretches)
+            stretches.map { WeekSplitMath.of(it, now - 30 * 86_400_000L, isWeekend) }, stretches,
+            StatsComparison.matched(data, gaps))
     }
 
     private fun renderTitle() {
@@ -188,8 +190,8 @@ class StatsActivity : StyledActivity() {
         timed("numbers") { renderNumbers(devices, stats) }
         timed("habits") { renderHabits(stats[0]) }
         timed("hours") { renderHours(devices, stats) }
-        timed("showdown") { renderShowdown(devices, data) }
-        timed("headtohead") { renderHeadToHead(devices, stats) }
+        timed("showdown") { renderShowdown(devices, l.comparison) }
+        timed("headtohead") { renderHeadToHead(devices, l.comparison) }
         timed("rolling") { renderRolling(devices, data, l.stretches) }
         timed("spread") { renderSpread(devices, l.spread) }
         timed("week") { renderWeek(devices, l.week) }
@@ -330,52 +332,45 @@ class StatsActivity : StyledActivity() {
         }
     }
 
-    /**
-     * Phone vs Watch vs Ring on everyday terms: battery used per day, charges per week and the
-     * usual time between charges. Each device is measured over its own tracked span, at least 2 days.
-     */
-    private fun renderHeadToHead(devices: List<Triple<String, String, Int>>, stats: List<DeviceStats>) {
-        data class Row(val name: String, val color: Int, val perDay: Double, val perWeek: Double, val between: Double?)
-        val rows = devices.mapIndexedNotNull { i, (_, name, color) ->
-            val s = stats[i]
-            val first = s.firstMs ?: return@mapIndexedNotNull null
-            val last = s.lastMs ?: return@mapIndexedNotNull null
-            val days = (last - first) / 86_400_000.0
-            if (days < 2.0) return@mapIndexedNotNull null
-            val starts = s.charges.map { it.startMs }.sorted()
-            val between = BatteryMath.median(starts.zipWithNext { a, b -> (b - a) / 3_600_000.0 })
-            Row(name, color, s.percentUsed / days, s.charges.size / days * 7, between)
-        }
+    /** Percent-based comparisons over the same recorded calendar period, computed in [load]. */
+    private fun renderHeadToHead(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?) {
+        val matched = comparison ?: return
+        val rows = matched.daily
         if (rows.size < 2) return
         section("Head to head", "Phone, Watch and Ring side by side.",
-            "Each over its own tracked days. Battery used counts every observed drop, so 100% a day means one full battery.").apply {
-            val most = rows.maxOf { it.perDay }.coerceAtLeast(1.0)
+            "Same period: ${shortWhen(matched.fromMs)} to ${shortWhen(matched.toMs)}. " +
+                "100% a day means one full battery. Coverage can differ; missing readings can undercount use. See Data coverage.").apply {
+            val most = rows.maxOf { it.percentPerDay }.coerceAtLeast(1.0)
             addView(eyebrow("Battery used per day").apply { setPadding(0, dp(10), 0, dp(2)) })
-            rows.sortedByDescending { it.perDay }.forEach { r ->
-                addView(barRow(r.name.uppercase(Locale.getDefault()), r.perDay / most, "${r.perDay.roundToInt()}%", r.color,
-                    "${f1(r.perDay / 100)} full batteries a day"))
+            rows.sortedByDescending { it.percentPerDay }.forEach { r ->
+                val (_, name, color) = devices[r.deviceIndex]
+                addView(barRow(name.uppercase(Locale.getDefault()), r.percentPerDay / most, "${r.percentPerDay.roundToInt()}%", color,
+                    "${f1(r.percentPerDay / 100)} full batteries a day"))
             }
             addView(eyebrow("Charging").apply { setPadding(0, dp(12), 0, 0) })
             addTileList(rows.map { r ->
-                Tile(f1(r.perWeek), "charges a week", r.name + (r.between?.let { " · usually ${durationHours(it)} apart" } ?: ""),
-                    when { r.name.contains("Ring", true) -> "\uD83D\uDC8D"; r.name.contains("Watch", true) -> "\u231A"; else -> "\uD83D\uDCF1" })
+                val (_, name, _) = devices[r.deviceIndex]
+                Tile(f1(r.chargesPerWeek), "charges a week", name + (r.hoursBetweenCharges?.let { " · usually ${durationHours(it)} apart" } ?: ""),
+                    when { name.contains("Ring", true) -> "\uD83D\uDC8D"; name.contains("Watch", true) -> "\u231A"; else -> "\uD83D\uDCF1" })
             })
         }
     }
 
     private fun durationHours(h: Double) = if (h >= 48) "${f1(h / 24)} days" else "${h.roundToInt()} h"
 
-    private fun renderShowdown(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>) {
-        val lasting = devices.mapIndexedNotNull { i, (_, name, color) ->
-            val stretches = BatteryMath.dischargeStretches(data[i].map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = PollScheduler.gapLimits(this))
-            if (stretches.isEmpty()) null else Triple(name, color,
-                100.0 * stretches.sumOf { it.hours } / stretches.sumOf { it.drop })
-        }.sortedByDescending { it.third }
+    private fun renderShowdown(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?) {
+        val matched = comparison ?: return
+        val lasting = matched.runtime.sortedByDescending { it.fullChargeHours }
         if (lasting.size < 2) return
-        section("Showdown", "Who lasts longest on a charge?").apply {
-            val top = lasting.first().third
-            lasting.forEachIndexed { i, (name, color, hours) ->
-                addView(barRow(listOf("1ST", "2ND", "3RD")[i], hours / top, "${hours.roundToInt()} h", color, name))
+        section("Showdown", "Projected full-charge hours from observed percent loss.",
+            "Same period: ${shortWhen(matched.fromMs)} to ${shortWhen(matched.toMs)}. " +
+                "100 × observed discharge hours ÷ points lost, not a measured full-to-empty run. " +
+                "Coverage and time on the charger can differ. See Data coverage.").apply {
+            val top = lasting.first().fullChargeHours
+            lasting.forEachIndexed { i, r ->
+                val (_, name, color) = devices[r.deviceIndex]
+                addView(barRow(listOf("1ST", "2ND", "3RD")[i], r.fullChargeHours / top,
+                    "${r.fullChargeHours.roundToInt()} h", color, name))
             }
         }
     }
@@ -562,8 +557,6 @@ class StatsActivity : StyledActivity() {
             eyebrowRow("Other gadgets")
             addTileList(listOf(
                 Tile(f1(wh / LAPTOP_WH), "laptop charges", "a 50 Wh laptop battery", "\uD83D\uDCBB"),
-                Tile(fmt(wh / WATCH_WH), "smartwatch charges", "about 1.6 Wh each", "\u231A"),
-                Tile(fmt(wh / RING_WH), "smart ring charges", "about 0.08 Wh each", "\uD83D\uDC8D"),
                 Tile(duration(wh / TV_W * 3600), "of TV", "a 55-inch LED TV at about 100 W", "\uD83D\uDCFA"),
             ))
         }
@@ -643,7 +636,7 @@ class StatsActivity : StyledActivity() {
                             cap: CapacityEstimate, gaps: GapLimits) {
         val a = HonestyAuditor.audit(phone, phoneWidget, watch, ring, cap.combinedMah, gaps)
         section("Honesty audit", "Do the percentages match the hardware?",
-            "Six checks of what Android and Samsung show against the phone's own charge counter. " +
+            "A–E check only the phone against its own battery data. F compares each device's widget and direct percent reports. " +
                 "“unknown” means there isn't enough data yet, not that something is wrong.").apply {
             auditRow("A · Top of charge", listOf(
                 "Slow finish adds ${na(a.medianCvTaperAddedMah, " mAh", 0)} over ${na(a.medianCvTaperMinutes, " min", 0)}",
@@ -979,7 +972,7 @@ class StatsActivity : StyledActivity() {
     }
 
     private fun renderCapabilities() {
-        val rows = store.capabilities()
+        val rows = StatsCapabilities.batteryOnly(store.capabilities())
         if (rows.isEmpty()) return
         val verified = rows.count { it.status == CapabilityProbe.VERIFIED }
         section("What each device can report", "$verified of ${rows.size} fields recorded.").apply {
@@ -997,7 +990,8 @@ class StatsActivity : StyledActivity() {
             addView(makeButton("Share this list (no IDs or names)") { shareCapabilities(rows) },
                 LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
             evidence("Checked once a day from the last 14 days of readings.",
-                "A field is “recorded” when non-empty values were actually stored; the step is the smallest change seen.",
+                "A field is “recorded” when non-empty values were actually stored; the step is the smallest change seen. " +
+                    "Watch and Ring battery stats use only percent and charging state; other battery fields are not measured.",
                 "Firmware ${CapabilityProbe.firmware()}. The shared version leaves out sample values, addresses and serials.")
         }
     }
@@ -1073,8 +1067,6 @@ class StatsActivity : StyledActivity() {
         const val FLOOR_M = 3.0
         const val BANANA_WH = 122.0          // 105 kcal
         const val LAPTOP_WH = 50.0
-        const val WATCH_WH = 1.6             // ~425 mAh at 3.85 V
-        const val RING_WH = 0.08             // ~21 mAh at 3.85 V
         /** Shown until the user sets their own rate; their rate lives only in the phone's settings. */
         const val DEFAULT_CENTS_PER_KWH = 18.0
         const val KEY_CENTS_PER_KWH = "cents_per_kwh"

@@ -158,6 +158,9 @@ class StatsActivity : StyledActivity() {
             textSize = 28f; typeface = Typeface.create("sans-serif", Typeface.BOLD); letterSpacing = -0.02f
             setTextColor(ink); setPadding(dp(4), 0, 0, dp(14))
         })
+        body.addView(makeButton("Glossary: what every number means") {
+            startActivity(Intent(this, GlossaryActivity::class.java))
+        }, LinearLayout.LayoutParams(-1, dp(48)).apply { bottomMargin = dp(14) })
     }
 
     private fun show(l: Loaded) {
@@ -1040,7 +1043,7 @@ class StatsActivity : StyledActivity() {
     private fun LinearLayout.eyebrowRow(text: String) =
         addView(eyebrow(text), LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(14) })
 
-    private companion object {
+    internal companion object {
         const val TAG = "BatteryLabStats"
         val SECTION_ICONS = mapOf(
             "Phone battery capacity" to "\uD83D\uDD0B", "By the numbers" to "\uD83D\uDCCA",

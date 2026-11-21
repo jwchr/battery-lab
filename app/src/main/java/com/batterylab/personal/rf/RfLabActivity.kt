@@ -320,6 +320,12 @@ class RfLabActivity : StyledActivity() {
 
     private fun openGuideSteps() {
         if (!guide.active) {
+            if (Build.VERSION.SDK_INT < 31) {
+                AlertDialog.Builder(this).setTitle("Phone test guide")
+                    .setMessage("The phone test guide needs Android 12 or newer, because My devices scanning needs it.")
+                    .setPositiveButton("OK", null).show()
+                return
+            }
             guide = GuideSteps.start(System.currentTimeMillis())
             saveGuide()
             watchGuideBluetooth()
@@ -824,7 +830,11 @@ class RfLabActivity : StyledActivity() {
                 1 -> startReplay(id)
                 2 -> chooseExport(id)
                 3 -> {
-                    if (rf.store.delete(id, rf.activeId)) { if (resultId == id) resultId = null; render() }
+                    if (rf.store.delete(id, rf.activeId)) {
+                        if (resultId == id) resultId = null
+                        refreshGuideHistory()
+                        render()
+                    }
                     else toast("A running session cannot be deleted")
                 }
             }
@@ -835,7 +845,12 @@ class RfLabActivity : StyledActivity() {
         AlertDialog.Builder(this).setTitle("Delete all RF Lab sessions?")
             .setMessage("This removes every saved session and every pinned device on this phone, and device numbers " +
                 "start fresh. Your battery history is not touched.")
-            .setPositiveButton("Delete all") { _, _ -> rf.store.deleteAll(rf.activeId); resultId = null; render() }
+            .setPositiveButton("Delete all") { _, _ ->
+                rf.store.deleteAll(rf.activeId)
+                resultId = null
+                refreshGuideHistory()
+                render()
+            }
             .setNegativeButton("Cancel", null).show()
     }
 

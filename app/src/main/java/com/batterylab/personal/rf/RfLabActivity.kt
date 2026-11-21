@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -18,6 +19,7 @@ import android.view.WindowManager
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.Toast
 import com.batterylab.personal.Background
 import com.batterylab.personal.Palette
@@ -58,6 +60,7 @@ import com.batterylab.rf.WindowStats
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.Calendar
 import java.util.Locale
 
 /**
@@ -75,6 +78,17 @@ class RfLabActivity : StyledActivity() {
     private var loadingResult: String? = null
     private var pendingExportId: String? = null
     private var wasRunning = false
+    private lateinit var guidePrefs: android.content.SharedPreferences
+    private var guide = GuideSteps.State()
+    private var guideNotice: String? = null
+    private var guideList: LinearLayout? = null
+    private var guideDialog: AlertDialog? = null
+    private var guideSessionId: String? = null
+    private var guideEndedId: String? = null
+    private var guideHistoryGeneration = 0
+    private var guideDay = 0L
+    private var createdOrientation = 0
+    private val guideBluetooth by lazy { BluetoothWatch(this) }
     /** Between onStart and onStop. A replay prepared in the background starts only while visible. */
     private var visible = false
     private var showAllSessions = false
@@ -98,6 +112,11 @@ class RfLabActivity : StyledActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         rf = RfRuntime.controller(this)
+        guidePrefs = getSharedPreferences("rf_guide", MODE_PRIVATE)
+        guide = GuideSteps.load(guidePrefs.all.mapNotNull { (key, value) ->
+            (value as? Long)?.let { key to it }
+        }.toMap())
+        createdOrientation = resources.configuration.orientation
         durationS = savedInstanceState?.getInt("durationS", durationS) ?: durationS
         scope = Scope.parse(savedInstanceState?.getString("scope"))
             ?.takeIf { Build.VERSION.SDK_INT >= 31 || it == Scope.MY_LINKS } ?: scope
@@ -106,6 +125,14 @@ class RfLabActivity : StyledActivity() {
         pendingExportNames = savedInstanceState?.getBoolean("exportNames", false) ?: false
         resultId = savedInstanceState?.getString("resultId") ?: rf.lastEndedId
         setUpPage()
+        observeGuideSession()
+        if (savedInstanceState != null && savedInstanceState.getString("guideSession") == rf.activeId && rf.activeId != null) {
+            // Restore session-local evidence only if this very session is still alive in this process.
+            guide = guide.copy(bluetoothOff = savedInstanceState.getBoolean("guideBluetoothOff"),
+                bluetoothBack = savedInstanceState.getBoolean("guideBluetoothBack"))
+            if (savedInstanceState.getInt("guideOrientation") != createdOrientation)
+                guideEvent(GuideSteps.RecreatedDuringSession)
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -116,11 +143,16 @@ class RfLabActivity : StyledActivity() {
         outState.putBoolean("exportNames", pendingExportNames)
         pendingExportId?.let { outState.putString("exportId", it) }
         resultId?.let { outState.putString("resultId", it) }
+        outState.putInt("guideOrientation", createdOrientation)
+        rf.activeId?.let { outState.putString("guideSession", it) }
+        outState.putBoolean("guideBluetoothOff", guide.bluetoothOff)
+        outState.putBoolean("guideBluetoothBack", guide.bluetoothBack)
     }
 
     override fun onStart() {
         super.onStart()
         visible = true
+        watchGuideBluetooth()
     }
 
     override fun onResume() {
@@ -129,6 +161,8 @@ class RfLabActivity : StyledActivity() {
         val running = rf.running
         if (wasRunning && !running) { resultId = rf.lastEndedId; result = null }
         wasRunning = running
+        observeGuideSession()
+        refreshGuideHistory()
         render()
         main.post(refresh)
     }
@@ -141,9 +175,16 @@ class RfLabActivity : StyledActivity() {
     override fun onStop() {
         super.onStop()
         visible = false
+        guideBluetooth.stop()
         // Rotation keeps the session; leaving the screen ends it (R11), off the main thread.
         rf.screenStopped(isChangingConfigurations)
         if (!isChangingConfigurations) window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    override fun onDestroy() {
+        guideDialog?.dismiss()
+        guideDialog = null
+        super.onDestroy()
     }
 
     private fun syncScreenOn(running: Boolean) {
@@ -154,6 +195,7 @@ class RfLabActivity : StyledActivity() {
     private fun onTick() {
         val running = rf.running
         syncScreenOn(running)
+        observeGuideSession()
         if (running) fillLive()
         if (wasRunning && !running) { resultId = rf.lastEndedId; result = null; render() }
         if (!running) RfRuntime.liveTable = null
@@ -162,11 +204,176 @@ class RfLabActivity : StyledActivity() {
 
     private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
 
+    private fun guideEvent(event: GuideSteps.Event) {
+        val before = guide
+        val after = GuideSteps.onEvent(before, event)
+        if (after == before) return
+        guide = after
+        if (GuideSteps.save(after) != GuideSteps.save(before)) saveGuide()
+        if (after.current > before.current) {
+            guideNotice = if (after.finished) "Done. All 11 steps finished."
+                else "Done. Next: ${GuideSteps.steps[after.current].title}."
+            if (visible) toast(guideNotice!!)
+        } else if (event == GuideSteps.Back) guideNotice = null
+        if (after.current != before.current || after.done != before.done || after.skipped != before.skipped)
+            guideList?.let { fillGuideList(it) }
+        if (after.current != before.current || GuideSteps.progress(after) != GuideSteps.progress(before)) render()
+    }
+
+    private fun saveGuide() {
+        val editor = guidePrefs.edit()
+        GuideSteps.save(guide).forEach { (key, value) -> editor.putLong(key, value) }
+        editor.apply()
+    }
+
+    private fun watchGuideBluetooth() {
+        if (!guide.active || !visible) return
+        guideBluetooth.start(main, receiveSystemBluetooth = true) { on ->
+            observeGuideSession()
+            guideEvent(GuideSteps.BluetoothChanged(on))
+        }
+    }
+
+    /** Read the existing snapshot and Location switch only. Never starts a session or a radio. */
+    private fun observeGuideSession() {
+        if (!guide.active) return
+        val location = try {
+            (getSystemService(LOCATION_SERVICE) as LocationManager).isLocationEnabled
+        } catch (_: Exception) { null }
+        val snap = rf.snapshot()?.takeIf { it.running && it.provenance == Provenance.LIVE && !it.imported }
+        if (snap == null || snap.id != guideSessionId) {
+            if (snap == null) guideSessionId = null
+            guideEvent(GuideSteps.SessionEnded)
+        }
+        // A Location change belongs to the old session only if it is still running.
+        if (location != null) guideEvent(GuideSteps.LocationChanged(location))
+        if (snap != null) {
+            if (guideSessionId != snap.id) {
+                guideSessionId = snap.id
+                // Local session ids start with their creation time, including when rotation keeps one alive.
+                val startMs = snap.id.substringBefore('_').toLongOrNull() ?: Long.MIN_VALUE
+                guideEvent(GuideSteps.SessionStarted(snap.scope, startMs))
+                refreshGuideHistory()
+            }
+            guideEvent(GuideSteps.SessionContinued)
+            if (snap.streams.any { it.kind == Kinds.RING_LINK && it.status == Status.NOT_CONNECTED })
+                guideEvent(GuideSteps.RingLinkNotConnected)
+        }
+        val dayStart = todayBounds().first
+        if (guideEndedId != rf.lastEndedId || guideDay != dayStart) {
+            guideEndedId = rf.lastEndedId
+            refreshGuideHistory()
+        }
+    }
+
+    private fun todayBounds(): Pair<Long, Long> {
+        val day = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, 0); set(Calendar.MINUTE, 0); set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
+        }
+        val start = day.timeInMillis
+        day.add(Calendar.DAY_OF_MONTH, 1)
+        return start to day.timeInMillis
+    }
+
+    private fun refreshGuideHistory() {
+        if (!guide.active) return
+        val since = guide.startedAtMs
+        val (dayStart, dayEnd) = todayBounds()
+        guideDay = dayStart
+        val generation = ++guideHistoryGeneration
+        val store = rf.store
+        Background.io.execute {
+            val history = GuideHistory.read(store, since, dayStart, dayEnd)
+            Background.onMain {
+                if (!isDestroyed && generation == guideHistoryGeneration && since == guide.startedAtMs)
+                    guideEvent(history)
+            }
+        }
+    }
+
+    private fun renderGuide() {
+        if (!guide.active) {
+            section("Phone checks").apply { button("Phone test guide") { openGuideSteps() } }
+            return
+        }
+        if (guide.finished) {
+            section("Phone test guide", "All 11 steps finished", guideNotice).apply {
+                button("All steps") { openGuideSteps() }
+                button("Back") { guideEvent(GuideSteps.Back) }
+            }
+            return
+        }
+        val step = GuideSteps.steps[guide.current]
+        section("Step ${guide.current + 1} of 11", step.title, step.instructions, fill = Palette.tint).apply {
+            guideNotice?.let { addView(label(it, 13f, ink, bold = true)) }
+            addView(label(GuideSteps.progress(guide), 13f, ink, bold = true))
+            val manual = GuideSteps.canManuallyFinish(guide)
+            addView(makeButton("I did it") { guideEvent(GuideSteps.ManualDone) }.apply {
+                isEnabled = manual; alpha = if (manual) 1f else 0.45f
+            }, LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(8) })
+            if (!manual) addView(label("This step advances when RF Lab sees the check finish.", 12f))
+            if (step.optional) button("Skip") { guideEvent(GuideSteps.Skip) }
+            button("All steps") { openGuideSteps() }
+            if (guide.current > 0) button("Back") { guideEvent(GuideSteps.Back) }
+        }
+    }
+
+    private fun openGuideSteps() {
+        if (!guide.active) {
+            guide = GuideSteps.start(System.currentTimeMillis())
+            saveGuide()
+            watchGuideBluetooth()
+            observeGuideSession()
+            refreshGuideHistory()
+            render()
+        }
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        fillGuideList(list)
+        guideList = list
+        guideDialog = AlertDialog.Builder(this).setTitle("Phone test guide")
+            .setView(ScrollView(this).apply { addView(list) })
+            .setPositiveButton("Back to RF Lab", null)
+            .setNeutralButton("Reset") { _, _ ->
+                guideDialog = AlertDialog.Builder(this).setTitle("Reset the phone test guide?")
+                    .setMessage("Start again at step 1. Your sessions and battery history stay saved.")
+                    .setPositiveButton("Reset") { _, _ ->
+                        guide = GuideSteps.start(System.currentTimeMillis())
+                        guideNotice = null; guideSessionId = null
+                        saveGuide(); observeGuideSession(); refreshGuideHistory(); render(); openGuideSteps()
+                    }.setNegativeButton("Cancel", null).show()
+            }.create().apply {
+                setOnDismissListener { if (guideList === list) guideList = null }
+                show()
+            }
+    }
+
+    private fun fillGuideList(list: LinearLayout) {
+        list.removeAllViews()
+        GuideSteps.steps.forEachIndexed { i, step ->
+            val status = when {
+                guide.isSkipped(i) -> "Skipped: "
+                guide.isDone(i) -> "✓ "
+                i == guide.current -> "Current: "
+                else -> ""
+            }
+            list.addView(label("$status${i + 1}. ${step.title}", 16f, ink, bold = true).apply {
+                setPadding(dp(8), dp(14), dp(8), dp(6))
+                if (i == guide.current) setBackgroundColor(Palette.tint)
+            })
+            list.addView(label(step.instructions, 13f))
+            list.addView(label("Done when: ${GuideSteps.completion(i)}", 12f))
+        }
+    }
+
     private fun render() {
         val oldScroll = scroll.scrollY
         body.removeAllViews()
         liveBox = null
         deviceBox = null
+        renderGuide()
         section("RF Lab", "Signal strength in dBm", "Watch your own links for up to 10 minutes. " +
             "Sessions stay on this phone in their own files; the battery history and backups do not change.")
         if (rf.running) renderLive() else renderSetup()
@@ -229,6 +436,7 @@ class RfLabActivity : StyledActivity() {
         if (r is StartResult.Refused) toast(r.reason)
         else { resultId = null; result = null }
         wasRunning = rf.running
+        observeGuideSession()
         render()
     }
 

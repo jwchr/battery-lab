@@ -164,6 +164,20 @@ class RfLabGuardTest {
         assertFalse(text.contains("WifiManager"))
     }
 
+    @Test fun phoneGuideUsesItsOwnPreferencesAndItsRulesStayPure() {
+        val activity = code(File(rfDir, "RfLabActivity.kt"))
+        val files = Regex("""getSharedPreferences\(([^,]+),""").findAll(activity)
+            .map { it.groupValues[1] }.toSet()
+        assertEquals(setOf("PREFS", "\"rf_guide\""), files)
+        val rules = code(File(rfDir, "GuideSteps.kt"))
+        assertFalse(rules.contains("import android."))
+        for (name in listOf("GuideSteps.kt", "GuideHistory.kt")) {
+            val text = code(File(rfDir, name))
+            for (forbidden in listOf("BatteryStore", "requestPermissions", "getSharedPreferences", "rf.start(", "rf.stop("))
+                assertFalse("$name uses $forbidden", text.contains(forbidden))
+        }
+    }
+
     @Test fun exactlyTwoProbeLinesAndTheSchemaStaysAt7() {
         val calls = rfSources.flatMap { f -> Regex("""logProbe\(([^,]*),""").findAll(code(f)).map { it.groupValues[1].trim() }.toList() }
         assertEquals(listOf("\"rf\"", "\"rf\""), calls)

@@ -46,6 +46,7 @@
             </intent-filter>
         </activity>
         <activity android:name=".StatsActivity" android:exported="false" />
+        <activity android:name=".GlossaryActivity" android:exported="false" />
         <activity android:name=".rf.RfLabActivity" android:exported="false" />
         <service android:name=".BatteryPollService"
             android:exported="true"

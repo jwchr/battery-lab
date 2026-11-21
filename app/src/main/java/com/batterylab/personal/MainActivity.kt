@@ -288,6 +288,30 @@ class MainActivity : StyledActivity() {
                     if (ci == null) append("Needs at least 2 runs of each before there's a range.")
                     else if (ci.low <= 0 && ci.high >= 0) append("The range includes zero, so no clear difference yet.")
                 }, 12f, quiet))
+                val a = armDetail(results, armA)
+                val b = armDetail(results, armB)
+                for (arm in listOf(a, b)) {
+                    addView(label(buildString {
+                        append("${modeName(arm.mode)}: ${arm.runs} runs, median ${arm.medianRate?.let(::f)} pp/hour " +
+                            "(${arm.minRate?.let(::f)} to ${arm.maxRate?.let(::f)}), " +
+                            "about ${arm.meanHours?.let(::f)} h each, from ${arm.source}.")
+                        if (arm.setAside > 0) append(" ${arm.setAside} set aside.")
+                    }, 12f, quiet))
+                }
+                val notes = mutableListOf<String>()
+                when (order(results, armA, armB)) {
+                    OrderCheck.ALTERNATED -> notes += "Runs were alternated, which helps rule out slow drift."
+                    OrderCheck.BLOCKED -> {
+                        val first = results.filter { it.rate != null && it.experiment.mode in listOf(armA, armB) }
+                            .minBy { it.experiment.startMs }.experiment.mode
+                        val second = if (first == armA) armB else armA
+                        notes += "All ${modeName(first)} runs came before the ${modeName(second)} runs, " +
+                            "so a slow change over time could explain the difference. Alternate them (A, B, B, A)."
+                    }
+                    OrderCheck.TOO_FEW -> Unit
+                }
+                notes += conditionWarnings(a, b)
+                if (notes.isNotEmpty()) addView(label(notes.joinToString(" "), 12f, quiet))
             }
         }
 
@@ -783,11 +807,6 @@ class MainActivity : StyledActivity() {
             ExperimentEndpoint.Choice.ReadBle -> readRing(failed, next)
             is ExperimentEndpoint.Choice.Refuse -> { toast(choice.reason); failed() }
         }
-    }
-
-    private fun modeName(mode: String) = when (mode) {
-        "baseline" -> "Baseline"; "monitoring" -> "Monitored"; "ring_alone" -> "Ring alone"; "ring_with_watch" -> "Ring + Watch"
-        else -> mode
     }
 
     private fun startTest(mode: String) {

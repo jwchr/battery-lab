@@ -206,11 +206,11 @@ object Glossary {
 
         section = "Showdown"
         entry("Full-charge hours and rank", "Projected full-to-empty runtime for each device, ordered longest first.",
-            "Use only readings inside the shared first-to-last history overlap of devices with at least two valid readings. Multiply discharge-stretch hours by 100 and divide by points lost. Stretches need 1 hour and 4 points; a charge, rise over 2 points, or gap over the stretch allowance ends one. Show at least two qualifying devices. This projects runtime from percent loss, not measured capacity or a full-to-empty run; coverage and charging time can differ.")
+            "Use only readings inside the chosen devices' shared first-to-last history overlap. Devices without at least 2 shared days are left out. Multiply discharge-stretch hours by 100 and divide by points lost. Stretches need 1 hour and 4 points; a charge, rise over 2 points, or gap over the stretch allowance ends one. Show at least two qualifying devices. This projects runtime from percent loss, not measured capacity or a full-to-empty run; coverage and charging time can differ.")
 
         section = "Head to head"
         entry("Battery used per day", "Observed loss per calendar day, with 100% meaning one full battery's worth.",
-            "Use only readings inside the shared first-to-last history overlap of devices with at least two valid readings. Divide each device's observed points used by the same overlap duration in days. Need at least 2 shared days and two devices with two readings inside. Days include gaps, so coverage differences can undercount use; full batteries per day is the result divided by 100.")
+            "Use only readings inside the chosen devices' shared first-to-last history overlap. Devices without at least 2 shared days are left out. Divide each device's observed points used by the same overlap duration in days. Need two devices with two readings inside. Days include gaps, so coverage differences can undercount use; full batteries per day is the result divided by 100.")
         entry("Charges a week", "Detected charges scaled to a week at the observed pace.",
             "Detect charges using only readings inside the same shared period as Battery used per day. Divide the count by that shared duration in days and multiply by 7. Detected charges include inferred jumps and observed runs with a gain; sessions outside the period are excluded.")
         entry("Usually apart", "The middle elapsed time between detected charge starts.",

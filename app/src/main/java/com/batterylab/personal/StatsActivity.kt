@@ -171,6 +171,11 @@ class StatsActivity : StyledActivity() {
         renderTitle()
         val devices = l.devices; val data = l.data; val gaps = l.gaps; val stats = l.stats
         val capacity = l.capacity; val usage = l.usage; val idle = l.idle; val phone = data[0]
+        val leftOut = l.comparison?.let { comparison ->
+            devices.indices.filter { data[it].isNotEmpty() && it !in comparison.deviceIndexes }
+                .joinToString(", ") { devices[it].second }
+        }.orEmpty()
+        val leftOutCaption = if (leftOut.isEmpty()) "" else " Left out: $leftOut, not enough shared history yet."
 
         val sectionMs = mutableListOf<Pair<String, Long>>()
         fun timed(name: String, block: () -> Unit) {
@@ -190,8 +195,8 @@ class StatsActivity : StyledActivity() {
         timed("numbers") { renderNumbers(devices, stats) }
         timed("habits") { renderHabits(stats[0]) }
         timed("hours") { renderHours(devices, stats) }
-        timed("showdown") { renderShowdown(devices, l.comparison) }
-        timed("headtohead") { renderHeadToHead(devices, l.comparison) }
+        timed("showdown") { renderShowdown(devices, l.comparison, leftOutCaption) }
+        timed("headtohead") { renderHeadToHead(devices, l.comparison, leftOutCaption) }
         timed("rolling") { renderRolling(devices, data, l.stretches) }
         timed("spread") { renderSpread(devices, l.spread) }
         timed("week") { renderWeek(devices, l.week) }
@@ -333,13 +338,14 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Percent-based comparisons over the same recorded calendar period, computed in [load]. */
-    private fun renderHeadToHead(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?) {
+    private fun renderHeadToHead(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?, leftOutCaption: String) {
         val matched = comparison ?: return
         val rows = matched.daily
         if (rows.size < 2) return
         section("Head to head", "Phone, Watch and Ring side by side.",
             "Same period: ${shortWhen(matched.fromMs)} to ${shortWhen(matched.toMs)}. " +
-                "100% a day means one full battery. Coverage can differ; missing readings can undercount use. See Data coverage.").apply {
+                "100% a day means one full battery. Coverage can differ; missing readings can undercount use. See Data coverage." +
+                leftOutCaption).apply {
             val most = rows.maxOf { it.percentPerDay }.coerceAtLeast(1.0)
             addView(eyebrow("Battery used per day").apply { setPadding(0, dp(10), 0, dp(2)) })
             rows.sortedByDescending { it.percentPerDay }.forEach { r ->
@@ -358,14 +364,14 @@ class StatsActivity : StyledActivity() {
 
     private fun durationHours(h: Double) = if (h >= 48) "${f1(h / 24)} days" else "${h.roundToInt()} h"
 
-    private fun renderShowdown(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?) {
+    private fun renderShowdown(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?, leftOutCaption: String) {
         val matched = comparison ?: return
         val lasting = matched.runtime.sortedByDescending { it.fullChargeHours }
         if (lasting.size < 2) return
         section("Showdown", "Projected full-charge hours from observed percent loss.",
             "Same period: ${shortWhen(matched.fromMs)} to ${shortWhen(matched.toMs)}. " +
                 "100 × observed discharge hours ÷ points lost, not a measured full-to-empty run. " +
-                "Coverage and time on the charger can differ. See Data coverage.").apply {
+                "Coverage and time on the charger can differ. See Data coverage." + leftOutCaption).apply {
             val top = lasting.first().fullChargeHours
             lasting.forEachIndexed { i, r ->
                 val (_, name, color) = devices[r.deviceIndex]

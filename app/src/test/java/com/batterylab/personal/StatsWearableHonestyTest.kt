@@ -9,6 +9,45 @@ class StatsWearableHonestyTest {
     private fun reading(h: Int, percent: Int, charging: Boolean = false) =
         Reading("watch", h * hour, percent, charging, "test")
     private fun history(from: Int, to: Int) = (from..to).map { reading(it, 100 - (it - from)) }
+    private fun historyDays(from: Int, to: Int) =
+        (from * 24..to * 24).map { reading(it, 100 - (it % 24) * 2) }
+
+    @Test fun shortRingHistoryDoesNotHideTheLongPhoneAndWatchComparison() {
+        val end = 30 * 24 * hour
+        val ring = listOf(reading(0, 90).copy(timeMs = end - 5 * 60_000L),
+            reading(0, 89).copy(timeMs = end))
+        val result = StatsComparison.matched(listOf(historyDays(0, 30), historyDays(0, 30), ring), gaps)!!
+        assertEquals(listOf(0, 1), result.deviceIndexes)
+        assertEquals(listOf(0, 1), result.daily.map { it.deviceIndex })
+        assertEquals(listOf(0, 1), result.runtime.map { it.deviceIndex })
+        assertEquals(0L, result.fromMs)
+        assertEquals(end, result.toMs)
+    }
+
+    @Test fun threeDevicesWithTenSharedDaysBeatALongerPair() {
+        val result = StatsComparison.matched(listOf(historyDays(0, 30), historyDays(0, 30),
+            historyDays(20, 30)), gaps)!!
+        assertEquals(listOf(0, 1, 2), result.deviceIndexes)
+        assertEquals(listOf(0, 1, 2), result.daily.map { it.deviceIndex })
+        assertEquals(listOf(0, 1, 2), result.runtime.map { it.deviceIndex })
+        assertEquals(20 * 24 * hour, result.fromMs)
+        assertEquals(30 * 24 * hour, result.toMs)
+    }
+
+    @Test fun longestPairWinsWhenWatchAndRingHistoriesDoNotOverlap() {
+        val result = StatsComparison.matched(listOf(historyDays(0, 30), historyDays(0, 3),
+            historyDays(10, 30)), gaps)!!
+        assertEquals(listOf(0, 2), result.deviceIndexes)
+        assertEquals(listOf(0, 2), result.daily.map { it.deviceIndex })
+        assertEquals(listOf(0, 2), result.runtime.map { it.deviceIndex })
+        assertEquals(10 * 24 * hour, result.fromMs)
+        assertEquals(30 * 24 * hour, result.toMs)
+    }
+
+    @Test fun noPairWithTwoSharedDaysReturnsNull() {
+        assertNull(StatsComparison.matched(listOf(historyDays(0, 3), historyDays(2, 5),
+            historyDays(4, 7)), gaps))
+    }
 
     @Test fun dailyComparisonUsesTheSameDaysAndExcludesEarlierAndLaterUse() {
         val result = StatsComparison.matched(listOf(history(0, 96), history(24, 72)), gaps)!!
@@ -31,9 +70,7 @@ class StatsWearableHonestyTest {
     }
 
     @Test fun needsTwoSharedDaysRatherThanTwoDaysForEachSeparately() {
-        val result = StatsComparison.matched(listOf(history(0, 48), history(24, 72)), gaps)!!
-        assertTrue(result.daily.isEmpty())
-        assertEquals(2, result.runtime.size)
+        assertNull(StatsComparison.matched(listOf(history(0, 48), history(24, 72)), gaps))
         assertEquals(2, StatsComparison.matched(listOf(history(0, 48), history(0, 48)), gaps)!!.daily.size)
     }
 
@@ -45,6 +82,7 @@ class StatsWearableHonestyTest {
     @Test fun unobservedDevicesDoNotBlockTheOtherTwoOrChangeTheirIndices() {
         val result = StatsComparison.matched(listOf(history(0, 48), emptyList(), history(0, 48),
             listOf(reading(10, 50))), gaps)!!
+        assertEquals(listOf(0, 2), result.deviceIndexes)
         assertEquals(listOf(0, 2), result.daily.map { it.deviceIndex })
         assertEquals(listOf(0, 2), result.runtime.map { it.deviceIndex })
         assertNull(StatsComparison.matched(listOf(emptyList(), history(0, 48)), gaps))
@@ -68,8 +106,8 @@ class StatsWearableHonestyTest {
 
     @Test fun runtimeExcludesUseOutsideTheOverlapAndTimeOnTheCharger() {
         val readings = listOf(reading(0, 100), reading(1, 20), reading(2, 40, true),
-            reading(3, 80, true), reading(4, 80), reading(6, 70), reading(8, 60))
-        val other = listOf(reading(2, 100), reading(4, 90), reading(6, 80), reading(8, 70))
+            reading(3, 80, true), reading(4, 80), reading(6, 70), reading(8, 60), reading(50, 60))
+        val other = listOf(reading(2, 100), reading(4, 90), reading(6, 80), reading(8, 70), reading(50, 70))
         val result = StatsComparison.matched(listOf(readings, other), gaps)!!
         assertEquals(20.0, result.runtime.first().fullChargeHours, 1e-9)
         assertEquals(20.0, result.runtime.last().fullChargeHours, 1e-9)

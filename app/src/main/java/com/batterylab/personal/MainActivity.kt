@@ -291,12 +291,7 @@ class MainActivity : StyledActivity() {
                 val a = armDetail(results, armA)
                 val b = armDetail(results, armB)
                 for (arm in listOf(a, b)) {
-                    addView(label(buildString {
-                        append("${modeName(arm.mode)}: ${arm.runs} runs, median ${arm.medianRate?.let(::f)} pp/hour " +
-                            "(${arm.minRate?.let(::f)} to ${arm.maxRate?.let(::f)}), " +
-                            "about ${arm.meanHours?.let(::f)} h each, from ${arm.source}.")
-                        if (arm.setAside > 0) append(" ${arm.setAside} set aside.")
-                    }, 12f, quiet))
+                    addView(label(armDetailText(arm), 12f, quiet))
                 }
                 val notes = mutableListOf<String>()
                 when (order(results, armA, armB)) {

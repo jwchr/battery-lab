@@ -564,6 +564,30 @@ class BatteryStore private constructor(context: Context) :
 
     // ---- export / restore ----------------------------------------------------------------
 
+    /** A fixed append cutoff for an analysis export. No merged UI readings or derived rows. */
+    fun rangeExportMaxId(): Long = readableDatabase.rawQuery("SELECT MAX(id) FROM readings", null).use { c ->
+        if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L
+    }
+
+    /** Bounded pages; the cursor is closed before file I/O, and values retain their stored meaning. */
+    fun rangeExportReadings(bounds: RangeExport.Bounds, maxId: Long, emit: (Reading) -> Unit) {
+        var afterId = Long.MIN_VALUE
+        while (true) {
+            val page = RangeExport.Page(bounds, maxId, afterId)
+            val rows = readableDatabase.rawQuery(page.sql, page.args).use { c ->
+                buildList {
+                    while (c.moveToNext()) {
+                        val charging = c.getColumnIndexOrThrow("charging")
+                        add(c.getLong(c.getColumnIndexOrThrow("id")) to readingAt(c).copy(
+                            charging = if (c.isNull(charging)) null else c.getInt(charging) == 1))
+                    }
+                }
+            }
+            for ((id, reading) in rows) { emit(reading); afterId = id }
+            if (rows.size < page.size) return
+        }
+    }
+
     fun exportCsv(out: Writer) {
         val iso = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }
         fun utc(ms: Long) = iso.format(Date(ms))
@@ -619,7 +643,13 @@ class BatteryStore private constructor(context: Context) :
      */
     fun importCsv(input: Reader): Pair<Int, Int> {
         val lines = input.buffered()
-        val head = CsvCodec.parseLine(CsvCodec.readRecord(lines) ?: return 0 to 0)
+        val first = CsvCodec.readRecord(lines) ?: return 0 to 0
+        when (RangeExport.classify(first)) {
+            RangeExport.FirstRecord.ANALYSIS -> throw IllegalArgumentException(RangeExport.RESTORE_ERROR)
+            RangeExport.FirstRecord.INVALID -> throw IllegalArgumentException("Not a Battery Lab export")
+            RangeExport.FirstRecord.BACKUP -> Unit
+        }
+        val head = CsvCodec.parseLine(first)
         val col = head.withIndex().associate { (i, n) -> n to i }
         require("kind" in col && "timestamp_utc" in col && "percentage" in col) { "Not a Battery Lab export" }
         val existing = HashSet<String>()

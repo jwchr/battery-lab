@@ -13,6 +13,7 @@ android {
         targetSdk = 35
         versionCode = 3
         versionName = "0.3-samsung-widget-source"
+        testInstrumentationRunner = "com.batterylab.personal.PersistenceTestRunner"
     }
 
     compileOptions {
@@ -26,4 +27,5 @@ dependencies {
     implementation(project(":rf"))
     implementation("com.google.android.gms:play-services-wearable:19.0.0")
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("junit:junit:4.13.2")
 }

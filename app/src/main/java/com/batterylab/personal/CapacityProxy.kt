@@ -20,6 +20,26 @@ enum class Trend { NOT_ENOUGH, NO_CLEAR_CHANGE, LOWER, HIGHER }
 
 /** Describes the charge counter's proxy for full capacity, not independently measured health. */
 object CapacityProxy {
+    fun capacityCaption(percent: Int?, spec: PhoneSpec?, formatMah: (Double) -> String): String = buildString {
+        if (percent != null) append("Roughly $percent% of the ${formatMah(spec!!.typicalMah)} mAh advertised")
+        else if (spec != null) append("Advertised: ${formatMah(spec.typicalMah)} mAh")
+        if (spec != null) append(" (${formatMah(spec.ratedMah)} mAh rated minimum).")
+        if (percent != null) append(" This is a charge-counter estimate, not a battery health test.")
+    }
+
+    fun readingsCaption(estimate: CapacityProxySummary, formatMah: (Double) -> String): String = buildString {
+        if (estimate.fromFullReading) {
+            append("From the latest 100% reading")
+            if (estimate.samples > 0) append("; ${estimate.samples} other readings")
+        } else append("From ${estimate.samples} readings")
+        if (!estimate.fromFullReading || estimate.samples > 0) {
+            if (estimate.lowPct != null && estimate.highPct != null) append(" between ${estimate.lowPct}% and ${estimate.highPct}%")
+            append(", not charging")
+        }
+        append(" (${estimate.skippedCharging} skipped while charging, ${estimate.skippedLowPercent} below 20%).")
+        estimate.spreadMah?.let { append(" Spread ±${formatMah(it / 2)} mAh.") }
+    }
+
     fun summarize(readings: List<Reading>, nowMs: Long): CapacityProxySummary {
         val windowMs = 30 * 86_400_000L
         val startMs = nowMs - windowMs

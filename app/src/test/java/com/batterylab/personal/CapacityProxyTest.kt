@@ -2,10 +2,65 @@ package com.batterylab.personal
 
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.Locale
+import kotlin.math.roundToInt
 
 class CapacityProxyTest {
     private val day = 86_400_000L
     private val now = 40 * day
+    private fun formatMah(mah: Double) = String.format(Locale.US, "%,d", mah.roundToInt())
+
+    @Test fun capacityCaptionKeepsRatedMinimumWithAdvertisedCapacity() {
+        assertEquals(
+            "Roughly 95% of the 4,500 mAh advertised (4,400 mAh rated minimum). " +
+                "This is a charge-counter estimate, not a battery health test.",
+            CapacityProxy.capacityCaption(95, PhoneSpec(4500.0, 4400.0), ::formatMah),
+        )
+    }
+
+    @Test fun capacityCaptionWithoutPercentStillIncludesRatedMinimum() {
+        assertEquals("Advertised: 4,500 mAh (4,400 mAh rated minimum).",
+            CapacityProxy.capacityCaption(null, PhoneSpec(4500.0, 4400.0), ::formatMah))
+    }
+
+    @Test fun capacityCaptionWithoutSpecRemainsEmpty() {
+        assertEquals("", CapacityProxy.capacityCaption(null, null, ::formatMah))
+    }
+
+    @Test fun fullReadingCaptionCountsOtherReadingsAndKeepsSpread() {
+        val estimate = CapacityProxy.summarize(listOf(
+            reading(0, 4500, 100, true),
+            reading(1, 4000, 20), reading(2, 4200, 50), reading(3, 5000, 90), reading(4, 4400, 60),
+            reading(1, 4500, 10),
+        ), now)
+        assertEquals(
+            "From the latest 100% reading; 4 other readings between 20% and 90%, not charging " +
+                "(1 skipped while charging, 1 below 20%). Spread ±200 mAh.",
+            CapacityProxy.readingsCaption(estimate, ::formatMah),
+        )
+    }
+
+    @Test fun fullReadingCaptionWithoutOtherReadingsOmitsPartialSampleClaim() {
+        val estimate = CapacityProxy.summarize(listOf(
+            reading(0, 4500, 100, true), reading(1, 4500, 10),
+        ), now)
+        assertEquals(
+            "From the latest 100% reading (1 skipped while charging, 1 below 20%).",
+            CapacityProxy.readingsCaption(estimate, ::formatMah),
+        )
+    }
+
+    @Test fun partialReadingCaptionStaysUnchanged() {
+        val estimate = CapacityProxy.summarize(listOf(reading(1, 4500, 30), reading(2, 4500, 70)), now)
+        assertEquals("From 2 readings between 30% and 70%, not charging (0 skipped while charging, 0 below 20%).",
+            CapacityProxy.readingsCaption(estimate, ::formatMah))
+    }
+
+    @Test fun emptyReadingCaptionStaysUnchanged() {
+        val estimate = CapacityProxy.summarize(emptyList(), now)
+        assertEquals("From 0 readings, not charging (0 skipped while charging, 0 below 20%).",
+            CapacityProxy.readingsCaption(estimate, ::formatMah))
+    }
 
     // All fixtures are synthetic; mah is the implied full capacity, not a device measurement.
     private fun reading(daysAgo: Long, mah: Int, pct: Int = 50, charging: Boolean? = false) =

@@ -238,21 +238,13 @@ class StatsActivity : StyledActivity() {
                 addView(GaugeView(this@StatsActivity, pct?.coerceAtMost(100), Palette.green),
                     LinearLayout.LayoutParams(dp(84), dp(84)))
                 addView(label(buildString {
-                    if (pct != null) append("Roughly $pct% of the ${fmt(spec!!.typicalMah)} mAh advertised.")
-                    else if (spec != null) append("Advertised: ${fmt(spec.typicalMah)} mAh")
-                    if (pct != null) append(" This is a charge-counter estimate, not a battery health test.")
-                    if (spec != null) append(" (${fmt(spec.ratedMah)} mAh rated minimum).")
+                    append(CapacityProxy.capacityCaption(pct, spec, ::fmt))
                     if (pct == null && capacity != null) append("\nThis is a charge-counter estimate, not a battery health test.")
                     if (estimate.estimateMah == null && capacity != null) append("\nNo usable reading in the last 30 days; estimated from older charge-counter readings.")
                 }, 13f, Palette.body).apply { setPadding(dp(14), 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
             })
-            addView(label(buildString {
-                if (estimate.fromFullReading) append("From the latest 100% reading; partial samples")
-                else append("From ${estimate.samples} readings")
-                if (estimate.lowPct != null && estimate.highPct != null) append(" between ${estimate.lowPct}% and ${estimate.highPct}%")
-                append(", not charging (${estimate.skippedCharging} skipped while charging, ${estimate.skippedLowPercent} below 20%).")
-                estimate.spreadMah?.let { append(" Spread ±${fmt(it / 2)} mAh.") }
-            }, 11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
+            addView(label(CapacityProxy.readingsCaption(estimate, ::fmt),
+                11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
             addView(label(when (estimate.trend) {
                 Trend.NOT_ENOUGH -> "Not enough readings yet to tell if this is changing."
                 Trend.NO_CLEAR_CHANGE -> "No clear change over the last 30 days."

@@ -10,27 +10,33 @@ object Glossary {
             add(GlossaryEntry(section, term, meaning, how))
         }
 
-        entry("Capacity when full", "About how much charge the phone can hold, in milliamp-hours (mAh). The charge counter is Android's own estimate of charge left.",
-            "Uses the latest positive charge counter at 100% in the last 30 days. Otherwise it takes the middle estimate from non-charging readings at 20% or higher: mAh left times 100 divided by percent. With no recent estimate, it uses the combined full-charge and slope samples described below.")
-        entry("Percent of advertised capacity", "Estimated capacity compared with the model's advertised typical capacity.",
-            "Capacity when full divided by advertised typical mAh, times 100. The gauge stops at 100%, even if the text reports more. This comparison needs a known model specification.")
+        entry("Capacity when full", "A charge-counter estimate of full capacity in milliamp-hours (mAh), not certified battery health.",
+            "Uses the latest positive counter at 100% in 30 days, else the median of remaining mAh times 100 divided by percent at 20% or higher while not charging, falling back to the longer-run methods if unavailable.")
+        entry("Remaining charge", "Android's estimate of charge left now, distinct from full capacity and factory rated mAh.",
+            "The charge counter reports microamp-hours, divided by 1,000 to get remaining mAh.")
+        entry("Percent of advertised capacity", "The full-capacity proxy compared with advertised typical mAh, not a state-of-health percentage.",
+            "Divides estimated full capacity by advertised typical mAh and rounds the percentage to the nearest 5, capping the gauge at 100%.")
         entry("Advertised and rated minimum", "Two factory capacity figures, when the app knows them for this model.",
-            "Looked up in the app's model specifications. They are reference values, not measurements of this battery.")
+            "Looked up in the app's model specifications as nominal reference values, not measurements of this battery.")
+        entry("Recent readings and spread", "The last 30 days' usable partial-reading count, percent range, charging and low-percent exclusions, and variability.",
+            "Uses readings with a positive counter at 20% or higher unless charging is true, shows half the interquartile range with 4+ samples, and identifies the latest 100% reading when it supplies the headline.")
+        entry("Capacity trend", "Whether recent counter estimates shifted beyond their usual spread, not proof of battery wear.",
+            "Needs 10+ usable readings in each 15-day half and compares their medians, reporting lower or higher only when the difference exceeds both halves' interquartile ranges.")
         entry("Battery health label", "Android's current health category, such as Good or Overheating.",
-            "Read directly from Android's battery status. It is a category, not the estimated percent of original capacity.")
+            "Read directly from Android's battery status as a category, not a measured health percentage.")
         entry("Charge cycles", "The lifetime cycle count reported by Android, when available.",
-            "Shown on Android 14 or newer only when Android reports a positive count. Battery Lab does not calculate this tile from its history.")
+            "Shown on Android 14 or newer only when Android reports a positive count.")
         entry("Chemistry", "The battery technology reported by Android.", "Uses Android's current battery technology text when available.")
         entry("Voltage now", "The battery's current electrical voltage, in volts (V).",
             "Android's positive millivolt value divided by 1,000.")
         entry("Temperature now", "The current battery temperature, in degrees Celsius.",
             "Android's positive temperature value, in tenths of a degree, divided by 10.")
         entry("Full-charge readings", "A second capacity estimate from times the phone appeared fully charged.",
-            "Each uninterrupted run at 100% qualifies if Android reports full, the run lasts at least 15 minutes, or unplugging is observed within it. Keep its highest counter value between 2,000 and 7,000 mAh. Show the middle of these samples, averaging the two middle values for an even count, plus the sample count.")
-        entry("Slope method", "Capacity inferred from how the charge counter falls as percent falls. A fitted line smooths out uneven percent steps.",
-            "Use the first reading at each percent from 15% through 98% in uninterrupted discharges. Require at least 6 levels spanning 30 points, fit a straight line to mAh versus percent, and multiply its slope by 100. Keep estimates from 1,000 through 10,000 mAh and show their middle value and count.")
+            "Shows the median and count of qualifying uninterrupted 100% plateau peaks between 2,000 and 7,000 mAh.")
+        entry("Slope method", "Capacity inferred from a fitted line through falling charge-counter and percent values.",
+            "Fits uninterrupted discharges across at least 6 levels spanning 30 points within 15–98%, then shows the median and count of slopes times 100 between 1,000 and 10,000 mAh.")
         entry("Capacity spread and samples", "How much the full-charge and slope estimates differ, and how many estimates were available.",
-            "Pool both methods' samples and use their middle value as the fallback capacity. With at least 4 samples, the displayed plus-or-minus spread is half the distance between the 25% and 75% positions in the sorted samples, using proportional values between positions. The sample count is the number pooled.")
+            "Pools both longer-run methods for the fallback median and count, showing half the interpolated interquartile range with at least 4 samples.")
 
         section = "Will it last?"
         entry("Current percent", "The latest saved battery level used for planning.",

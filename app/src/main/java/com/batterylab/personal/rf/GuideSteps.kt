@@ -35,8 +35,8 @@ object GuideSteps {
         Step("Bluetooth off (D4)", "Open app settings and allow Precise location, then return here. Start My devices. Halfway through, pull down Quick settings and turn Bluetooth off for about 15 seconds, then back on. Return here and check that the session continues."),
         Step("Rotate (D13)", "Start My devices and rotate the phone while the session runs."),
         Step("Location off (D12)", "Open Location settings and turn Location off, then return here. Start My devices and see what it says. Open Location settings to turn it back on. Then open Privacy dashboard and check what it lists for Battery Lab. Come back and tap I did it."),
-        Step("Gate G0: three walks", "Run three My devices sessions of 90 seconds with the Ring on your finger. Each time: tap Mark: near and hold the phone at arm's length for 30 seconds. Tap Mark: moving and walk to the far end of the apartment. Tap Mark: far and stay until it ends. Screenshot each result card."),
-        Step("Optional: another walk set", "Disconnect the Ring in Galaxy Wearable yourself (open it from your home screen). Do three more 90-second My devices walks with the same near, moving and far markers. Screenshot each result card. You can skip this set.", optional = true),
+        Step("Gate G0: three walks", "Take the Ring off and put it on its charger or a table. Tap Start. Stand next to the Ring for 30 seconds. Tap Mark: moving and walk away with the phone to the far end of the apartment. Tap Mark: far and stay until it ends. Do this three times."),
+        Step("Optional: another walk set", "Disconnect the Ring in Galaxy Wearable yourself (open it from your home screen). Take the Ring off and put it on its charger or a table. Tap Start. Stand next to the Ring for 30 seconds. Tap Mark: moving and walk away with the phone to the far end of the apartment. Tap Mark: far and stay until it ends. Do this three times. You can skip this set.", optional = true),
         Step("Ring away (D5)", "Put the Ring on its charger or out of range. Start My links. Check that the Ring link says Not connected, or tap I did it."),
         Step("Everything nearby, 5 minutes (D14)", "Tap Start Everything nearby and let it run for at least 5 minutes."),
         Step("Ring battery (D7)", "With Ring monitoring on and no RF Lab session running, check that the Ring battery reads on the main screen. Then come back and tap I did it."),
@@ -49,7 +49,7 @@ object GuideSteps {
         "Bluetooth goes off and back on during My devices, and that session continues.",
         "the screen is recreated by rotation during My devices.",
         "My devices runs with Location off, Location is back on, and you tap I did it after checking the dashboard.",
-        "three finished 90-second My devices sessions have near, moving and far markers since this guide started.",
+        "three finished 90-second My devices sessions have moving and far markers since this guide started, or you tap I did it.",
         "three more matching walks finish, or you tap Skip.",
         "the Ring link says Not connected during My links, or you tap I did it.",
         "an Everything nearby session of at least 5 minutes finishes.",
@@ -61,6 +61,7 @@ object GuideSteps {
     data class State(
         val active: Boolean = false,
         val startedAtMs: Long = 0,
+        val stepStartedAtMs: Long = startedAtMs,
         val current: Int = 0,
         val done: Int = 0,
         val skipped: Int = 0,
@@ -75,6 +76,8 @@ object GuideSteps {
         val bluetoothBack: Boolean = false,
         val locationOn: Boolean = false,
         val locationKnown: Boolean = false,
+        // Rebuilt from local history, never saved in preferences.
+        val lastWalk: SessionFinished? = null,
     ) {
         val finished get() = current == steps.size
         fun isDone(index: Int) = done and (1 shl index) != 0
@@ -102,10 +105,10 @@ object GuideSteps {
     fun start(timeMs: Long) = State(active = true, startedAtMs = timeMs)
 
     fun qualifiesWalk(session: SessionFinished) = session.complete && session.scope == Scope.MY_DEVICES &&
-        session.plannedS == 90 && session.durationS >= 90 && session.markers.containsAll(setOf("near", "moving", "far"))
+        session.plannedS == 90 && session.durationS >= 90 && session.markers.containsAll(setOf("moving", "far"))
 
     fun canManuallyFinish(state: State) = !state.finished && when (state.current) {
-        0, 6, 8, 9, 10 -> true
+        0, 4, 6, 8, 9, 10 -> true
         3 -> state.locationOffSession && state.locationOn
         else -> false
     }
@@ -115,7 +118,8 @@ object GuideSteps {
         if (event == Back) {
             val previous = (state.current - 1).coerceAtLeast(0)
             return state.copy(current = previous, done = state.done and (1 shl previous).inv(),
-                skipped = state.skipped and (1 shl previous).inv(), bluetoothOff = false, bluetoothBack = false)
+                skipped = state.skipped and (1 shl previous).inv(), bluetoothOff = false, bluetoothBack = false,
+                lastWalk = null)
         }
         if (state.finished) return state
         var next = when (event) {
@@ -141,11 +145,17 @@ object GuideSteps {
                 if (event.timeMs < state.startedAtMs) return state
                 state.copy(runningScope = null, bluetoothOff = false, bluetoothBack = false,
                     walks = state.walks + if (qualifiesWalk(event)) 1 else 0,
+                    lastWalk = if (state.current == 4 && event.scope == Scope.MY_DEVICES &&
+                        event.timeMs >= state.stepStartedAtMs && event.timeMs >= (state.lastWalk?.timeMs ?: 0))
+                        event else state.lastWalk,
                     nearbyFinished = state.nearbyFinished || qualifiesNearby(event))
             }
             is HistoryLoaded -> {
                 val sessions = event.sessions.filter { it.timeMs >= state.startedAtMs }
                 state.copy(walks = sessions.count(::qualifiesWalk), nearbyFinished = sessions.any(::qualifiesNearby),
+                    lastWalk = if (state.current == 4) sessions.filter {
+                        it.scope == Scope.MY_DEVICES && it.timeMs >= state.stepStartedAtMs
+                    }.maxByOrNull { it.timeMs } else null,
                     todayCount = event.todayCount)
             }
             ManualDone -> if (canManuallyFinish(state)) advance(state) else state
@@ -168,7 +178,15 @@ object GuideSteps {
 
     private fun advance(s: State): State = s.copy(current = s.current + 1, done = s.done or (1 shl s.current),
         optionalBaseline = if (s.current == 4) s.walks else s.optionalBaseline,
-        bluetoothOff = false, bluetoothBack = false)
+        bluetoothOff = false, bluetoothBack = false, lastWalk = null)
+
+    private fun walkIssue(s: SessionFinished): String? = when {
+        !s.complete || s.durationS < 90 -> "Last walk ended early"
+        s.plannedS != 90 -> "Last walk was not set to 90 seconds"
+        "moving" !in s.markers -> "Last walk had no Mark: moving"
+        "far" !in s.markers -> "Last walk had no Mark: far"
+        else -> null
+    }
 
     fun progress(s: State): String = when (s.current) {
         0 -> "Waiting for My devices to start, or tap I did it."
@@ -180,7 +198,8 @@ object GuideSteps {
             !s.locationOn -> "Location off was observed. Turn Location back on."
             else -> "Location is back on. Check the Privacy dashboard, then tap I did it."
         }
-        4 -> "Walk ${(s.walks + 1).coerceAtMost(3)} of 3. ${s.walks.coerceAtMost(3)} finished."
+        4 -> "${s.walks.coerceAtMost(3)} of 3 walks counted" +
+            (s.lastWalk?.let(::walkIssue)?.let { ". $it" } ?: "")
         5 -> "Walk ${(s.walks - s.optionalBaseline + 1).coerceIn(1, 3)} of 3. ${(s.walks - s.optionalBaseline).coerceIn(0, 3)} finished."
         6 -> "Waiting for Not connected during My links, or tap I did it."
         7 -> "Waiting for a finished Everything nearby session of at least 5 minutes."
@@ -191,6 +210,7 @@ object GuideSteps {
     /** Only numeric progress and flags. No identifiers, markers, scope, readings or session handles. */
     fun save(s: State): Map<String, Long> = mapOf(
         "active" to if (s.active) 1L else 0L, "started_at_ms" to s.startedAtMs,
+        "step_started_at_ms" to s.stepStartedAtMs,
         "current" to s.current.toLong(), "done" to s.done.toLong(), "skipped" to s.skipped.toLong(),
         "walks" to s.walks.toLong(), "optional_baseline" to s.optionalBaseline.toLong(),
         "nearby_finished" to if (s.nearbyFinished) 1L else 0L,
@@ -200,6 +220,7 @@ object GuideSteps {
     fun load(values: Map<String, Long>): State {
         fun number(key: String) = (values[key] ?: 0).coerceIn(0, Int.MAX_VALUE.toLong()).toInt()
         return State(active = values["active"] == 1L, startedAtMs = (values["started_at_ms"] ?: 0).coerceAtLeast(0),
+            stepStartedAtMs = (values["step_started_at_ms"] ?: values["started_at_ms"] ?: 0).coerceAtLeast(0),
             current = number("current").coerceAtMost(steps.size), done = number("done") and 2047,
             skipped = number("skipped") and 2047, walks = number("walks"), optionalBaseline = number("optional_baseline"),
             nearbyFinished = values["nearby_finished"] == 1L, locationOffSession = values["location_off_session"] == 1L)

@@ -64,4 +64,18 @@ class GuideHistoryTest {
         store.ids().forEach { store.delete(it, null) }
         assertEquals(0, GuideSteps.onEvent(first, GuideHistory.read(store, 100, 100, 200)).walks)
     }
+
+    @Test fun historyCountsWalksWithoutNearAndKeepsOnlyStandardMarkers() {
+        val store = SessionStore(temp.newFolder())
+        session(store, 101, markers = listOf("moving", "far", "other"))
+        session(store, 102, markers = listOf("near", "far"))
+        session(store, 103, markers = listOf("near", "moving"))
+        session(store, 104, durationS = 89, markers = listOf("moving", "far"))
+        val history = GuideHistory.read(store, 100, 100, 200)
+        assertEquals(setOf("moving", "far"), history.sessions.single { it.timeMs == 101L }.markers)
+        assertEquals(setOf("moving", "far"), history.sessions.single { it.timeMs == 104L }.markers)
+        val guide = GuideSteps.onEvent(GuideSteps.start(100).copy(current = 4), history)
+        assertEquals(1, guide.walks)
+        assertEquals("1 of 3 walks counted. Last walk ended early", GuideSteps.progress(guide))
+    }
 }

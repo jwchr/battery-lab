@@ -117,7 +117,17 @@ class GuideStepsTest {
         assertTrue(during.locationOffSession)
     }
 
-    @Test fun threeCompleteNinetySecondWalksWithAllMarkersAdvanceGate() {
+    @Test fun walkNeedsMovingAndFarButNearIsOptional() {
+        assertTrue(GuideSteps.qualifiesWalk(walk()))
+        assertTrue(GuideSteps.qualifiesWalk(walk(labels = setOf("moving", "far"))))
+        assertTrue(GuideSteps.qualifiesWalk(walk(91, labels = setOf("moving", "far"))))
+        for (bad in listOf(walk(labels = setOf("near", "far")), walk(labels = setOf("near", "moving")),
+            walk(89), walk(complete = false), walk(planned = 180), walk(scope = Scope.MY_LINKS))) {
+            assertFalse(GuideSteps.qualifiesWalk(bad))
+        }
+    }
+
+    @Test fun threeCompleteNinetySecondWalksAdvanceGateWithoutNear() {
         var state = at(4)
         for (bad in listOf(walk(60), walk(scope = Scope.MY_LINKS), walk(scope = Scope.EVERYTHING_NEARBY),
             walk(labels = setOf("near", "far")), walk(time = 99), walk(180, planned = 180), walk(complete = false))) {
@@ -125,10 +135,10 @@ class GuideStepsTest {
             assertEquals(0, state.walks)
             assertEquals(4, state.current)
         }
-        state = send(state, ManualDone, Skip, walk())
+        state = send(state, Skip, walk(labels = setOf("moving", "far")))
         assertEquals(1, state.walks)
-        assertTrue(GuideSteps.progress(state).contains("Walk 2 of 3"))
-        state = send(state, walk())
+        assertEquals("1 of 3 walks counted", GuideSteps.progress(state))
+        state = send(state, walk(labels = setOf("moving", "far")))
         assertEquals(4, state.current)
         state = send(state, walk())
         assertEquals(5, state.current)
@@ -136,6 +146,48 @@ class GuideStepsTest {
         assertTrue(state.isDone(4))
         assertTrue(GuideSteps.progress(state).contains("Walk 1 of 3"))
         assertEquals(6, send(state, walk(), walk(), walk()).current)
+    }
+
+    @Test fun walkGateCanBeFinishedManually() {
+        assertTrue(GuideSteps.canManuallyFinish(at(4)))
+        val completed = send(at(4).copy(walks = 1), ManualDone)
+        assertEquals(5, completed.current)
+        assertEquals(1, completed.optionalBaseline)
+        assertTrue(completed.isDone(4))
+    }
+
+    @Test fun walkProgressExplainsTheLastUncountedMyDevicesSession() {
+        val initial = at(4)
+        assertEquals("0 of 3 walks counted", GuideSteps.progress(initial))
+        val cases = listOf(
+            walk(labels = setOf("moving")) to "Last walk had no Mark: far",
+            walk(labels = setOf("far")) to "Last walk had no Mark: moving",
+            walk(89) to "Last walk ended early",
+            walk(complete = false) to "Last walk ended early",
+            walk(180, planned = 180) to "Last walk was not set to 90 seconds",
+        )
+        for ((session, reason) in cases) {
+            val state = send(initial, session)
+            assertEquals("0 of 3 walks counted. $reason", GuideSteps.progress(state))
+            assertEquals(GuideSteps.progress(state), GuideSteps.progress(send(state, walk(scope = Scope.MY_LINKS))))
+            assertEquals("1 of 3 walks counted", GuideSteps.progress(send(state, walk(time = 201))))
+        }
+    }
+
+    @Test fun historyProgressUsesTheLatestMyDevicesSessionInThisStep() {
+        val initial = at(4).copy(stepStartedAtMs = 150)
+        val old = walk(time = 140, labels = setOf("moving"))
+        assertEquals("0 of 3 walks counted", GuideSteps.progress(send(initial, HistoryLoaded(listOf(old), 1))))
+        assertEquals("0 of 3 walks counted", GuideSteps.progress(send(initial, old)))
+        val latest = walk(time = 200, labels = setOf("moving"))
+        val history = HistoryLoaded(listOf(latest, walk(time = 180), old, walk(time = 220, scope = Scope.MY_LINKS)), 4)
+        val state = send(initial, history)
+        assertEquals("1 of 3 walks counted. Last walk had no Mark: far", GuideSteps.progress(state))
+        val restored = GuideSteps.load(GuideSteps.save(state))
+        assertEquals(150, restored.stepStartedAtMs)
+        assertNull(restored.lastWalk)
+        assertEquals(GuideSteps.progress(state), GuideSteps.progress(send(restored, history)))
+        assertEquals("1 of 3 walks counted", GuideSteps.progress(send(state, HistoryLoaded(listOf(walk(time = 180)), 1))))
     }
 
     @Test fun historyIsAbsoluteAndWalksSinceGuideStartCountOnArrival() {
@@ -210,7 +262,7 @@ class GuideStepsTest {
     }
 
     @Test fun manualAndSkipAreLimitedAndBackReopensPreviousStep() {
-        for (i in listOf(1, 2, 3, 4, 5, 7)) assertEquals(i, send(at(i), ManualDone).current)
+        for (i in listOf(1, 2, 3, 5, 7)) assertEquals(i, send(at(i), ManualDone).current)
         for (i in 0..10) if (i != 5) assertEquals(i, send(at(i), Skip).current)
         val skipped = send(at(5), Skip)
         assertEquals(6, skipped.current)

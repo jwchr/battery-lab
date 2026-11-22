@@ -21,7 +21,7 @@ object GuideHistory {
                 val scope = info.scope ?: continue
                 val duration = info.durationNs?.takeIf { it >= 0 }?.div(1_000_000_000L) ?: continue
                 val planned = info.props[Keys.DURATION_LIMIT_S]?.toIntOrNull() ?: continue
-                val markers = if (scope == Scope.MY_DEVICES && planned == 90 && duration >= 90)
+                val markers = if (scope == Scope.MY_DEVICES)
                     SessionReader.markers(info.dir).map { it.label }.filter { it in setOf("near", "moving", "far") }.toSet()
                     else emptySet()
                 sessions += GuideSteps.SessionFinished(scope, duration, markers, start, planned)

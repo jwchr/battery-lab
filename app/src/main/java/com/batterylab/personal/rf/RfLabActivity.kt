@@ -83,6 +83,7 @@ class RfLabActivity : StyledActivity() {
     private var pendingExportId: String? = null
     private var wasRunning = false
     private var stopRequested = false
+    private var markNearOnStart = false
     private lateinit var guidePrefs: android.content.SharedPreferences
     private var guide = GuideSteps.State()
     private var guideNotice: String? = null
@@ -129,6 +130,7 @@ class RfLabActivity : StyledActivity() {
         storeNames = savedInstanceState?.getBoolean("storeNames", storeNames) ?: storeNames
         pendingExportId = savedInstanceState?.getString("exportId")
         pendingExportNames = savedInstanceState?.getBoolean("exportNames", false) ?: false
+        markNearOnStart = savedInstanceState?.getBoolean("markNearOnStart", false) ?: false
         resultId = savedInstanceState?.getString("resultId") ?: rf.lastEndedId
         setUpPage()
         observeGuideSession()
@@ -147,6 +149,7 @@ class RfLabActivity : StyledActivity() {
         outState.putString("scope", scope.id)
         outState.putBoolean("storeNames", storeNames)
         outState.putBoolean("exportNames", pendingExportNames)
+        outState.putBoolean("markNearOnStart", markNearOnStart)
         pendingExportId?.let { outState.putString("exportId", it) }
         resultId?.let { outState.putString("resultId", it) }
         outState.putInt("guideOrientation", createdOrientation)
@@ -212,7 +215,9 @@ class RfLabActivity : StyledActivity() {
 
     private fun guideEvent(event: GuideSteps.Event) {
         val before = guide
-        val after = GuideSteps.onEvent(before, event)
+        val updated = GuideSteps.onEvent(before, event)
+        val after = if (updated.current != before.current)
+            updated.copy(stepStartedAtMs = System.currentTimeMillis()) else updated
         if (after == before) return
         guide = after
         if (GuideSteps.save(after) != GuideSteps.save(before)) saveGuide()
@@ -313,6 +318,7 @@ class RfLabActivity : StyledActivity() {
         section("Step ${guide.current + 1} of 11", step.title, step.instructions, fill = Palette.tint).apply {
             guideNotice?.let { addView(label(it, 13f, ink, bold = true)) }
             addView(label(GuideSteps.progress(guide), 13f, ink, bold = true))
+            if (guide.current in 4..5) addView(label("Near is marked for you at the start.", 13f))
             val actions = GuideSteps.actions(guide.current)
             for (action in actions) when (action) {
                 is GuideSteps.Action.Start -> {
@@ -322,7 +328,7 @@ class RfLabActivity : StyledActivity() {
                         if (!rf.running) {
                             scope = action.scope
                             durationS = action.seconds
-                            startLive()
+                            startLive(markNear = guide.current in 4..5)
                         }
                     }.apply {
                         isEnabled = enabled; alpha = if (enabled) 1f else 0.45f
@@ -540,12 +546,13 @@ class RfLabActivity : StyledActivity() {
      * reads. The first use of a scanning scope explains why, then asks for scan and Precise location
      * together. The session starts whatever the answer; a stream without its permission says so.
      */
-    private fun startLive() {
+    private fun startLive(markNear: Boolean = false) {
+        markNearOnStart = markNear
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         if (scope == Scope.EVERYTHING_NEARBY && !prefs.getBoolean(NEARBY_OK, false)) {
             AlertDialog.Builder(this).setTitle("Everything nearby")
                 .setMessage(NEARBY_TEXT)
-                .setPositiveButton("Continue") { _, _ -> prefs.edit().putBoolean(NEARBY_OK, true).apply(); startLive() }
+                .setPositiveButton("Continue") { _, _ -> prefs.edit().putBoolean(NEARBY_OK, true).apply(); startLive(markNear) }
                 .setNegativeButton("Cancel", null)
                 .show()
             return
@@ -573,6 +580,8 @@ class RfLabActivity : StyledActivity() {
     }
 
     private fun beginLive() {
+        val markNear = markNearOnStart
+        markNearOnStart = false
         val app = applicationContext
         val chosen = scope
         val ring = PollScheduler.ringAddress(app)
@@ -580,6 +589,7 @@ class RfLabActivity : StyledActivity() {
         val r = rf.start(StartRequest(chosen, Provenance.LIVE, durationS, emitters = table,
             streams = { sch -> liveStreams(app, chosen, ring, table, sch) }))
         if (r is StartResult.Started && table != null) RfRuntime.liveTable = r.id to table
+        if (r is StartResult.Started && markNear) mark("near")
         started(r)
     }
 

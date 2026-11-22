@@ -17,7 +17,9 @@ object StatsComparison {
      */
     fun matched(data: List<List<Reading>>, gaps: GapLimits): MatchedStats? {
         val histories = data.mapIndexedNotNull { index, readings ->
-            readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs }
+            // Keep neighbours outside the shared window available for spike detection.
+            BatteryMath.withoutSpikes(readings.filter { it.percent in 0..100 }.sortedBy { it.timeMs },
+                { it.percent }, { it.charging }, { it.timeMs }, gaps)
                 .takeIf { it.size >= 2 }?.let { index to it }
         }
         if (histories.size < 2) return null

@@ -68,6 +68,28 @@ class StatsWearableHonestyTest {
         result.runtime.forEach { assertEquals(100.0, it.fullChargeHours, 1e-9) }
     }
 
+    @Test fun spikeAtSharedWindowEndIsRemovedUsingTheCompleteHistory() {
+        val phone = (0..72).map { reading(it, if (it == 48) 20 else 90) }
+        val other = (0..48).map { reading(it, 90) }
+        val result = StatsComparison.matched(listOf(phone, other), gaps)!!
+        assertEquals(0L, result.fromMs)
+        assertEquals(48 * hour, result.toMs)
+        assertEquals(listOf(0, 1), result.deviceIndexes)
+        result.daily.forEach { assertEquals(0.0, it.percentPerDay, 1e-9) }
+        assertTrue(result.runtime.isEmpty())
+    }
+
+    @Test fun realDropAtTrueHistoryEndIsKept() {
+        val phone = (0..48).map { reading(it, if (it == 48) 20 else 90) }
+        val other = (0..72).map { reading(it, 90) }
+        val result = StatsComparison.matched(listOf(phone, other), gaps)!!
+        assertEquals(0L, result.fromMs)
+        assertEquals(48 * hour, result.toMs)
+        assertEquals(35.0, result.daily.first().percentPerDay, 1e-9)
+        assertEquals(listOf(0), result.runtime.map { it.deviceIndex })
+        assertEquals(100.0 * 48 / 70, result.runtime.single().fullChargeHours, 1e-9)
+    }
+
     @Test fun physicalFieldsCannotChangePercentBasedComparisons() {
         val plain = history(0, 48)
         val withPhysicalFields = plain.mapIndexed { i, r ->

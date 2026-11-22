@@ -56,6 +56,49 @@ class CapacityProxyTest {
             CapacityProxy.readingsCaption(estimate, ::formatMah))
     }
 
+    @Test fun singleNonChargingFullReadingHasNoOtherReadings() {
+        val estimate = CapacityProxy.summarize(listOf(reading(0, 4500, 100)), now)
+        assertEquals(1, estimate.samples)
+        assertEquals(0, estimate.otherSamples)
+        assertNull(estimate.otherLowPct)
+        assertNull(estimate.otherHighPct)
+        assertEquals("From the latest 100% reading (0 skipped while charging, 0 below 20%).",
+            CapacityProxy.readingsCaption(estimate, ::formatMah))
+    }
+
+    @Test fun nonChargingFullReadingIsExcludedFromOtherCountAndRange() {
+        val estimate = CapacityProxy.summarize(listOf(
+            reading(0, 4500, 100), reading(1, 4200, 20), reading(2, 4400, 70),
+        ), now)
+        assertEquals(4500.0, estimate.estimateMah!!, 1e-9)
+        assertEquals(3, estimate.samples)
+        assertEquals(2, estimate.otherSamples)
+        assertEquals("From the latest 100% reading; 2 other readings between 20% and 70%, not charging " +
+            "(0 skipped while charging, 0 below 20%).",
+            CapacityProxy.readingsCaption(estimate, ::formatMah))
+    }
+
+    @Test fun fullReadingCaptionUsesSingularForOneOtherReading() {
+        val estimate = CapacityProxy.summarize(listOf(
+            reading(0, 4500, 100), reading(1, 4200, 80),
+        ), now)
+        assertEquals("From the latest 100% reading; 1 other reading between 80% and 80%, not charging " +
+            "(0 skipped while charging, 0 below 20%).",
+            CapacityProxy.readingsCaption(estimate, ::formatMah))
+    }
+
+    @Test fun nonPositiveCountersAreNotCountedAsSkipped() {
+        val estimate = CapacityProxy.summarize(listOf(
+            reading(1, 0, charging = true), reading(1, -4500, charging = true),
+            reading(1, 0, 10), reading(1, -4500, 10),
+            reading(1, 4500, charging = true), reading(1, 4500, 10),
+        ), now)
+        assertNull(estimate.estimateMah)
+        assertEquals(0, estimate.samples)
+        assertEquals(1, estimate.skippedCharging)
+        assertEquals(1, estimate.skippedLowPercent)
+    }
+
     @Test fun emptyReadingCaptionStaysUnchanged() {
         val estimate = CapacityProxy.summarize(emptyList(), now)
         assertEquals("From 0 readings, not charging (0 skipped while charging, 0 below 20%).",

@@ -243,7 +243,7 @@ class StatsActivity : StyledActivity() {
                     if (estimate.estimateMah == null && capacity != null) append("\nNo usable reading in the last 30 days; estimated from older charge-counter readings.")
                 }, 13f, Palette.body).apply { setPadding(dp(14), 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
             })
-            addView(label(CapacityProxy.readingsCaption(estimate, ::fmt),
+            if (estimate.estimateMah != null) addView(label(CapacityProxy.readingsCaption(estimate, ::fmt),
                 11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
             addView(label(when (estimate.trend) {
                 Trend.NOT_ENOUGH -> "Not enough readings yet to tell if this is changing."

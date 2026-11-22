@@ -10,6 +10,9 @@ data class CapacityProxySummary(
     val skippedLowPercent: Int,
     val lowPct: Int?,
     val highPct: Int?,
+    val otherSamples: Int,
+    val otherLowPct: Int?,
+    val otherHighPct: Int?,
     val spreadMah: Double?,
     val trend: Trend,
     val earlyMah: Double?,
@@ -28,12 +31,15 @@ object CapacityProxy {
     }
 
     fun readingsCaption(estimate: CapacityProxySummary, formatMah: (Double) -> String): String = buildString {
+        val samples = if (estimate.fromFullReading) estimate.otherSamples else estimate.samples
+        val lowPct = if (estimate.fromFullReading) estimate.otherLowPct else estimate.lowPct
+        val highPct = if (estimate.fromFullReading) estimate.otherHighPct else estimate.highPct
         if (estimate.fromFullReading) {
             append("From the latest 100% reading")
-            if (estimate.samples > 0) append("; ${estimate.samples} other readings")
+            if (samples > 0) append("; $samples other reading${if (samples == 1) "" else "s"}")
         } else append("From ${estimate.samples} readings")
-        if (!estimate.fromFullReading || estimate.samples > 0) {
-            if (estimate.lowPct != null && estimate.highPct != null) append(" between ${estimate.lowPct}% and ${estimate.highPct}%")
+        if (!estimate.fromFullReading || samples > 0) {
+            if (lowPct != null && highPct != null) append(" between $lowPct% and $highPct%")
             append(", not charging")
         }
         append(" (${estimate.skippedCharging} skipped while charging, ${estimate.skippedLowPercent} below 20%).")
@@ -50,6 +56,7 @@ object CapacityProxy {
         val used = recent.mapNotNull { r ->
             BatteryMath.impliedCapacityMah(r.percent, r.remainingUah, r.charging)?.let { r to it }
         }
+        val other = used.filter { it.first !== full }
         val values = used.map { it.second }
         val early = used.filter { it.first.timeMs < midpointMs }.map { it.second }
         val late = used.filter { it.first.timeMs >= midpointMs }.map { it.second }
@@ -64,10 +71,13 @@ object CapacityProxy {
             estimateMah = full?.remainingUah?.div(1000.0) ?: BatteryMath.median(values),
             fromFullReading = full != null,
             samples = used.size,
-            skippedCharging = recent.count { it.remainingUah != null && it.charging == true },
-            skippedLowPercent = recent.count { it.remainingUah != null && it.charging != true && it.percent < 20 },
+            skippedCharging = recent.count { (it.remainingUah ?: 0) > 0 && it.charging == true },
+            skippedLowPercent = recent.count { (it.remainingUah ?: 0) > 0 && it.charging != true && it.percent < 20 },
             lowPct = used.minOfOrNull { it.first.percent },
             highPct = used.maxOfOrNull { it.first.percent },
+            otherSamples = other.size,
+            otherLowPct = other.minOfOrNull { it.first.percent },
+            otherHighPct = other.maxOfOrNull { it.first.percent },
             spreadMah = iqr(values),
             trend = trend,
             earlyMah = earlyMah,

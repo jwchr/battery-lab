@@ -145,6 +145,7 @@ class RangeExportActivity : StyledActivity() {
         if (requestCode != CREATE_CSV) return
         val current = job
         if (current == null || current.phase != Phase.PICKING) {
+            if (current?.phase == Phase.DONE) job = null
             statusMessage = "Export request was interrupted. Choose Export again."
             status.text = statusMessage
             return

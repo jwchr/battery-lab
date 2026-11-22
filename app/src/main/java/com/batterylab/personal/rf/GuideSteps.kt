@@ -13,7 +13,7 @@ object GuideSteps {
         object AppSettings : Action
         object LocationSettings : Action
         object PrivacyDashboard : Action
-        object GalaxyWearable : Action
+        object BluetoothSettings : Action
         object MainScreen : Action
     }
 
@@ -22,11 +22,11 @@ object GuideSteps {
         1 -> listOf(Action.AppSettings, Action.Start(Scope.MY_DEVICES, 90))
         3 -> listOf(Action.LocationSettings, Action.Start(Scope.MY_DEVICES, 90), Action.PrivacyDashboard)
         4 -> listOf(Action.Start(Scope.MY_DEVICES, 90), Action.Markers)
-        5 -> listOf(Action.GalaxyWearable, Action.Start(Scope.MY_DEVICES, 90), Action.Markers)
+        5 -> listOf(Action.BluetoothSettings, Action.Start(Scope.MY_DEVICES, 90), Action.Markers)
         6 -> listOf(Action.Start(Scope.MY_LINKS, 90))
         7 -> listOf(Action.Start(Scope.EVERYTHING_NEARBY, 300))
         8 -> listOf(Action.MainScreen)
-        9 -> listOf(Action.GalaxyWearable)
+        9 -> listOf(Action.BluetoothSettings)
         else -> emptyList()
     }
 
@@ -36,11 +36,11 @@ object GuideSteps {
         Step("Rotate (D13)", "Start My devices and rotate the phone while the session runs."),
         Step("Location off (D12)", "Open Location settings and turn Location off, then return here. Start My devices and see what it says. Open Location settings to turn it back on. Then open Privacy dashboard and check what it lists for Battery Lab. Come back and tap I did it."),
         Step("Gate G0: three walks", "Run three My devices sessions of 90 seconds with the Ring on your finger. Each time: tap Mark: near and hold the phone at arm's length for 30 seconds. Tap Mark: moving and walk to the far end of the apartment. Tap Mark: far and stay until it ends. Screenshot each result card."),
-        Step("Optional: another walk set", "Disconnect the Ring in Galaxy Wearable yourself. Do three more 90-second My devices walks with the same near, moving and far markers. Screenshot each result card. You can skip this set.", optional = true),
+        Step("Optional: another walk set", "Disconnect the Ring in Galaxy Wearable yourself (open it from your home screen). Do three more 90-second My devices walks with the same near, moving and far markers. Screenshot each result card. You can skip this set.", optional = true),
         Step("Ring away (D5)", "Put the Ring on its charger or out of range. Start My links. Check that the Ring link says Not connected, or tap I did it."),
         Step("Everything nearby, 5 minutes (D14)", "Tap Start Everything nearby and let it run for at least 5 minutes."),
         Step("Ring battery (D7)", "With Ring monitoring on and no RF Lab session running, check that the Ring battery reads on the main screen. Then come back and tap I did it."),
-        Step("End of day (D8, D10)", "After about ten sessions today, check that Galaxy Wearable still shows the Ring connected. Then tap I did it."),
+        Step("End of day (D8, D10)", "After about ten sessions today, check that Galaxy Wearable still shows the Ring connected (open it from your home screen). Then tap I did it."),
         Step("Screenshots (D9)", "Press the side key and volume down together to take a screenshot. Capture the badges, each scope, empty states and a result card. Tap I did it when you have them.")
     )
 

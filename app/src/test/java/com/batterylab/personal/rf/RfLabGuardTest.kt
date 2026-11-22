@@ -103,6 +103,12 @@ class RfLabGuardTest {
         assertTrue(code(File(rfDir, "RfRuntime.kt")).contains("File(app.filesDir, \"rf\")"))
     }
 
+    @Test fun theRfPackageContainsNoSamsungPackageReference() {
+        rfDir.walkTopDown().filter { it.isFile }.forEach { file ->
+            assertFalse(file.name, file.readText().contains("com.samsung"))
+        }
+    }
+
     @Test fun theRfPackageMakesNoForbiddenCall() {
         val forbidden = listOf(
             // R5: no connection info and no location info.

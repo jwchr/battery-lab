@@ -34,11 +34,11 @@ class GuideStepsTest {
             listOf(devices),
             listOf(GuideSteps.Action.LocationSettings, devices, GuideSteps.Action.PrivacyDashboard),
             listOf(devices, GuideSteps.Action.Markers),
-            listOf(GuideSteps.Action.GalaxyWearable, devices, GuideSteps.Action.Markers),
+            listOf(GuideSteps.Action.BluetoothSettings, devices, GuideSteps.Action.Markers),
             listOf(GuideSteps.Action.Start(Scope.MY_LINKS, 90)),
             listOf(GuideSteps.Action.Start(Scope.EVERYTHING_NEARBY, 300)),
             listOf(GuideSteps.Action.MainScreen),
-            listOf(GuideSteps.Action.GalaxyWearable),
+            listOf(GuideSteps.Action.BluetoothSettings),
             emptyList(),
         )
         assertEquals(GuideSteps.steps.size, expected.size)
@@ -257,6 +257,10 @@ class GuideStepsTest {
     @Test fun instructionsStayPlainAndAllElevenChecksAreListed() {
         assertEquals(11, GuideSteps.steps.size)
         assertEquals(listOf(5), GuideSteps.steps.indices.filter { GuideSteps.steps[it].optional })
+        for (i in listOf(5, 9)) {
+            assertTrue(GuideSteps.steps[i].instructions.contains("Galaxy Wearable"))
+            assertTrue(GuideSteps.steps[i].instructions.contains("(open it from your home screen)"))
+        }
         GuideSteps.steps.forEachIndexed { i, step ->
             assertFalse(step.title.contains('—'))
             assertFalse(step.instructions.contains('—'))

@@ -82,6 +82,7 @@ class RfLabActivity : StyledActivity() {
     private var loadingResult: String? = null
     private var pendingExportId: String? = null
     private var wasRunning = false
+    private var stopRequested = false
     private lateinit var guidePrefs: android.content.SharedPreferences
     private var guide = GuideSteps.State()
     private var guideNotice: String? = null
@@ -164,7 +165,7 @@ class RfLabActivity : StyledActivity() {
         super.onResume()
         // A session that ended while the screen was paused still gets its result card.
         val running = rf.running
-        if (wasRunning && !running) { resultId = rf.lastEndedId; result = null }
+        if (wasRunning && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null }
         wasRunning = running
         observeGuideSession()
         refreshGuideHistory()
@@ -202,7 +203,7 @@ class RfLabActivity : StyledActivity() {
         syncScreenOn(running)
         observeGuideSession()
         if (running) { fillLive(); fillGuideSession() }
-        if (wasRunning && !running) { resultId = rf.lastEndedId; result = null; render() }
+        if (wasRunning && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null; render() }
         if (!running) RfRuntime.liveTable = null
         wasRunning = running
     }
@@ -330,7 +331,7 @@ class RfLabActivity : StyledActivity() {
                 GuideSteps.Action.Markers -> if (rf.running) {
                     for (marker in listOf("near", "moving", "far")) button("Mark: $marker") { mark(marker) }
                 }
-                GuideSteps.Action.Stop -> if (rf.running) button("Stop session") { stopGuideSession() }
+                GuideSteps.Action.Stop -> if (rf.running) guideStopButton()
                 GuideSteps.Action.AppSettings -> button("Open app settings") {
                     openGuideScreen(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
                 }
@@ -341,11 +342,8 @@ class RfLabActivity : StyledActivity() {
                     openGuideScreen(Intent("android.intent.action.REVIEW_PERMISSION_USAGE"),
                         Intent(Settings.ACTION_PRIVACY_SETTINGS), Intent(Settings.ACTION_SETTINGS))
                 }
-                GuideSteps.Action.GalaxyWearable -> button("Open Galaxy Wearable") {
-                    val launch = try {
-                        packageManager.getLaunchIntentForPackage("com.samsung.android.app.watchmanager")
-                    } catch (_: SecurityException) { null }
-                    openGuideScreen(*listOfNotNull(launch, Intent(Settings.ACTION_BLUETOOTH_SETTINGS)).toTypedArray())
+                GuideSteps.Action.BluetoothSettings -> button("Open Bluetooth settings") {
+                    openGuideScreen(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
                 }
                 GuideSteps.Action.MainScreen -> button("Open main screen") {
                     if (intent.getBooleanExtra(EXTRA_FROM_MAIN_SCREEN, false)) finish()
@@ -353,7 +351,7 @@ class RfLabActivity : StyledActivity() {
                 }
             }
             if (rf.running && actions.any { it is GuideSteps.Action.Start }) {
-                button("Stop session") { stopGuideSession() }
+                guideStopButton()
                 guideSessionStatus = label("", 13f).also { addView(it) }
                 fillGuideSession()
             }
@@ -368,7 +366,18 @@ class RfLabActivity : StyledActivity() {
         }
     }
 
-    private fun stopGuideSession() { Thread({ rf.stop() }, "rf-stop").start() }
+    private fun LinearLayout.guideStopButton() {
+        addView(makeButton("Stop session") { stopGuideSession() }.apply {
+            isEnabled = !stopRequested; alpha = if (stopRequested) 0.45f else 1f
+        }, LinearLayout.LayoutParams(-1, dp(46)).apply { topMargin = dp(8) })
+    }
+
+    private fun stopGuideSession() {
+        if (stopRequested) return
+        stopRequested = true
+        render()
+        Thread({ rf.stop() }, "rf-stop").start()
+    }
 
     private fun fillGuideSession() {
         val status = guideSessionStatus ?: return
@@ -516,6 +525,7 @@ class RfLabActivity : StyledActivity() {
     }
 
     private fun started(r: StartResult) {
+        if (r is StartResult.Started) stopRequested = false
         if (r is StartResult.Refused) toast(r.reason)
         else { resultId = null; result = null }
         wasRunning = rf.running

@@ -3,6 +3,7 @@ package com.batterylab.personal.rf
 import android.Manifest
 import android.app.AlertDialog
 import android.content.Context
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.LocationManager
@@ -14,6 +15,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.net.Uri
+import android.provider.Settings
 import android.view.View
 import android.view.WindowManager
 import android.widget.CheckBox
@@ -22,6 +25,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.Toast
 import com.batterylab.personal.Background
+import com.batterylab.personal.MainActivity
 import com.batterylab.personal.Palette
 import com.batterylab.personal.PollScheduler
 import com.batterylab.personal.StyledActivity
@@ -81,6 +85,7 @@ class RfLabActivity : StyledActivity() {
     private lateinit var guidePrefs: android.content.SharedPreferences
     private var guide = GuideSteps.State()
     private var guideNotice: String? = null
+    private var guideSessionStatus: android.widget.TextView? = null
     private var guideList: LinearLayout? = null
     private var guideDialog: AlertDialog? = null
     private var guideSessionId: String? = null
@@ -196,7 +201,7 @@ class RfLabActivity : StyledActivity() {
         val running = rf.running
         syncScreenOn(running)
         observeGuideSession()
-        if (running) fillLive()
+        if (running) { fillLive(); fillGuideSession() }
         if (wasRunning && !running) { resultId = rf.lastEndedId; result = null; render() }
         if (!running) RfRuntime.liveTable = null
         wasRunning = running
@@ -307,6 +312,51 @@ class RfLabActivity : StyledActivity() {
         section("Step ${guide.current + 1} of 11", step.title, step.instructions, fill = Palette.tint).apply {
             guideNotice?.let { addView(label(it, 13f, ink, bold = true)) }
             addView(label(GuideSteps.progress(guide), 13f, ink, bold = true))
+            val actions = GuideSteps.actions(guide.current)
+            for (action in actions) when (action) {
+                is GuideSteps.Action.Start -> {
+                    val length = if (action.seconds == 300) "5 minutes" else "${action.seconds} seconds"
+                    val enabled = !rf.running
+                    addView(makeButton("Start ${action.scope.label}, $length", primary = true) {
+                        if (!rf.running) {
+                            scope = action.scope
+                            durationS = action.seconds
+                            startLive()
+                        }
+                    }.apply {
+                        isEnabled = enabled; alpha = if (enabled) 1f else 0.45f
+                    }, LinearLayout.LayoutParams(-1, dp(56)).apply { topMargin = dp(8) })
+                }
+                GuideSteps.Action.Markers -> if (rf.running) {
+                    for (marker in listOf("near", "moving", "far")) button("Mark: $marker") { mark(marker) }
+                }
+                GuideSteps.Action.Stop -> if (rf.running) button("Stop session") { stopGuideSession() }
+                GuideSteps.Action.AppSettings -> button("Open app settings") {
+                    openGuideScreen(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                }
+                GuideSteps.Action.LocationSettings -> button("Open Location settings") {
+                    openGuideScreen(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS))
+                }
+                GuideSteps.Action.PrivacyDashboard -> button("Open Privacy dashboard") {
+                    openGuideScreen(Intent("android.intent.action.REVIEW_PERMISSION_USAGE"),
+                        Intent(Settings.ACTION_PRIVACY_SETTINGS), Intent(Settings.ACTION_SETTINGS))
+                }
+                GuideSteps.Action.GalaxyWearable -> button("Open Galaxy Wearable") {
+                    val launch = try {
+                        packageManager.getLaunchIntentForPackage("com.samsung.android.app.watchmanager")
+                    } catch (_: SecurityException) { null }
+                    openGuideScreen(*listOfNotNull(launch, Intent(Settings.ACTION_BLUETOOTH_SETTINGS)).toTypedArray())
+                }
+                GuideSteps.Action.MainScreen -> button("Open main screen") {
+                    if (intent.getBooleanExtra(EXTRA_FROM_MAIN_SCREEN, false)) finish()
+                    else openGuideScreen(Intent(this@RfLabActivity, MainActivity::class.java))
+                }
+            }
+            if (rf.running && actions.any { it is GuideSteps.Action.Start }) {
+                button("Stop session") { stopGuideSession() }
+                guideSessionStatus = label("", 13f).also { addView(it) }
+                fillGuideSession()
+            }
             val manual = GuideSteps.canManuallyFinish(guide)
             addView(makeButton("I did it") { guideEvent(GuideSteps.ManualDone) }.apply {
                 isEnabled = manual; alpha = if (manual) 1f else 0.45f
@@ -316,6 +366,32 @@ class RfLabActivity : StyledActivity() {
             button("All steps") { openGuideSteps() }
             if (guide.current > 0) button("Back") { guideEvent(GuideSteps.Back) }
         }
+    }
+
+    private fun stopGuideSession() { Thread({ rf.stop() }, "rf-stop").start() }
+
+    private fun fillGuideSession() {
+        val status = guideSessionStatus ?: return
+        val snap = rf.snapshot() ?: return
+        val elapsed = ((snap.nowNs - snap.startNs) / 1_000_000_000L).coerceAtLeast(0)
+        val remaining = (snap.durationS - elapsed).coerceAtLeast(0)
+        val markers = if (GuideSteps.Action.Markers in GuideSteps.actions(guide.current)) {
+            val tapped = listOf("near", "moving", "far").filter { label -> snap.markers.any { it.label == label } }
+            " Marked this session: ${tapped.joinToString().ifEmpty { "none" }}."
+        } else ""
+        status.text = "$remaining seconds left.$markers"
+    }
+
+    private fun openGuideScreen(vararg intents: Intent) {
+        for (target in intents) try {
+            startActivity(target)
+            return
+        } catch (_: ActivityNotFoundException) {
+            // Try the next screen when this phone does not provide the requested one.
+        } catch (_: SecurityException) {
+            // A restricted screen may still have an available fallback.
+        }
+        toast("This screen could not be opened on this phone.")
     }
 
     private fun openGuideSteps() {
@@ -374,11 +450,12 @@ class RfLabActivity : StyledActivity() {
         }
     }
 
-    private fun render() {
-        val oldScroll = scroll.scrollY
+    private fun render(scrollToTop: Boolean = false) {
+        val oldScroll = if (scrollToTop) 0 else scroll.scrollY
         body.removeAllViews()
         liveBox = null
         deviceBox = null
+        guideSessionStatus = null
         renderGuide()
         section("RF Lab", "Signal strength in dBm", "Watch your own links for up to 10 minutes. " +
             "Sessions stay on this phone in their own files; the battery history and backups do not change.")
@@ -443,7 +520,7 @@ class RfLabActivity : StyledActivity() {
         else { resultId = null; result = null }
         wasRunning = rf.running
         observeGuideSession()
-        render()
+        render(scrollToTop = guide.active && r is StartResult.Started)
     }
 
     private fun granted(p: String) = checkSelfPermission(p) == PackageManager.PERMISSION_GRANTED
@@ -515,6 +592,7 @@ class RfLabActivity : StyledActivity() {
     }
 
     companion object {
+        const val EXTRA_FROM_MAIN_SCREEN = "rf_from_main_screen"
         private const val PREFS = "rf_lab"
         private const val NEARBY_OK = "nearby_confirmed"
 
@@ -585,6 +663,7 @@ class RfLabActivity : StyledActivity() {
 
     private fun mark(label: String) {
         if (rf.marker(label)) toast("Marked: $label at ${clock(System.currentTimeMillis())}")
+        fillGuideSession()
     }
 
     private fun customMarker() {

@@ -2,22 +2,46 @@ package com.batterylab.personal.rf
 
 import com.batterylab.rf.Scope
 
-/** Text and observation rules only. This class cannot operate a radio, session or permission. */
+/** Describes buttons that run only what the user taps. These rules cannot operate anything. */
 object GuideSteps {
     data class Step(val title: String, val instructions: String, val optional: Boolean = false)
 
+    sealed interface Action {
+        data class Start(val scope: Scope, val seconds: Int) : Action
+        object Stop : Action
+        object Markers : Action
+        object AppSettings : Action
+        object LocationSettings : Action
+        object PrivacyDashboard : Action
+        object GalaxyWearable : Action
+        object MainScreen : Action
+    }
+
+    fun actions(index: Int): List<Action> = when (index) {
+        0, 2 -> listOf(Action.Start(Scope.MY_DEVICES, 90))
+        1 -> listOf(Action.AppSettings, Action.Start(Scope.MY_DEVICES, 90))
+        3 -> listOf(Action.LocationSettings, Action.Start(Scope.MY_DEVICES, 90), Action.PrivacyDashboard)
+        4 -> listOf(Action.Start(Scope.MY_DEVICES, 90), Action.Markers)
+        5 -> listOf(Action.GalaxyWearable, Action.Start(Scope.MY_DEVICES, 90), Action.Markers)
+        6 -> listOf(Action.Start(Scope.MY_LINKS, 90))
+        7 -> listOf(Action.Start(Scope.EVERYTHING_NEARBY, 300))
+        8 -> listOf(Action.MainScreen)
+        9 -> listOf(Action.GalaxyWearable)
+        else -> emptyList()
+    }
+
     val steps = listOf(
-        Step("Permissions (D12)", "Pick My devices and tap Start. When Android asks for Nearby devices and Location, choose Approximate first, then allow. Note whether it then asks for Precise."),
-        Step("Bluetooth off (D4)", "Allow Precise location in Android settings. Start My devices. Halfway through, turn Bluetooth off for about 15 seconds, then back on. Check that the session continues."),
+        Step("Permissions (D12)", "Tap Start My devices. When Android asks for Nearby devices and Location, choose Approximate first, then allow. Note whether it then asks for Precise."),
+        Step("Bluetooth off (D4)", "Open app settings and allow Precise location, then return here. Start My devices. Halfway through, pull down Quick settings and turn Bluetooth off for about 15 seconds, then back on. Return here and check that the session continues."),
         Step("Rotate (D13)", "Start My devices and rotate the phone while the session runs."),
-        Step("Location off (D12)", "Turn Location off. Start My devices and see what it says. Turn Location back on. Then open Settings > Security and privacy > Privacy dashboard and check what it lists for Battery Lab. Come back and tap I did it."),
+        Step("Location off (D12)", "Open Location settings and turn Location off, then return here. Start My devices and see what it says. Open Location settings to turn it back on. Then open Privacy dashboard and check what it lists for Battery Lab. Come back and tap I did it."),
         Step("Gate G0: three walks", "Run three My devices sessions of 90 seconds with the Ring on your finger. Each time: tap Mark: near and hold the phone at arm's length for 30 seconds. Tap Mark: moving and walk to the far end of the apartment. Tap Mark: far and stay until it ends. Screenshot each result card."),
         Step("Optional: another walk set", "Disconnect the Ring in Galaxy Wearable yourself. Do three more 90-second My devices walks with the same near, moving and far markers. Screenshot each result card. You can skip this set.", optional = true),
         Step("Ring away (D5)", "Put the Ring on its charger or out of range. Start My links. Check that the Ring link says Not connected, or tap I did it."),
-        Step("Everything nearby, 5 minutes (D14)", "Pick Everything nearby and 5 min. Tap Start and let it run for at least 5 minutes."),
+        Step("Everything nearby, 5 minutes (D14)", "Tap Start Everything nearby and let it run for at least 5 minutes."),
         Step("Ring battery (D7)", "With Ring monitoring on and no RF Lab session running, check that the Ring battery reads on the main screen. Then come back and tap I did it."),
         Step("End of day (D8, D10)", "After about ten sessions today, check that Galaxy Wearable still shows the Ring connected. Then tap I did it."),
-        Step("Screenshots (D9)", "Take screenshots of the badges, each scope, empty states and a result card. Tap I did it when you have them.")
+        Step("Screenshots (D9)", "Press the side key and volume down together to take a screenshot. Capture the badges, each scope, empty states and a result card. Tap I did it when you have them.")
     )
 
     fun completion(index: Int): String = listOf(

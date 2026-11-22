@@ -26,6 +26,48 @@ class GuideStepsTest {
                      time: Long = 200, planned: Int = 90, complete: Boolean = true) =
         SessionFinished(scope, seconds, labels, time, planned, complete)
 
+    @Test fun everyStepOffersItsExpectedActions() {
+        val devices = GuideSteps.Action.Start(Scope.MY_DEVICES, 90)
+        val expected = listOf(
+            listOf(devices),
+            listOf(GuideSteps.Action.AppSettings, devices),
+            listOf(devices),
+            listOf(GuideSteps.Action.LocationSettings, devices, GuideSteps.Action.PrivacyDashboard),
+            listOf(devices, GuideSteps.Action.Markers),
+            listOf(GuideSteps.Action.GalaxyWearable, devices, GuideSteps.Action.Markers),
+            listOf(GuideSteps.Action.Start(Scope.MY_LINKS, 90)),
+            listOf(GuideSteps.Action.Start(Scope.EVERYTHING_NEARBY, 300)),
+            listOf(GuideSteps.Action.MainScreen),
+            listOf(GuideSteps.Action.GalaxyWearable),
+            emptyList(),
+        )
+        assertEquals(GuideSteps.steps.size, expected.size)
+        expected.forEachIndexed { index, actions -> assertEquals("Step $index", actions, GuideSteps.actions(index)) }
+        assertTrue(GuideSteps.actions(10).isEmpty())
+    }
+
+    @Test fun startActionsSupportEachStepsCompletionRule() {
+        for (index in 0..7) {
+            val action = GuideSteps.actions(index).filterIsInstance<GuideSteps.Action.Start>().single()
+            assertTrue("Step $index uses an offered duration", action.seconds in setOf(90, 180, 300, 600))
+            val started = send(at(index), LocationChanged(false), SessionStarted(action.scope, 200))
+            val finished = SessionFinished(action.scope, action.seconds.toLong(), markers, 300, action.seconds)
+            val completed = when (index) {
+                0 -> started
+                1 -> send(started, BluetoothChanged(false), BluetoothChanged(true), SessionContinued)
+                2 -> send(started, RecreatedDuringSession)
+                3 -> send(started, LocationChanged(true), ManualDone)
+                4, 5 -> {
+                    assertTrue("Step $index start qualifies as a walk", GuideSteps.qualifiesWalk(finished))
+                    send(started, finished, finished, finished)
+                }
+                6 -> send(started, RingLinkNotConnected)
+                else -> send(started, finished)
+            }
+            assertEquals("Step $index can finish with its Start action", index + 1, completed.current)
+        }
+    }
+
     @Test fun permissionsNeedsMyDevicesStartOrManual() {
         val initial = at(0)
         assertEquals(0, send(initial, SessionStarted(Scope.MY_LINKS, 200)).current)

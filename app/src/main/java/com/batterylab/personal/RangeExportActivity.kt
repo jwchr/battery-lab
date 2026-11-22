@@ -29,6 +29,7 @@ class RangeExportActivity : StyledActivity() {
     private var from = LocalDate.now()
     private var to = from
     private var job: ExportJob? = null
+    private var resumed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -114,7 +115,7 @@ class RangeExportActivity : StyledActivity() {
         range.isEnabled = !busy; names.isEnabled = !busy
         fromButton.isEnabled = !busy; toButton.isEnabled = !busy; exportButton.isEnabled = !busy
         status.text = current?.message ?: ""
-        if (current?.phase == Phase.READY) {
+        if (resumed && current?.phase == Phase.READY) {
             current.phase = Phase.PICKING
             current.message = "Choose where to save the analysis CSV."
             status.text = current.message
@@ -150,7 +151,18 @@ class RangeExportActivity : StyledActivity() {
         outState.putInt("range", range.selectedItemPosition)
         outState.putBoolean("names", names.isChecked)
         outState.putString("from", from.toString()); outState.putString("to", to.toString())
-        job?.let { outState.putBundle("job", it.save()) }
+        job?.takeIf { it.phase != Phase.DONE }?.let { outState.putBundle("job", it.save()) }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumed = true
+        updateJob()
+    }
+
+    override fun onPause() {
+        resumed = false
+        super.onPause()
     }
 
     @Deprecated("Retains only worker state; never retains the destroyed Activity")

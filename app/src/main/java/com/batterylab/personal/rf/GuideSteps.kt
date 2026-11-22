@@ -129,12 +129,14 @@ object GuideSteps {
             Back -> state
         }
         // Earlier qualifying sessions still count when their step becomes current.
-        while (when (next.current) {
-            4 -> next.walks >= 3
-            5 -> next.walks - next.optionalBaseline >= 3
-            7 -> next.nearbyFinished
-            else -> false
-        }) next = advance(next)
+        if (event is SessionFinished || event is HistoryLoaded || next.current > state.current) {
+            while (when (next.current) {
+                4 -> next.walks >= 3
+                5 -> next.walks - next.optionalBaseline >= 3
+                7 -> next.nearbyFinished
+                else -> false
+            }) next = advance(next)
+        }
         return next
     }
 

@@ -111,6 +111,32 @@ class GuideStepsTest {
         assertEquals(0, send(at(4).copy(walks = 2), HistoryLoaded(emptyList(), 0)).walks)
     }
 
+    @Test fun backToCompletedWalkGateStaysThereOnUnrelatedEvents() {
+        val completed = send(at(4), walk(), walk(), walk())
+        assertEquals(5, completed.current)
+        assertEquals(3, completed.walks)
+        var state = send(completed, Back)
+        assertEquals(4, state.current)
+        for (event in listOf(SessionContinued, LocationChanged(true), SessionEnded)) {
+            state = send(state, event)
+            assertEquals(4, state.current)
+        }
+        assertEquals(3, send(state, Back).current)
+    }
+
+    @Test fun backToCompletedOptionalWalksStaysThereOnUnrelatedEvents() {
+        val completed = send(at(4), walk(), walk(), walk(), walk(), walk(), walk())
+        assertEquals(6, completed.current)
+        assertEquals(6, completed.walks)
+        var state = send(completed, Back)
+        assertEquals(5, state.current)
+        for (event in listOf(SessionContinued, LocationChanged(true), SessionEnded)) {
+            state = send(state, event)
+            assertEquals(5, state.current)
+        }
+        assertEquals(4, send(state, Back).current)
+    }
+
     @Test fun ringAwayRequiresMyLinksNotConnectedOrManual() {
         assertEquals(6, send(at(6), RingLinkNotConnected).current)
         assertEquals(6, send(at(6), SessionStarted(Scope.MY_DEVICES, 200), RingLinkNotConnected).current)
@@ -126,6 +152,19 @@ class GuideStepsTest {
         assertEquals(8, send(at(7), walk(600, Scope.EVERYTHING_NEARBY)).current)
         val earlier = send(at(6), walk(300, Scope.EVERYTHING_NEARBY), ManualDone)
         assertEquals(8, earlier.current)
+    }
+
+    @Test fun backToCompletedNearbyStepStaysThereOnUnrelatedEvents() {
+        val completed = send(at(7), walk(300, Scope.EVERYTHING_NEARBY))
+        assertEquals(8, completed.current)
+        assertTrue(completed.nearbyFinished)
+        var state = send(completed, Back)
+        assertEquals(7, state.current)
+        for (event in listOf(SessionContinued, LocationChanged(true), SessionEnded)) {
+            state = send(state, event)
+            assertEquals(7, state.current)
+        }
+        assertEquals(6, send(state, Back).current)
     }
 
     @Test fun manualAndSkipAreLimitedAndBackReopensPreviousStep() {

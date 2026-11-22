@@ -316,6 +316,7 @@ class MainActivity : StyledActivity() {
         }
 
         section("Your data", "Stays on this phone", "No account and no server. Export it any time.").apply {
+            button("Export full backup · CSV (restorable)") { export() }
             button("Export readings…") { startActivity(Intent(this@MainActivity, RangeExportActivity::class.java)) }
             button("Restore from a backup or export (.csv / .csv.gz)") {
                 startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply {

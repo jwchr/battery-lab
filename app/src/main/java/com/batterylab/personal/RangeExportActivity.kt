@@ -41,7 +41,7 @@ class RangeExportActivity : StyledActivity() {
                 catch (e: Exception) { interrupted = true; null }
             }
         setUpPage()
-        section("Your data", "Export readings", "Analysis export — not a full backup; cannot restore.").apply {
+        section("Your data", "Export readings", "Analysis export — not a full backup; cannot restore. For a restorable backup, use the Export full backup button in Your data.").apply {
             addView(label("Range"))
             range = Spinner(this@RangeExportActivity).apply {
                 adapter = ArrayAdapter(this@RangeExportActivity, android.R.layout.simple_spinner_dropdown_item,

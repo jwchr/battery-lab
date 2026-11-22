@@ -10,7 +10,7 @@ import java.util.Locale
 /** Readings-only analysis format. This deliberately shares no backup projection or identity keys. */
 object RangeExport {
     const val MARKER = "# battery-lab-analysis-export-version=1"
-    const val RESTORE_ERROR = "Analysis export cannot be restored; choose a full backup"
+    const val RESTORE_ERROR = "Analysis export cannot be restored; use the Export full backup button in Your data to create a restorable backup"
     enum class FirstRecord { BACKUP, ANALYSIS, INVALID }
 
     fun classify(first: String): FirstRecord {

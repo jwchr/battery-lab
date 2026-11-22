@@ -6,6 +6,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
+      - ".engineering/**"
+      - "AGENTS.md"
+      - "CLAUDE.md"
+      - "GEMINI.md"
       - 'app/**'
       - 'wear/**'
       - 'rf/**'
@@ -32,6 +36,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Verify pinned engineering policy
+        run: python3 .engineering/check_policy.py
       - name: Java 17 (project target)
         uses: actions/setup-java@v4
         with:

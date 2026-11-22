@@ -29,12 +29,14 @@ class RangeExportActivity : StyledActivity() {
     private var from = LocalDate.now()
     private var to = from
     private var job: ExportJob? = null
+    private var statusMessage = ""
     private var resumed = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         from = savedInstanceState?.getString("from")?.let(LocalDate::parse) ?: from
         to = savedInstanceState?.getString("to")?.let(LocalDate::parse) ?: to
+        statusMessage = savedInstanceState?.getString("statusMessage") ?: ""
         var interrupted = false
         job = (lastNonConfigurationInstance as? ExportJob)
             ?: savedInstanceState?.getBundle("job")?.let {
@@ -78,8 +80,8 @@ class RangeExportActivity : StyledActivity() {
         }
         updateDates()
         job?.owner = this
+        if (interrupted) statusMessage = "Export request was interrupted. Choose Export again."
         updateJob()
-        if (interrupted) status.text = "Export request was interrupted. Choose Export again."
     }
 
     private fun updateDates() {
@@ -97,11 +99,16 @@ class RangeExportActivity : StyledActivity() {
     }
 
     private fun prepare() {
+        job = null
         val zone = ZoneId.systemDefault()
         val now = System.currentTimeMillis()
         val bounds = try {
             RangeExport.resolve(RangeExport.Preset.entries[range.selectedItemPosition], now, zone, from, to)
-        } catch (e: IllegalArgumentException) { status.text = e.message; return }
+        } catch (e: IllegalArgumentException) {
+            statusMessage = e.message ?: ""
+            updateJob()
+            return
+        }
         job = ExportJob(RangeExport.Request(bounds, zone, names.isChecked)).also {
             it.owner = this
             it.prepare(applicationContext)
@@ -114,7 +121,8 @@ class RangeExportActivity : StyledActivity() {
         val busy = current != null && current.phase != Phase.DONE
         range.isEnabled = !busy; names.isEnabled = !busy
         fromButton.isEnabled = !busy; toButton.isEnabled = !busy; exportButton.isEnabled = !busy
-        status.text = current?.message ?: ""
+        if (current != null) statusMessage = current.message
+        status.text = current?.message ?: statusMessage
         if (resumed && current?.phase == Phase.READY) {
             current.phase = Phase.PICKING
             current.message = "Choose where to save the analysis CSV."
@@ -137,7 +145,8 @@ class RangeExportActivity : StyledActivity() {
         if (requestCode != CREATE_CSV) return
         val current = job
         if (current == null || current.phase != Phase.PICKING) {
-            status.text = "Export request was interrupted. Choose Export again."
+            statusMessage = "Export request was interrupted. Choose Export again."
+            status.text = statusMessage
             return
         }
         val uri = data?.data
@@ -150,6 +159,7 @@ class RangeExportActivity : StyledActivity() {
         super.onSaveInstanceState(outState)
         outState.putInt("range", range.selectedItemPosition)
         outState.putBoolean("names", names.isChecked)
+        outState.putString("statusMessage", statusMessage)
         outState.putString("from", from.toString()); outState.putString("to", to.toString())
         job?.takeIf { it.phase != Phase.DONE }?.let { outState.putBundle("job", it.save()) }
     }

@@ -88,6 +88,7 @@ class RfLabActivity : StyledActivity() {
     private var guide = GuideSteps.State()
     private var showAllRfLab = false
     private var guideSessionStatus: android.widget.TextView? = null
+    private var guideLiveStatus: android.widget.TextView? = null
     private var guideList: LinearLayout? = null
     private var guideDialog: AlertDialog? = null
     private var guideSessionId: String? = null
@@ -119,6 +120,7 @@ class RfLabActivity : StyledActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         rf = RfRuntime.controller(this)
+        wasRunning = rf.running
         guidePrefs = getSharedPreferences("rf_guide", MODE_PRIVATE)
         guide = GuideSteps.load(guidePrefs.all.mapNotNull { (key, value) ->
             (value as? Long)?.let { key to it }
@@ -172,7 +174,7 @@ class RfLabActivity : StyledActivity() {
         super.onResume()
         // A session that ended while the screen was paused still gets its result card.
         val running = rf.running
-        if (wasRunning && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null }
+        if ((wasRunning || stopRequested) && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null }
         wasRunning = running
         observeGuideSession()
         refreshGuideHistory()
@@ -212,7 +214,7 @@ class RfLabActivity : StyledActivity() {
         guideEvent(GuideSteps.Tick(System.currentTimeMillis()))
         fillGuideSession()
         if (running) fillLive()
-        if (wasRunning && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null; render() }
+        if ((wasRunning || stopRequested) && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null; render() }
         if (!running) RfRuntime.liveTable = null
         wasRunning = running
     }
@@ -259,9 +261,11 @@ class RfLabActivity : StyledActivity() {
             (getSystemService(LOCATION_SERVICE) as LocationManager).isLocationEnabled
         } catch (_: Exception) { null }
         val snap = rf.snapshot()?.takeIf { it.running && it.provenance == Provenance.LIVE && !it.imported }
-        if (!rf.running) {
+        if (snap == null || snap.id != guideSessionId) {
+            val hadSession = guideSessionId != null
             guideSessionId = null
-            guideEvent(GuideSteps.SessionEnded)
+            // Also recover persisted progress after process death when no session is alive.
+            if (hadSession || snap == null) guideEvent(GuideSteps.SessionEnded)
         }
         // A Location change belongs to the old session only if it is still running.
         if (location != null) guideEvent(GuideSteps.LocationChanged(location))
@@ -299,11 +303,13 @@ class RfLabActivity : StyledActivity() {
         val (dayStart, dayEnd) = todayBounds()
         guideDay = dayStart
         val generation = ++guideHistoryGeneration
+        val readStartedAfterStop = !rf.running
         val store = rf.store
         Background.io.execute {
-            val history = GuideHistory.read(store, since, dayStart, dayEnd)
+            val history = GuideHistory.read(store, since, dayStart, dayEnd).copy(readStartedAfterStop = readStartedAfterStop)
             Background.onMain {
-                if (!isDestroyed && generation == guideHistoryGeneration && since == guide.startedAtMs)
+                if (!isDestroyed && generation == guideHistoryGeneration && since == guide.startedAtMs &&
+                    GuideSteps.acceptsHistory(guide, history))
                     guideEvent(history)
             }
         }
@@ -320,6 +326,10 @@ class RfLabActivity : StyledActivity() {
         section("Phone test guide", title, fill = Palette.tint).apply {
             if (guide.current in 4..5) addView(label("Walk ${guide.walkNumber} of 3", 13f))
             addView(label(page.instruction, 20f, ink).apply { setPadding(0, dp(14), 0, dp(14)) })
+            if ((guide.current == 3 && guide.subStep in 1..2) || (guide.current == 6 && guide.subStep == 2)) {
+                guideLiveStatus = label("", 16f, ink).also { addView(it) }
+                fillGuideLiveStatus()
+            }
             if (guide.countdownEndMs > 0) {
                 guideSessionStatus = label("", 48f, ink, bold = true).also { addView(it) }
                 addView(label("seconds", 16f))
@@ -384,6 +394,11 @@ class RfLabActivity : StyledActivity() {
                 if (openGuideScreen(Intent(this, MainActivity::class.java)))
                     guideEvent(GuideSteps.Tap(action, System.currentTimeMillis()))
             }
+            GuideSteps.Action.Later -> if (guide.current == 9) {
+                saveGuide()
+                Toast.makeText(this, "Saved. Come back tonight.", Toast.LENGTH_SHORT).show()
+                finish()
+            }
             else -> guideEvent(GuideSteps.Tap(action, System.currentTimeMillis()))
         }
     }
@@ -396,6 +411,23 @@ class RfLabActivity : StyledActivity() {
 
     private fun fillGuideSession() {
         guideSessionStatus?.text = GuideSteps.secondsLeft(guide, System.currentTimeMillis()).toString()
+        fillGuideLiveStatus()
+    }
+
+    private fun fillGuideLiveStatus() {
+        val view = guideLiveStatus ?: return
+        val snap = rf.snapshot()?.takeIf { it.running && it.provenance == Provenance.LIVE && !it.imported }
+        view.text = if (guide.current == 3) {
+            val location = if (!guide.locationKnown) "Location status is unavailable."
+                else if (guide.locationOn) "Location is on." else "Location is off."
+            val scan = snap?.streams?.firstOrNull { it.kind == Kinds.BLE_SCAN }
+            location + "\n" + if (scan != null) "Bluetooth scan: ${statusText(scan.status)}"
+                else if (snap == null) "Bluetooth scan: No session running." else "Bluetooth scan: Status unavailable."
+        } else {
+            val ring = snap?.streams?.firstOrNull { it.kind == Kinds.RING_LINK }
+            "Ring link: " + if (ring != null) statusText(ring.status)
+                else if (snap == null) "No session running." else "Status unavailable."
+        }
     }
 
     private fun openGuideScreen(vararg intents: Intent): Boolean {
@@ -475,6 +507,7 @@ class RfLabActivity : StyledActivity() {
         liveBox = null
         deviceBox = null
         guideSessionStatus = null
+        guideLiveStatus = null
         renderGuide()
         if (!guide.active || showAllRfLab) {
             section("RF Lab", "Signal strength in dBm", "Watch your own links for up to 10 minutes. " +

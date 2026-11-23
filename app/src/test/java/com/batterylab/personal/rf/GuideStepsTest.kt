@@ -72,11 +72,74 @@ class GuideStepsTest {
         assertEquals(6, s.subStep)
     }
 
+    @Test fun replacementSessionDuringBluetoothCountdownCannotReuseEarlierEvidence() {
+        val waiting = send(start(at(1, 2)), BluetoothChanged(false, 500), BluetoothChanged(true, 1000), SessionContinued)
+        assertTrue(waiting.bluetoothOff && waiting.bluetoothBack && waiting.sessionContinued)
+        val ended = send(waiting, SessionEnded)
+        assertFalse(ended.bluetoothOff)
+        assertFalse(ended.bluetoothBack)
+        assertFalse(ended.sessionContinued)
+        val result = send(ended, SessionStarted(Scope.MY_DEVICES, 2000), SessionContinued, Tick(21000))
+        assertEquals(6, result.subStep)
+        assertEquals(false, result.answers["answer_session_kept_going"])
+    }
+
     @Test fun bluetoothOffEvidenceDoesNotJoinDifferentSessions() {
         var s = send(start(at(1, 2)), BluetoothChanged(false, 500), SessionEnded)
         s = GuideSteps.load(GuideSteps.save(s))
         s = send(s, SessionStarted(Scope.MY_DEVICES, 1000), BluetoothChanged(true, 2000), SessionContinued, Tick(22000))
-        assertEquals(false, s.answers["answer_session_kept_going"])
+        assertEquals(3, s.subStep)
+        assertNull(s.answers["answer_session_kept_going"])
+        assertFalse(s.bluetoothOff)
+        assertFalse(s.bluetoothBack)
+        assertFalse(s.sessionContinued)
+        assertFalse(s.retryBluetooth)
+        s = send(s, BluetoothChanged(false, 23000), BluetoothChanged(true, 24000), SessionContinued, Tick(44000))
+        assertEquals(true, s.answers["answer_session_kept_going"])
+    }
+
+    @Test fun bluetoothEarlyStopAndProcessDeathReturnBothWaitingPagesToStart() {
+        for (sub in 3..4) for (reload in listOf(false, true)) {
+            val running = start(at(1, 2)).copy(subStep = sub, bluetoothOff = sub == 4)
+            val restored = if (reload) GuideSteps.load(GuideSteps.save(running)) else running
+            val retry = send(restored, SessionEnded)
+            assertEquals(2, retry.subStep)
+            assertNull(retry.runningScope)
+            assertEquals(0, retry.countdownEndMs)
+            assertEquals(0, retry.attemptStartedAtMs)
+            assertFalse(retry.bluetoothOff)
+            assertFalse(retry.bluetoothBack)
+            assertFalse(retry.sessionContinued)
+            assertEquals("That session stopped early. Press Start to try again.", GuideSteps.page(retry).instruction)
+            assertEquals(Action.Start(Scope.MY_DEVICES, 180), GuideSteps.page(retry).primary!!.action)
+            val saved = GuideSteps.load(GuideSteps.save(retry))
+            assertEquals(GuideSteps.page(retry), GuideSteps.page(saved))
+            assertEquals(retry, send(retry, BluetoothChanged(false, 500), BluetoothChanged(true, 1000), Tick(30000)))
+            assertFalse(start(saved, 40000).retryBluetooth)
+        }
+    }
+
+    @Test fun bluetoothChangesWithoutMyDevicesCannotAdvanceOrCreateEvidence() {
+        for (scope in listOf(null, Scope.MY_LINKS, Scope.EVERYTHING_NEARBY)) for (sub in 3..4) {
+            val s = at(1, sub).copy(runningScope = scope, bluetoothOff = sub == 4)
+            assertEquals(s, send(s, BluetoothChanged(false, 500), BluetoothChanged(true, 1000), SessionContinued))
+        }
+    }
+
+    @Test fun backFromBluetoothResultStartsOverAndPreservesEitherAnswer() {
+        for (yes in listOf(false, true)) {
+            val s = at(1, 6).copy(answers = mapOf("answer_session_kept_going" to yes),
+                bluetoothOff = true, bluetoothBack = true, sessionContinued = true)
+            val back = send(s, Back(1000), SessionEnded, Tick(21000))
+            assertEquals(2, back.subStep)
+            assertEquals(0, back.countdownEndMs)
+            assertEquals(yes, back.answers["answer_session_kept_going"])
+            assertEquals(Action.Start(Scope.MY_DEVICES, 180), GuideSteps.page(back).primary!!.action)
+            assertFalse(back.bluetoothOff)
+            assertFalse(back.bluetoothBack)
+            assertFalse(back.sessionContinued)
+            assertEquals(3, start(back, 22000).subStep)
+        }
     }
 
     @Test fun rotationOnlyAdvancesWhileInTheRotationSubStep() {
@@ -242,6 +305,66 @@ class GuideStepsTest {
         }
     }
 
+    @Test fun walkSavingIgnoresReadsStartedWhileRunningAndAcceptsStoppedReads() {
+        for (step in 4..5) for (ended in listOf(false, true)) {
+            val startSub = if (step == 4) 1 else 2
+            val running = at(step, startSub + 5).copy(attemptStartedAtMs = 200,
+                walkNumber = 2, runningScope = Scope.MY_DEVICES, walks = 1, todayCount = 1)
+            val s = if (ended) send(running, SessionEnded) else running
+            for (sessions in listOf(emptyList(), listOf(walk(101)), listOf(walk(101), walk()))) {
+                val stale = HistoryLoaded(sessions, sessions.size, readStartedAfterStop = false)
+                assertFalse(GuideSteps.acceptsHistory(s, stale))
+                assertEquals(s, send(s, stale))
+            }
+            val stopped = send(s, SessionEnded)
+            val good = send(stopped, history(walk(101), walk()))
+            assertEquals(startSub + 6, good.subStep)
+            assertEquals(2, good.walks)
+            assertEquals(2, good.walkNumber)
+            val retry = send(stopped, history(walk(101)))
+            assertEquals(startSub, retry.subStep)
+            assertTrue(retry.retryWalk)
+        }
+    }
+
+    @Test fun nearbyIgnoresReadsStartedWhileRunningAndAcceptsStoppedReads() {
+        val running = start(at(7))
+        val good = SessionFinished(Scope.EVERYTHING_NEARBY, 300, emptySet(), 200, 300)
+        for (ended in listOf(false, true)) {
+            val s = if (ended) send(running, SessionEnded) else running
+            for (sessions in listOf(emptyList(), listOf(good))) {
+                val stale = HistoryLoaded(sessions, sessions.size, readStartedAfterStop = false)
+                assertFalse(GuideSteps.acceptsHistory(s, stale))
+                assertEquals(s, send(s, stale))
+            }
+            val stopped = send(s, SessionEnded)
+            assertEquals(8, send(stopped, history(good)).current)
+            assertEquals(0, send(stopped, history()).subStep)
+        }
+    }
+
+    @Test fun historyStartedWhileRunningStillUpdatesOtherGuidePages() {
+        val updated = send(at(3, 1), history(walk()).copy(readStartedAfterStop = false))
+        assertEquals(1, updated.walks)
+        assertEquals(1, updated.todayCount)
+        assertEquals(1, updated.subStep)
+    }
+
+    @Test fun finishedSessionsAreRecordsAndOnlyFullHistoryUpdatesCounts() {
+        assertFalse(Event::class.java.isAssignableFrom(SessionFinished::class.java))
+        val nearby = SessionFinished(Scope.EVERYTHING_NEARBY, 300, emptySet(), 300, 300)
+        val first = send(at(8), history(walk(101), walk(102), nearby))
+        val all = history(walk(101), walk(102), nearby, walk(400))
+        val updated = send(first, all)
+        assertEquals(3, updated.walks)
+        assertTrue(updated.nearbyFinished)
+        assertEquals(4, updated.todayCount)
+        assertEquals(updated, send(updated, all, all))
+        val restored = send(GuideSteps.load(GuideSteps.save(updated)), all)
+        assertEquals(updated.walks, restored.walks)
+        assertEquals(updated.nearbyFinished, restored.nearbyFinished)
+    }
+
     @Test fun backFromEveryWalkPhaseReturnsToStartWithoutAnEarlyStopMessage() {
         for (step in 4..5) for (phase in 1..6) for (number in 1..3) {
             val startSub = if (step == 4) 1 else 2
@@ -391,7 +514,11 @@ class GuideStepsTest {
                 val back = send(at(step, sub), Back(1000))
                 assertEquals(step, back.current)
                 val startSub = if (step == 4) 1 else 2
-                val expected = if (step in 4..5 && sub - startSub in 1..6) startSub else sub - 1
+                val expected = when {
+                    step == 1 && sub == 6 -> 2
+                    step in 4..5 && sub - startSub in 1..6 -> startSub
+                    else -> sub - 1
+                }
                 assertEquals(expected, back.subStep)
             }
             val back = send(at(step), Back(1000))

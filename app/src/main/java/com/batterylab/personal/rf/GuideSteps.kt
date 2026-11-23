@@ -47,6 +47,7 @@ object GuideSteps {
         val optionalBaseline: Int = 0,
         val walkNumber: Int = 1,
         val retryWalk: Boolean = false,
+        val retryBluetooth: Boolean = false,
         val reviewing: Boolean = false,
         val attemptStartedAtMs: Long = 0,
         val answers: Map<String, Boolean> = emptyMap(),
@@ -74,7 +75,7 @@ object GuideSteps {
         val plannedS: Int = 90, val complete: Boolean = true,
         val markerTimesNs: Map<String, Long> = emptyMap(),
         val durationNs: Long = durationS * 1_000_000_000L,
-    ) : Event
+    )
     data class BluetoothChanged(val on: Boolean, val timeMs: Long = 0) : Event
     data class LocationChanged(val on: Boolean) : Event
     object SessionContinued : Event
@@ -82,7 +83,13 @@ object GuideSteps {
     object RecreatedDuringSession : Event
     object RingLinkNotConnected : Event
     data class Back(val timeMs: Long) : Event
-    data class HistoryLoaded(val sessions: List<SessionFinished>, val todayCount: Int) : Event
+    data class HistoryLoaded(
+        val sessions: List<SessionFinished>, val todayCount: Int,
+        val readStartedAfterStop: Boolean = true,
+    ) : Event
+
+    fun acceptsHistory(s: State, event: HistoryLoaded) = event.readStartedAfterStop ||
+        !((s.current in 4..5 && walkPhase(s) == 5) || (s.current == 7 && s.subStep == 1))
 
     private val answerLabels = linkedMapOf(
         "answer_precise_prompt" to "Android asked for Precise location",
@@ -112,7 +119,7 @@ object GuideSteps {
     private fun advance(s: State) = s.copy(current = s.current + 1, subStep = 0, countdownEndMs = 0,
         done = s.done or (1 shl s.current), walkNumber = 1, retryWalk = false, reviewing = false, attemptStartedAtMs = 0,
         optionalBaseline = if (s.current == 4) s.walks else s.optionalBaseline,
-        bluetoothOff = false, bluetoothBack = false, sessionContinued = false)
+        bluetoothOff = false, bluetoothBack = false, sessionContinued = false, retryBluetooth = false)
     private fun retry(s: State) = s.copy(subStep = walkStart(s), countdownEndMs = 0,
         retryWalk = true, runningScope = null, attemptStartedAtMs = 0)
     fun secondsLeft(s: State, now: Long) = ((s.countdownEndMs - now + 999) / 1000).coerceAtLeast(0)
@@ -165,7 +172,8 @@ object GuideSteps {
             1 -> when (s.subStep) {
                 0 -> Page("Press the button, then tap Permissions, then Location, and turn on Use precise location. Then come back here.", button("Open app settings", Action.AppSettings))
                 1 -> Page("When you're back here, press I'm back.", button("I'm back"))
-                2 -> start(seconds = 180)
+                2 -> start(seconds = 180, text = if (s.retryBluetooth)
+                    "That session stopped early. Press Start to try again." else "Press Start.")
                 3 -> Page("Swipe down from the top of the screen and turn Bluetooth off. Then come back here.")
                 4 -> Page("Now turn Bluetooth back on.")
                 5 -> Page("Good. Wait 20 seconds.")
@@ -197,17 +205,16 @@ object GuideSteps {
     fun onEvent(s: State, event: Event): State {
         if (!s.active) return s
         if (event is Back) {
+            if (s.current == 1 && s.subStep == 6) return s.copy(subStep = 2, countdownEndMs = 0,
+                bluetoothOff = false, bluetoothBack = false, sessionContinued = false, retryBluetooth = false,
+                attemptStartedAtMs = 0, done = s.done and (1 shl 1).inv(), skipped = s.skipped and (1 shl 1).inv())
             if (s.current in 4..5 && walkPhase(s) in 1..6) return s.copy(
                 subStep = walkStart(s), countdownEndMs = 0, retryWalk = false, reviewing = true,
                 done = s.done and (1 shl s.current).inv(), skipped = s.skipped and (1 shl s.current).inv())
             val previous = if (s.subStep > 0) s.current else (s.current - 1).coerceAtLeast(0)
             val sub = if (s.subStep > 0) s.subStep - 1 else 0
-            val seconds = when {
-                previous == 1 && sub == 5 -> 20
-                else -> 0
-            }
             return s.copy(current = previous, subStep = sub,
-                countdownEndMs = if (seconds > 0) event.timeMs + seconds * 1000L else 0, done = s.done and (1 shl previous).inv(),
+                countdownEndMs = 0, done = s.done and (1 shl previous).inv(),
                 skipped = s.skipped and (1 shl previous).inv(), retryWalk = false, reviewing = previous in 4..5)
         }
         if (s.finished) return s
@@ -237,7 +244,7 @@ object GuideSteps {
                 val expected = page(s).primary?.action as? Action.Start
                 if (expected?.scope != event.scope) return attached
                 val started = attached.copy(attemptStartedAtMs = event.timeMs, retryWalk = false,
-                    bluetoothOff = false, bluetoothBack = false, sessionContinued = false)
+                    bluetoothOff = false, bluetoothBack = false, sessionContinued = false, retryBluetooth = false)
                 when {
                     s.current in 4..5 -> nextSub(started, 30, event.timeMs)
                     s.current == 7 -> nextSub(started, 300, event.timeMs)
@@ -250,7 +257,7 @@ object GuideSteps {
                 else if (s.current in 4..5) nextSub(s)
                 else s // Nearby finishes only after the saved session confirms its length.
             } else s
-            is BluetoothChanged -> if (s.current == 1) when {
+            is BluetoothChanged -> if (s.current == 1 && s.runningScope == Scope.MY_DEVICES) when {
                 s.subStep == 3 && !event.on -> nextSub(s.copy(bluetoothOff = s.runningScope == Scope.MY_DEVICES))
                 s.subStep == 4 && event.on -> nextSub(s.copy(bluetoothBack = s.bluetoothOff && s.runningScope == Scope.MY_DEVICES), 20, event.timeMs)
                 else -> s
@@ -261,15 +268,19 @@ object GuideSteps {
             }
             SessionContinued -> if (s.current == 1 && s.subStep == 5 && s.runningScope == Scope.MY_DEVICES && s.bluetoothBack)
                 s.copy(sessionContinued = true) else s
-            SessionEnded -> when {
-                s.current in 4..5 && walkPhase(s) in 1..4 -> retry(s)
-                s.current == 7 && s.subStep == 1 -> s.copy(runningScope = null) // History decides complete or retry.
-                else -> s.copy(runningScope = null)
+            SessionEnded -> {
+                val ended = s.copy(runningScope = null, bluetoothOff = false, bluetoothBack = false, sessionContinued = false)
+                when {
+                    s.current == 1 && s.subStep in 3..4 -> ended.copy(subStep = 2,
+                        countdownEndMs = 0, attemptStartedAtMs = 0, retryBluetooth = true)
+                    s.current in 4..5 && walkPhase(s) in 1..4 -> retry(ended)
+                    else -> ended // History decides complete or retry for walk saving and nearby.
+                }
             }
             RecreatedDuringSession -> if (s.current == 2 && s.subStep == 1 && s.runningScope == Scope.MY_DEVICES) advance(s) else s
             RingLinkNotConnected -> if (s.current == 6 && s.subStep == 2 && s.runningScope == Scope.MY_LINKS) answer(s, true) else s
-            is SessionFinished -> onEvent(s, HistoryLoaded(listOf(event), s.todayCount))
             is HistoryLoaded -> {
+                if (!acceptsHistory(s, event)) return s
                 val sessions = event.sessions.filter { it.timeMs >= s.startedAtMs }
                 val walks = sessions.count(::qualifiesWalk)
                 var updated = s.copy(walks = walks, todayCount = event.todayCount,
@@ -322,6 +333,7 @@ object GuideSteps {
         "done" to s.done.toLong(), "skipped" to s.skipped.toLong(), "walks" to s.walks.toLong(),
         "optional_baseline" to s.optionalBaseline.toLong(), "walk_number" to s.walkNumber.toLong(),
         "retry_walk" to if (s.retryWalk) 1L else 0L, "attempt_started_at_ms" to s.attemptStartedAtMs,
+        "retry_bluetooth" to if (s.retryBluetooth) 1L else 0L,
         "reviewing" to if (s.reviewing) 1L else 0L,
         "nearby_finished" to if (s.nearbyFinished) 1L else 0L,
         "location_off_session" to if (s.locationOffSession) 1L else 0L,
@@ -341,6 +353,7 @@ object GuideSteps {
             done = number("done") and 2047, skipped = number("skipped") and 2047, walks = number("walks"),
             optionalBaseline = number("optional_baseline"), walkNumber = number("walk_number").coerceIn(1, 3),
             retryWalk = values["retry_walk"] == 1L, attemptStartedAtMs = (values["attempt_started_at_ms"] ?: 0).coerceAtLeast(0),
+            retryBluetooth = values["retry_bluetooth"] == 1L,
             reviewing = values["reviewing"] == 1L,
             nearbyFinished = values["nearby_finished"] == 1L, locationOffSession = values["location_off_session"] == 1L,
             answers = answerLabels.keys.mapNotNull { key -> values[key]?.takeIf { it in 0L..1L }?.let { key to (it == 1L) } }.toMap())

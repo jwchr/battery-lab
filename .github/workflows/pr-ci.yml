@@ -39,12 +39,12 @@ jobs:
           java-version: '17'
       - name: Android SDK
         uses: android-actions/setup-android@v4
-      - name: Install compile SDK 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-      - name: Gradle 8.9 (project intentionally has no wrapper)
+      - name: Install compile SDK 37.2
+        run: sdkmanager 'platforms;android-37.2' 'build-tools;37.0.0'
+      - name: Gradle 9.9.2 (project intentionally has no wrapper)
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: '9.9.2'
       - name: Run Kotlin/RF and Android unit tests, build all debug variants
         id: verify
         run: >

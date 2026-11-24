@@ -20,6 +20,10 @@ class VerifiedBugRegressionTest {
         assertEquals(1, armDetail(listOf(short), "monitoring").setAside)
         assertEquals(0, armDetail(listOf(short), "monitoring").runs)
 
+        // Enough direct readings, but they don't fall: a different reason than too few.
+        val rising = (1..4).map { Reading("test", it * hour, 70 + it, false, "ring_ble") }
+        assertEquals("Direct Ring readings didn't show a drain", ExperimentStats.result(run, widget + rising).quarantine)
+
         val fitted = ExperimentStats.result(run, widget + ble)
         assertNull(fitted.quarantine)
         assertNull(fitted.endpointRate)

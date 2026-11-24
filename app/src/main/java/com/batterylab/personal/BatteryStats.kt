@@ -53,6 +53,9 @@ data class TempStats(val avgC: Double, val minC: Double, val maxC: Double, val m
                      val avgChargingC: Double?, val avgOnBatteryC: Double?)
 
 object BatteryStats {
+    /** Plausible battery temperatures in tenths of a degree C (-40.0 to 70.0): one range for the live tile and the history. */
+    val VALID_TEMP_TENTHS_C = -400..700
+
     private const val HOUR = 3_600_000.0
     private const val HOUR_MS = 3_600_000L
 
@@ -176,7 +179,7 @@ object BatteryStats {
     }
 
     fun temperature(readings: List<Reading>): TempStats? {
-        val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in -400..700 }
+        val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in VALID_TEMP_TENTHS_C }
         if (t.isEmpty()) return null
         val c = t.map { it.tempTenthsC!! / 10.0 }
         val hottest = t.maxByOrNull { it.tempTenthsC!! }!!

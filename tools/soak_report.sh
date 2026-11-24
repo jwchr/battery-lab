@@ -29,13 +29,14 @@ else
   $have_phone || { echo "No phone over adb and no database path given." >&2; exit 1; }
   DB=$WORK/battery_lab.db
   "$ADB" exec-out run-as "$PKG" cat databases/battery_lab.db >"$DB"
-  for suffix in -wal -shm; do
-    if ! "$ADB" exec-out run-as "$PKG" cat "databases/battery_lab.db$suffix" >"$DB$suffix" \
-      || [[ ! -s "$DB$suffix" ]] \
-      || { head -c 7 "$DB$suffix" | LC_ALL=C grep -aqE '^(run-as:|cat:)'; }; then
-      rm -f "$DB$suffix"
-    fi
-  done
+  # Recent readings may sit in the -wal file. Pull only that: a -shm pulled a moment later could
+  # describe frames this -wal doesn't have, so sqlite3 rebuilds the index from the -wal instead.
+  # Keep the -wal only if it starts with SQLite's WAL magic, so an error message is never used.
+  rm -f "$DB-wal" "$DB-shm"
+  if ! "$ADB" exec-out run-as "$PKG" cat databases/battery_lab.db-wal >"$DB-wal" \
+    || ! head -c 4 "$DB-wal" | od -An -tx1 | tr -d ' \n' | grep -qE '^377f068[23]$'; then
+    rm -f "$DB-wal"
+  fi
 fi
 
 # App foreground times (epoch ms) from usagestats, if the phone is attached.

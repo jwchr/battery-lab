@@ -100,6 +100,8 @@ if args[0] == "exec-out":
             print("cat: unavailable")
         if mode == "partial":
             sys.stdout.buffer.write(b"partial")
+        if mode == "other_error":
+            print("/system/bin/sh: denied")
         sys.exit(1 if mode in ("missing", "partial") else 0)
     sys.stdout.buffer.write(Path(os.environ["FIXTURE_DB"] + suffix).read_bytes())
 elif args[1:3] == ["dumpsys", "usagestats"]:
@@ -114,11 +116,12 @@ import sys
 path = sys.argv[1]
 if os.environ["SIDECAR_MODE"] != "valid":
     assert not Path(path + "-wal").exists()
-    assert not Path(path + "-shm").exists()
+# Never a pulled -shm: sqlite3 rebuilds it from the -wal that was pulled.
+assert not Path(path + "-shm").exists()
 os.execv(os.environ["REAL_SQLITE"], [os.environ["REAL_SQLITE"], *sys.argv[1:]])
 ''')
             sqlite_wrapper.chmod(0o755)
-            for mode in ("valid", "missing", "empty", "error", "partial"):
+            for mode in ("valid", "missing", "empty", "error", "other_error", "partial"):
                 for usage in ("", "package=com.batterylab.personal type=ACTIVITY_PAUSED",
                               "package=com.batterylab.personal type=ACTIVITY_RESUMED"):
                     with self.subTest(sidecars=mode, usage=usage):

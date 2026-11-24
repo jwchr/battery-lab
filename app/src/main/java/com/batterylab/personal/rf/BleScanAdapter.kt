@@ -73,6 +73,6 @@ class BleScanAdapter(context: Context) : BleScanPort {
         try { manager?.adapter?.bluetoothLeScanner?.stopScan(cb) } catch (_: Exception) { }
     }
 
-    override fun watchBluetooth(listener: (Boolean) -> Unit) = watch.start(null, listener)
+    override fun watchBluetooth(listener: (Boolean) -> Unit) = watch.start(null, receiveSystemBluetooth = true, listener = listener)
     override fun unwatchBluetooth() = watch.stop()
 }

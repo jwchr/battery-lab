@@ -118,6 +118,8 @@ class RfLabGuardTest {
             "discoverServices", "requestConnectionPriority", "requestMtu", "setPreferredPhy",
             "setCharacteristicNotification", "createBond", "readCharacteristic", "writeCharacteristic",
             "readDescriptor", "writeDescriptor",
+            // R31: the capability card only checks that ranging exists; it never starts a session.
+            "createRangingSession", "registerCapabilitiesCallback",
             // T9: nothing that asks for a location fix.
             "requestLocationUpdates", "requestSingleUpdate", "getLastKnownLocation", "getCurrentLocation",
             "com.google.android.gms.location", "FusedLocation",

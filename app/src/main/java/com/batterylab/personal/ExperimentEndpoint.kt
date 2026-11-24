@@ -25,6 +25,49 @@ object ExperimentEndpoint {
     fun importCompletes(knownEndMs: Long?, startMs: Long, endMs: Long?, endPct: Int?) =
         knownEndMs == null && endMs != null && endPct != null && endMs > startMs
 
+    /** Only the four test types are imported; anything else in a backup file is skipped. */
+    fun knownMode(mode: String) = mode in BatteryStore.EXPERIMENT_MODES
+
+    /**
+     * An imported test that is new here is added if it finished, or if it is still running and no
+     * other test is running here, so a restore can't leave two tests running at once.
+     */
+    fun importAdds(endMs: Long?, anotherRunning: Boolean) = endMs != null || !anotherRunning
+
+    /**
+     * An imported end is usable only with its percentage and after the start; a running test has
+     * neither (the export writes both or none). Anything else is a damaged row.
+     */
+    fun importEndValid(startMs: Long, endMs: Long?, endPct: Int?,
+                       endGiven: Boolean = endMs != null, pctGiven: Boolean = endPct != null) = when {
+        // A field that is in the file but didn't parse (a bad time, a 101%) is damage, not "running".
+        endGiven && endMs == null || pctGiven && endPct == null -> false
+        endMs == null -> endPct == null
+        else -> endPct != null && endMs > startMs
+    }
+
+    /**
+     * The running tests from a file still to add after the import: one the same file also lists as
+     * finished (a merged or repeated backup) is already in, so it must not come back as running.
+     */
+    fun <V> runningLeft(running: Map<String, V>, added: Set<String>): List<V> =
+        running.filterKeys { it !in added }.values.toList()
+
+    /**
+     * The monitoring setting a start must restore. A start taking over from a stale one keeps the
+     * setting saved before that one switched monitoring off, not the "off" it finds now.
+     */
+    fun monitoringBeforeStart(pendingSinceMs: Long, pendingWasMonitoring: Boolean, monitoringNow: Boolean) =
+        if (pendingSinceMs != 0L) pendingWasMonitoring else monitoringNow
+
+    /**
+     * A start waits on its first reading (Bluetooth gives up after 20 seconds); after this long it is
+     * stale. Times are [android.os.SystemClock.elapsedRealtime], which a clock change can't move.
+     */
+    const val START_PENDING_MS = 60_000L
+
+    fun startPending(sinceMs: Long, nowMs: Long) = sinceMs > 0 && nowMs - sinceMs in 0 until START_PENDING_MS
+
     const val MANUAL_MAX_AGE_MS = 120_000L
 
     /** A running test is abandoned automatically after this long: the 12-hour target plus 2 hours. */

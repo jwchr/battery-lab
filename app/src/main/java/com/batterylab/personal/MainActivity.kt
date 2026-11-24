@@ -29,6 +29,38 @@ import android.widget.Toast
 import kotlin.math.roundToInt
 import java.util.Locale
 
+/**
+ * When a test start began waiting on its first reading, in [android.os.SystemClock.elapsedRealtime]
+ * (0 = none), so a wall-clock change can't open the guard. Kept outside the activity so a rotation
+ * mid-read still blocks a second start until the first one settles. Each start keeps its own value
+ * as a token: only the start that set it may clear it.
+ */
+private var testStartingSinceMs = 0L
+
+/** The monitoring setting from before the pending start switched it off, for a start that takes over. */
+private var testStartingWasMonitoring = false
+
+/**
+ * Opens a picked file for a fresh write. "wt" truncates, so a shorter export doesn't leave old rows
+ * at the end. Some document providers accept only "w", which Android allows to keep old content,
+ * so that fallback is used only when the file can be cut to empty here; otherwise the export fails
+ * with a clear message instead of reporting success over leftover rows.
+ */
+internal fun openTruncating(open: (String) -> java.io.OutputStream?): java.io.OutputStream? = try {
+    open("wt")
+} catch (e: Exception) {
+    if (e is IllegalArgumentException || e is UnsupportedOperationException || e is java.io.FileNotFoundException)
+        open("w")?.let(::truncatedOrClosed)
+    else throw e
+}
+
+private fun truncatedOrClosed(out: java.io.OutputStream): java.io.OutputStream {
+    val cut = try { (out as? java.io.FileOutputStream)?.channel?.truncate(0) != null } catch (_: java.io.IOException) { false }
+    if (cut) return out
+    try { out.close() } catch (_: java.io.IOException) {}
+    throw java.io.IOException("the app that holds the file can't replace it; pick a new file name")
+}
+
 class MainActivity : StyledActivity() {
     private lateinit var store: BatteryStore
     private var reader: RingReader? = null
@@ -810,6 +842,8 @@ class MainActivity : StyledActivity() {
 
     private fun startTest(mode: String) {
         if (store.activeExperiment() != null) { toast("Finish current test first"); return }
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (ExperimentEndpoint.startPending(testStartingSinceMs, now)) { toast("A test is already starting"); return }
         if (mode == "monitoring" && PollScheduler.ringAddress(this) == null) {
             toast("A monitored test polls the Ring over BLE. Choose your paired Ring first.")
             return
@@ -817,15 +851,47 @@ class MainActivity : StyledActivity() {
         // Monitoring pauses during the start reading. If no test starts (refused, BLE failure, or
         // the screen rotating or closing mid-read), it goes back to how it was.
         val app = applicationContext
-        val wasMonitoring = PollScheduler.ringEnabled(app)
-        PollScheduler.setRingEnabled(app, false)
-        freshRingReading(mode, failed = { PollScheduler.setRingEnabled(app, wasMonitoring) }) { reading ->
-            synchronized(PollScheduler.experimentLock) {
-                store.startExperiment(reading.device, mode, reading)
-                PollScheduler.setRingBeforeTest(this, wasMonitoring)
-                PollScheduler.setRingEnabled(this, mode == "monitoring")
+        // One start at a time: a second tap while a Bluetooth start reading is in flight would start
+        // a test first, and this one would then hit "Finish the existing experiment first".
+        val attempt = now
+        val wasMonitoring = synchronized(PollScheduler.experimentLock) {
+            ExperimentEndpoint.monitoringBeforeStart(testStartingSinceMs, testStartingWasMonitoring,
+                PollScheduler.ringEnabled(app)).also {
+                testStartingWasMonitoring = it
+                testStartingSinceMs = attempt
+                PollScheduler.setRingEnabled(app, false)
             }
-            toast("${modeName(mode)} test started at ${reading.percent}%")
+        }
+        freshRingReading(mode, failed = {
+            // Only this start's own setup is undone: if a newer start took over, the setting is its.
+            synchronized(PollScheduler.experimentLock) {
+                if (testStartingSinceMs == attempt) {
+                    testStartingSinceMs = 0L
+                    PollScheduler.setRingEnabled(app, wasMonitoring)
+                }
+            }
+        }) { reading ->
+            // A restore can still add a running test while the reading is in flight. That test
+            // doesn't change the monitoring setting, so put it back and start nothing.
+            val started = synchronized(PollScheduler.experimentLock) {
+                val mine = testStartingSinceMs == attempt
+                if (mine) testStartingSinceMs = 0L
+                when {
+                    !mine -> null
+                    store.activeExperiment() != null -> { PollScheduler.setRingEnabled(app, wasMonitoring); false }
+                    else -> {
+                        store.startExperiment(reading.device, mode, reading)
+                        PollScheduler.setRingBeforeTest(app, wasMonitoring)
+                        PollScheduler.setRingEnabled(app, mode == "monitoring")
+                        true
+                    }
+                }
+            }
+            toast(when (started) {
+                true -> "${modeName(mode)} test started at ${reading.percent}%"
+                false -> "Another test is already running, so this one didn't start"
+                null -> "This start took too long and a newer one replaced it"
+            })
             render()
         }
     }
@@ -944,7 +1010,7 @@ class MainActivity : StyledActivity() {
             val uri = data?.data ?: return
             Background.io.execute {
                 val error = try {
-                    val out = contentResolver.openOutputStream(uri) ?: error("the app that holds the file didn't open it")
+                    val out = openTruncating { contentResolver.openOutputStream(uri, it) } ?: error("the app that holds the file didn't open it")
                     out.bufferedWriter().use(store::exportCsv)
                     null
                 } catch (e: Exception) { e.message ?: e.javaClass.simpleName }

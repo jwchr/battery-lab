@@ -203,20 +203,22 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
     }
 
     /** Appends one obs row. Returns false, writing nothing, when the size limit would be passed. */
+    /** The CSV row [o] would take as the stream's next row. */
+    private fun obsLine(st: StreamState, o: Obs): ByteArray = Csv.line(st.columns.map { col ->
+        when (col) {
+            "seq" -> (st.rows + 1).toString()
+            "t_boot_ns" -> o.tBootNs.toString()
+            "t_wall_ms" -> o.tWallMs.toString()
+            "emitter" -> o.emitter.toString()
+            "rssi_dbm" -> Num.opt(o.rssiDbm)
+            "status" -> o.status
+            else -> o.extra[col] ?: ""
+        }
+    }).toByteArray(Charsets.UTF_8)
+
     fun writeObs(streamId: String, o: Obs): Boolean {
         val st = streams[streamId] ?: return true
-        val cells = st.columns.map { col ->
-            when (col) {
-                "seq" -> (st.rows + 1).toString()
-                "t_boot_ns" -> o.tBootNs.toString()
-                "t_wall_ms" -> o.tWallMs.toString()
-                "emitter" -> o.emitter.toString()
-                "rssi_dbm" -> Num.opt(o.rssiDbm)
-                "status" -> o.status
-                else -> o.extra[col] ?: ""
-            }
-        }
-        val line = Csv.line(cells).toByteArray(Charsets.UTF_8)
+        val line = obsLine(st, o)
         if (!fits(line.size)) return false
         obsOut.getValue(streamId).stream.write(line)
         totalBytes += line.size
@@ -238,15 +240,18 @@ class SessionWriter(val dir: File, initialProps: Map<String, String>, private va
         val st = streams[streamId] ?: return true
         // Without its reference columns the payload could not be found again: count it as dropped.
         if (Columns.BIN_OFFSET !in st.columns || Columns.BIN_LENGTH !in st.columns) { st.dropped++; return true }
-        if (!fits(bytes.size + 96)) return false
         val offset = st.binBytes
+        val obs = Obs(tBootNs, tWallMs, 0, null, Status.OK,
+            mapOf(Columns.BIN_OFFSET to offset.toString(), Columns.BIN_LENGTH to bytes.size.toString()))
+        // The payload and the row that points at it go in together or not at all, so no bytes
+        // land in bin_<stream>.dat without a row.
+        if (!fits(bytes.size + obsLine(st, obs).size)) return false
         val out = binOut.getOrPut(streamId) { Out(File(dir, FileNames.bin(streamId))) }
         out.stream.write(bytes)
         totalBytes += bytes.size
         st.binBytes += bytes.size
         st.bytes += bytes.size
-        return writeObs(streamId, Obs(tBootNs, tWallMs, 0, null, Status.OK,
-            mapOf(Columns.BIN_OFFSET to offset.toString(), Columns.BIN_LENGTH to bytes.size.toString())))
+        return writeObs(streamId, obs)
     }
 
     fun dropped(streamId: String, count: Int) { streams[streamId]?.let { it.dropped += count } }

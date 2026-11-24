@@ -6,6 +6,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.PushbackReader
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.zip.ZipEntry
@@ -37,16 +38,16 @@ object SessionArchive {
      */
     fun export(dir: File, out: OutputStream, includeNames: Boolean = false) {
         val files = dir.listFiles()?.filter { it.isFile && FileNames.allowed(it.name) }?.sortedBy { it.name } ?: emptyList()
-        val emitters = files.firstOrNull { it.name == FileNames.EMITTERS }?.let { EmitterFile.latest(Csv.parse(it.readText(Charsets.UTF_8))) }
+        val emitters = files.firstOrNull { it.name == FileNames.EMITTERS }?.let { readLatestEmitters(it) }
         val renumber = emitters?.let { renumbering(it) }
         ZipOutputStream(out).use { zip ->
             for (f in files) {
                 zip.putNextEntry(ZipEntry(f.name))
                 when {
                     emitters != null && renumber != null && f.name == FileNames.EMITTERS ->
-                        zip.write(exportEmitters(emitters, renumber, includeNames).toByteArray(Charsets.UTF_8))
+                        writeEmitters(emitters, renumber, includeNames, zip)
                     renumber != null && FileNames.streamOfObs(f.name) != null ->
-                        zip.write(renumberObs(Csv.parse(f.readText(Charsets.UTF_8)), renumber).toByteArray(Charsets.UTF_8))
+                        writeObservations(f, renumber, zip)
                     renumber != null && !includeNames && f.name == FileNames.PROPERTIES -> {
                         val props = Props.parse(f.readText(Charsets.UTF_8))
                         props[Keys.IDENTIFIER_MODE] = Keys.MODE_NONE
@@ -73,12 +74,13 @@ object SessionArchive {
         return m
     }
 
-    private fun exportEmitters(t: CsvTable, renumber: Map<String, String>, includeNames: Boolean): String {
+    private fun writeEmitters(t: CsvTable, renumber: Map<String, String>, includeNames: Boolean, out: OutputStream) {
         val drop = setOf("key") + (if (includeNames) emptySet() else setOf("name"))
         val keep = t.header.indices.filter { t.header[it] !in drop }
         val header = keep.map { t.header[it] }
         val nameCol = header.indexOf("name")
-        val sb = StringBuilder(Csv.line(header))
+        val writer = out.writer(Charsets.UTF_8).buffered()
+        writer.write(Csv.line(header))
         val rows = t.rows.filter { r -> num(t.cell(r, "emitter")) in renumber }
             .sortedBy { r -> renumber.getValue(num(t.cell(r, "emitter"))!!).toInt() }
         for (r in rows) {
@@ -86,20 +88,74 @@ object SessionArchive {
                 val v = r.getOrElse(i) { "" }
                 if (t.header[i] == "emitter") renumber.getValue(num(v)!!) else v
             }
-            sb.append(Csv.line(cells, if (nameCol >= 0) setOf(nameCol) else emptySet()))
+            writer.write(Csv.line(cells, if (nameCol >= 0) setOf(nameCol) else emptySet()))
         }
-        return sb.toString()
+        // Flush this entry without closing the shared ZIP stream.
+        writer.flush()
     }
 
     /** Emitter 0 (the stream's own device) stays 0; a number with no device becomes empty. */
-    private fun renumberObs(t: CsvTable, renumber: Map<String, String>): String {
-        val col = t.header.indexOf("emitter")
-        val sb = StringBuilder(Csv.line(t.header))
-        for (r in t.rows) {
-            val cells = r.mapIndexed { i, v -> if (i == col && num(v) != "0" && v.isNotEmpty()) renumber[num(v)] ?: "" else v }
-            sb.append(Csv.line(cells))
+    private fun writeObservations(file: File, renumber: Map<String, String>, out: OutputStream) {
+        val writer = out.writer(Charsets.UTF_8).buffered()
+        PushbackReader(file.bufferedReader(Charsets.UTF_8), 1).use { reader ->
+            val header = nextCsvRecord(reader) ?: emptyList()
+            val col = header.indexOf("emitter")
+            writer.write(Csv.line(header))
+            while (true) {
+                val row = nextCsvRecord(reader) ?: break
+                val cells = row.mapIndexed { i, v ->
+                    if (i == col && num(v) != "0" && v.isNotEmpty()) renumber[num(v)] ?: "" else v
+                }
+                writer.write(Csv.line(cells))
+            }
         }
-        return sb.toString()
+        // Closing a writer here would close the ZIP before the remaining entries.
+        writer.flush()
+    }
+
+    /** Keep only the latest row per device, rather than a copy of the whole metadata file. */
+    private fun readLatestEmitters(file: File): CsvTable =
+        PushbackReader(file.bufferedReader(Charsets.UTF_8), 1).use { reader ->
+            val header = nextCsvRecord(reader) ?: emptyList()
+            val table = CsvTable(header, emptyList())
+            val latest = LinkedHashMap<String, List<String>>()
+            while (true) {
+                val row = nextCsvRecord(reader) ?: break
+                val number = table.cell(row, "emitter") ?: continue
+                latest.remove(number)
+                latest[number] = row
+            }
+            EmitterFile.latest(CsvTable(header, latest.values.toList()))
+        }
+
+    /**
+     * Split complete logical records, not physical lines: quoted cells can contain newlines.
+     * Csv remains the parsing oracle. Blank records and an unterminated final record retain
+     * its existing behavior, while memory holds only one record plus fixed reader buffers.
+     */
+    private fun nextCsvRecord(reader: PushbackReader): List<String>? {
+        val record = StringBuilder()
+        var inQuotes = false
+        while (true) {
+            val c = reader.read()
+            if (c < 0) return null // No record terminator: a torn last write, as in Csv.parse.
+            record.append(c.toChar())
+            if (c == '"'.code) {
+                if (inQuotes) {
+                    val next = reader.read()
+                    if (next == '"'.code) record.append('"')
+                    else {
+                        inQuotes = false
+                        if (next >= 0) reader.unread(next)
+                    }
+                } else inQuotes = true
+            }
+            if (c == '\n'.code && !inQuotes) {
+                val cells = Csv.parse(record.toString()).header
+                if (cells.isNotEmpty()) return cells
+                record.setLength(0)
+            }
+        }
     }
 
     /**

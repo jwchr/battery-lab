@@ -29,6 +29,12 @@ import android.widget.Toast
 import kotlin.math.roundToInt
 import java.util.Locale
 
+/**
+ * When a test start began waiting on its first reading (0 = none). Kept outside the activity so a
+ * rotation mid-read still blocks a second start until the first one settles.
+ */
+private var testStartingSinceMs = 0L
+
 class MainActivity : StyledActivity() {
     private lateinit var store: BatteryStore
     private var reader: RingReader? = null
@@ -810,6 +816,8 @@ class MainActivity : StyledActivity() {
 
     private fun startTest(mode: String) {
         if (store.activeExperiment() != null) { toast("Finish current test first"); return }
+        val now = System.currentTimeMillis()
+        if (ExperimentEndpoint.startPending(testStartingSinceMs, now)) { toast("A test is already starting"); return }
         if (mode == "monitoring" && PollScheduler.ringAddress(this) == null) {
             toast("A monitored test polls the Ring over BLE. Choose your paired Ring first.")
             return
@@ -819,13 +827,29 @@ class MainActivity : StyledActivity() {
         val app = applicationContext
         val wasMonitoring = PollScheduler.ringEnabled(app)
         PollScheduler.setRingEnabled(app, false)
-        freshRingReading(mode, failed = { PollScheduler.setRingEnabled(app, wasMonitoring) }) { reading ->
-            synchronized(PollScheduler.experimentLock) {
-                store.startExperiment(reading.device, mode, reading)
-                PollScheduler.setRingBeforeTest(this, wasMonitoring)
-                PollScheduler.setRingEnabled(this, mode == "monitoring")
+        // One start at a time: a second tap while a Bluetooth start reading is in flight would start
+        // a test first, and this one would then hit "Finish the existing experiment first".
+        testStartingSinceMs = now
+        freshRingReading(mode, failed = {
+            testStartingSinceMs = 0L
+            PollScheduler.setRingEnabled(app, wasMonitoring)
+        }) { reading ->
+            testStartingSinceMs = 0L
+            // A restore can still add a running test while the reading is in flight. That test
+            // doesn't change the monitoring setting, so put it back and start nothing.
+            val started = synchronized(PollScheduler.experimentLock) {
+                if (store.activeExperiment() != null) false else {
+                    store.startExperiment(reading.device, mode, reading)
+                    PollScheduler.setRingBeforeTest(this, wasMonitoring)
+                    PollScheduler.setRingEnabled(this, mode == "monitoring")
+                    true
+                }
             }
-            toast("${modeName(mode)} test started at ${reading.percent}%")
+            if (started) toast("${modeName(mode)} test started at ${reading.percent}%")
+            else {
+                PollScheduler.setRingEnabled(app, wasMonitoring)
+                toast("Another test is already running, so this one didn't start")
+            }
             render()
         }
     }
@@ -944,7 +968,7 @@ class MainActivity : StyledActivity() {
             val uri = data?.data ?: return
             Background.io.execute {
                 val error = try {
-                    val out = contentResolver.openOutputStream(uri) ?: error("the app that holds the file didn't open it")
+                    val out = contentResolver.openOutputStream(uri, "wt") ?: error("the app that holds the file didn't open it")
                     out.bufferedWriter().use(store::exportCsv)
                     null
                 } catch (e: Exception) { e.message ?: e.javaClass.simpleName }

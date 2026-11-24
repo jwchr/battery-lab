@@ -626,7 +626,7 @@ class BatteryStore private constructor(context: Context) :
         }
         for (e in experiments(5000).reversed()) {
             val rate = BatteryMath.experimentDrain(e.startMs, e.endMs, e.startPct, e.endPct)
-            out.write(listOf("experiment", csv(e.device), e.mode, utc(e.startMs),
+            out.write(listOf("experiment", csv(e.device), csv(e.mode), utc(e.startMs),
                 e.startPct.toString(), "", "", "", "", e.endMs?.let(::utc) ?: "",
                 e.endPct?.toString() ?: "", rate?.toString() ?: "").plus(blanks).plus(contextBlanks).joinToString(",") + "\n")
             Unit
@@ -659,7 +659,7 @@ class BatteryStore private constructor(context: Context) :
         val existingExp = experiments(100_000).associateBy { "${it.device}|${it.mode}|${it.startMs}" }.toMutableMap()
         val existingJournal = journal(Int.MAX_VALUE).mapTo(HashSet(), ContextRows::journalKey)
         val existingForecasts = forecasts().mapTo(HashSet(), ContextRows::forecastKey)
-        var added = 0; var addedExp = 0
+        var added = 0; var addedExp = 0; var skippedRunning = 0
         val parseTime = CsvCodec.utcParser()
         val db = writableDatabase
         db.beginTransaction()
@@ -722,7 +722,7 @@ class BatteryStore private constructor(context: Context) :
                         if (added % 2000 == 0) { db.setTransactionSuccessful(); db.endTransaction(); db.beginTransaction() }
                     }
                     "experiment" -> {
-                        val mode = get("mode_or_source") ?: continue
+                        val mode = get("mode_or_source")?.takeIf(ExperimentEndpoint::knownMode) ?: continue
                         val endMs = get("end_timestamp_utc")?.let(parseTime)
                         val endPct = get("end_percentage")?.toIntOrNull()?.takeIf { it in 0..100 }
                         val known = existingExp["$device|$mode|$time"]
@@ -735,6 +735,7 @@ class BatteryStore private constructor(context: Context) :
                             }
                             continue
                         }
+                        if (!ExperimentEndpoint.importAdds(endMs, existingExp.values.any { it.endMs == null })) { skippedRunning++; continue }
                         val id = db.insertOrThrow("experiments", null, ContentValues().apply {
                             put("device", device); put("mode", mode); put("start_ms", time); put("start_pct", pct)
                             endMs?.let { put("end_ms", it) }
@@ -746,6 +747,9 @@ class BatteryStore private constructor(context: Context) :
             }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
+        if (skippedRunning > 0) try {
+            logProbe("experiment", "Restore skipped $skippedRunning running test(s): a test was already running here")
+        } catch (_: Exception) {}
         return added to addedExp
     }
 

@@ -43,7 +43,10 @@ class CloudBackupAgent : BackupAgent() {
             val fresh = lineCount(staged)
             check(fresh >= 1) { "empty archive" }
             val held = File(dir(this), HELD)
-            if (held.exists() && target.exists() && !replacesHeld(historyRows(target), historyRows(staged))) {
+            val heldRows = if (held.exists() && target.exists()) heldRowsOrNull(target) else null
+            if (held.exists() && target.exists() && heldRows == null)
+                store.logProbe("backup", "Cloud backup replaced a restored copy it couldn't read")
+            if (heldRows != null && !replacesHeld(heldRows, historyRows(staged))) {
                 store.logProbe("backup", "Cloud backup kept the restored copy (local history still shorter)")
             } else {
                 if (!staged.renameTo(target)) error("could not replace snapshot")
@@ -77,6 +80,13 @@ class CloudBackupAgent : BackupAgent() {
         private fun lineCount(gz: File) = GZIPInputStream(gz.inputStream()).bufferedReader().useLines { it.count() }
 
         private fun historyRows(gz: File) = GZIPInputStream(gz.inputStream()).bufferedReader().use { historyRows(it) }
+
+        /**
+         * History rows in a held restore, or null if it can't be read (a cut-off or damaged archive).
+         * An unreadable copy protects nothing, so a good fresh snapshot replaces it instead of
+         * failing every backup from then on.
+         */
+        internal fun heldRowsOrNull(gz: File): Int? = try { historyRows(gz) } catch (_: Exception) { null }
 
         /**
          * Reading and experiment rows in an export: the history the hold protects. Journal and

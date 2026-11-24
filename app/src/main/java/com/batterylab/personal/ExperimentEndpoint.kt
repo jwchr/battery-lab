@@ -25,6 +25,20 @@ object ExperimentEndpoint {
     fun importCompletes(knownEndMs: Long?, startMs: Long, endMs: Long?, endPct: Int?) =
         knownEndMs == null && endMs != null && endPct != null && endMs > startMs
 
+    /** Only the four test types are imported; anything else in a backup file is skipped. */
+    fun knownMode(mode: String) = mode in BatteryStore.EXPERIMENT_MODES
+
+    /**
+     * An imported test that is new here is added if it finished, or if it is still running and no
+     * other test is running here, so a restore can't leave two tests running at once.
+     */
+    fun importAdds(endMs: Long?, anotherRunning: Boolean) = endMs != null || !anotherRunning
+
+    /** A start waits on its first reading (Bluetooth gives up after 20 seconds); after this long it is stale. */
+    const val START_PENDING_MS = 60_000L
+
+    fun startPending(sinceMs: Long, nowMs: Long) = sinceMs > 0 && nowMs - sinceMs in 0 until START_PENDING_MS
+
     const val MANUAL_MAX_AGE_MS = 120_000L
 
     /** A running test is abandoned automatically after this long: the 12-hour target plus 2 hours. */

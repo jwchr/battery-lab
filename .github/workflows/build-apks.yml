@@ -15,11 +15,11 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
-      - name: Install Android SDK 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Install Android SDK 37.2
+        run: sdkmanager 'platforms;android-37.2' 'build-tools;37.0.0'
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: '9.9.2'
       - name: Build debug APKs
         run: gradle --no-daemon :app:assembleDebug :wear:assembleDebug
       - uses: actions/upload-artifact@v4

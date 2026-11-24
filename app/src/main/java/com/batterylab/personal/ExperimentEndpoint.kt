@@ -38,8 +38,13 @@ object ExperimentEndpoint {
      * An imported end is usable only with its percentage and after the start; a running test has
      * neither (the export writes both or none). Anything else is a damaged row.
      */
-    fun importEndValid(startMs: Long, endMs: Long?, endPct: Int?) =
-        if (endMs == null) endPct == null else endPct != null && endMs > startMs
+    fun importEndValid(startMs: Long, endMs: Long?, endPct: Int?,
+                       endGiven: Boolean = endMs != null, pctGiven: Boolean = endPct != null) = when {
+        // A field that is in the file but didn't parse (a bad time, a 101%) is damage, not "running".
+        endGiven && endMs == null || pctGiven && endPct == null -> false
+        endMs == null -> endPct == null
+        else -> endPct != null && endMs > startMs
+    }
 
     /**
      * The running tests from a file still to add after the import: one the same file also lists as

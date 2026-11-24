@@ -406,11 +406,12 @@ class BatteryStore private constructor(context: Context) :
         return deleted
     }
 
-    fun activeExperiment(): Experiment? = experiments(200).firstOrNull { it.endMs == null }
+    /** The newest unfinished test, however many finished ones came after it. */
+    fun activeExperiment(): Experiment? = experiments(1, "end_ms IS NULL").firstOrNull()
 
-    fun experiments(limit: Int = 100): List<Experiment> {
+    fun experiments(limit: Int = 100, where: String? = null): List<Experiment> {
         val result = mutableListOf<Experiment>()
-        readableDatabase.query("experiments", null, null, null, null, null,
+        readableDatabase.query("experiments", null, where, null, null, null,
             "start_ms DESC", limit.toString()).use { c ->
             while (c.moveToNext()) {
                 fun nullableLong(name: String): Long? {
@@ -725,8 +726,10 @@ class BatteryStore private constructor(context: Context) :
                     }
                     "experiment" -> {
                         val mode = get("mode_or_source")?.takeIf(ExperimentEndpoint::knownMode) ?: continue
-                        val endMs = get("end_timestamp_utc")?.let(parseTime)
-                        val endPct = get("end_percentage")?.toIntOrNull()?.takeIf { it in 0..100 }
+                        val endRaw = get("end_timestamp_utc")
+                        val pctRaw = get("end_percentage")
+                        val endMs = endRaw?.let(parseTime)
+                        val endPct = pctRaw?.toIntOrNull()?.takeIf { it in 0..100 }
                         val known = existingExp["$device|$mode|$time"]
                         if (known != null) {
                             // A later backup can finish a test that was restored while still running.
@@ -737,7 +740,7 @@ class BatteryStore private constructor(context: Context) :
                             }
                             continue
                         }
-                        if (!ExperimentEndpoint.importEndValid(time, endMs, endPct)) { skippedDamaged++; continue }
+                        if (!ExperimentEndpoint.importEndValid(time, endMs, endPct, endRaw != null, pctRaw != null)) { skippedDamaged++; continue }
                         val values = ContentValues().apply {
                             put("device", device); put("mode", mode); put("start_ms", time); put("start_pct", pct)
                             endMs?.let { put("end_ms", it) }

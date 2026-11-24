@@ -42,13 +42,23 @@ private var testStartingWasMonitoring = false
 
 /**
  * Opens a picked file for a fresh write. "wt" truncates, so a shorter export doesn't leave old rows
- * at the end; some document providers accept only "w", so that is the fallback.
+ * at the end. Some document providers accept only "w", which Android allows to keep old content,
+ * so that fallback is used only when the file can be cut to empty here; otherwise the export fails
+ * with a clear message instead of reporting success over leftover rows.
  */
 internal fun openTruncating(open: (String) -> java.io.OutputStream?): java.io.OutputStream? = try {
     open("wt")
 } catch (e: Exception) {
-    if (e is IllegalArgumentException || e is UnsupportedOperationException || e is java.io.FileNotFoundException) open("w")
+    if (e is IllegalArgumentException || e is UnsupportedOperationException || e is java.io.FileNotFoundException)
+        open("w")?.let(::truncatedOrClosed)
     else throw e
+}
+
+private fun truncatedOrClosed(out: java.io.OutputStream): java.io.OutputStream {
+    val cut = try { (out as? java.io.FileOutputStream)?.channel?.truncate(0) != null } catch (_: java.io.IOException) { false }
+    if (cut) return out
+    try { out.close() } catch (_: java.io.IOException) {}
+    throw java.io.IOException("the app that holds the file can't replace it; pick a new file name")
 }
 
 class MainActivity : StyledActivity() {

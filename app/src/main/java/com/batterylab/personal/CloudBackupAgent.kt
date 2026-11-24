@@ -83,11 +83,14 @@ class CloudBackupAgent : BackupAgent() {
         private fun historyRows(gz: File) = gz.inputStream().use { GZIPInputStream(it).bufferedReader().use { r -> historyRows(r) } }
 
         /**
-         * History rows in a held restore, or null if it can't be read (a cut-off or damaged archive).
-         * An unreadable copy protects nothing, so a good fresh snapshot replaces it instead of
-         * failing every backup from then on.
+         * History rows in a held restore, or null if the archive itself is damaged (cut off, or not
+         * valid gzip). A damaged copy protects nothing, so a good fresh snapshot replaces it instead
+         * of failing every backup from then on. Any other read error (a busy or full disk, say) is
+         * thrown: it says nothing about the archive, so the backup fails and the held copy stays.
          */
-        internal fun heldRowsOrNull(gz: File): Int? = try { historyRows(gz) } catch (_: Exception) { null }
+        internal fun heldRowsOrNull(gz: File): Int? = try { historyRows(gz) }
+            catch (_: java.util.zip.ZipException) { null }
+            catch (_: java.io.EOFException) { null }
 
         /**
          * Reading and experiment rows in an export: the history the hold protects. Journal and

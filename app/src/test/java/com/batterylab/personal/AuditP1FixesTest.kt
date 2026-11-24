@@ -25,6 +25,13 @@ class AuditP1FixesTest {
         assertNull(CloudBackupAgent.heldRowsOrNull(notGzip))
     }
 
+    @Test fun aReadErrorThatIsNotDamageKeepsTheHeldRestore() {
+        // A directory can't be opened as a file: an I/O error that says nothing about the archive.
+        val notReadable = kotlin.io.path.createTempDirectory("held").toFile().apply { deleteOnExit() }
+        val thrown = runCatching { CloudBackupAgent.heldRowsOrNull(notReadable) }.exceptionOrNull()
+        assertTrue("expected an IOException, got $thrown", thrown is java.io.IOException)
+    }
+
     @Test fun onlyTheFourTestTypesImport() {
         for (m in BatteryStore.EXPERIMENT_MODES) assertTrue(ExperimentEndpoint.knownMode(m))
         assertFalse(ExperimentEndpoint.knownMode("a,b"))
@@ -53,6 +60,11 @@ class AuditP1FixesTest {
         assertFalse(ExperimentEndpoint.importEndValid(100L, 100L, 50))
         assertFalse(ExperimentEndpoint.importEndValid(100L, 90L, 50))
         assertFalse(ExperimentEndpoint.importEndValid(100L, null, 50))
+        // Fields present in the file that didn't parse are damage, not a running test.
+        assertFalse(ExperimentEndpoint.importEndValid(100L, null, null, endGiven = false, pctGiven = true))
+        assertFalse(ExperimentEndpoint.importEndValid(100L, null, null, endGiven = true, pctGiven = false))
+        assertTrue(ExperimentEndpoint.importEndValid(100L, null, null, endGiven = false, pctGiven = false))
+        assertFalse(ExperimentEndpoint.importEndValid(100L, 200L, null, endGiven = true, pctGiven = true))
     }
 
     @Test fun aRunningRowTheSameFileAlsoFinishesIsNotAddedAgain() {
@@ -70,8 +82,14 @@ class AuditP1FixesTest {
 
     @Test fun exportFallsBackToPlainWriteOnlyWhenTheProviderRejectsTruncate() {
         val modes = mutableListOf<String>()
-        val out = openTruncating { modes += it; if (it == "wt") throw IllegalArgumentException("mode") else java.io.ByteArrayOutputStream() }
+        val file = File.createTempFile("export", ".csv").apply { deleteOnExit(); writeText("old row 1\nold row 2\nold row 3\n") }
+        val out = openTruncating { modes += it; if (it == "wt") throw IllegalArgumentException("mode") else java.io.FileOutputStream(file, true) }
         assertTrue(out != null); assertEquals(listOf("wt", "w"), modes)
+        out!!.use { it.write("new\n".toByteArray()) }
+        assertEquals("new\n", file.readText())   // "w" that kept old content is cut first
+        // A "w" stream that can't be cut is refused, not reported as a good export.
+        val plain = runCatching { openTruncating { if (it == "wt") throw IllegalArgumentException("mode") else java.io.ByteArrayOutputStream() } }.exceptionOrNull()
+        assertTrue("expected an IOException, got $plain", plain is java.io.IOException)
         modes.clear()
         openTruncating { modes += it; java.io.ByteArrayOutputStream() }
         assertEquals(listOf("wt"), modes)

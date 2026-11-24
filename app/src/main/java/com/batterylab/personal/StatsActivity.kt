@@ -68,6 +68,7 @@ class StatsActivity : StyledActivity() {
         /** Per device: its observed discharge stretches, found off the main thread. */
         val stretches: List<List<DischargeStretch>>,
         val comparison: MatchedStats?,
+        val phoneCapacity: CapacityProxySummary,
     )
 
     /** The drain breakdown and the app names it shows, prepared off the main thread. */
@@ -144,7 +145,7 @@ class StatsActivity : StyledActivity() {
             data.map { readings -> coverageRows(readings.map { it.timeMs }, now, gaps) },
             stretches.map { DrainSpreadMath.of(it, now - 30 * 86_400_000L) },
             stretches.map { WeekSplitMath.of(it, now - 30 * 86_400_000L, isWeekend) }, stretches,
-            StatsComparison.matched(data, gaps))
+            StatsComparison.matched(data, gaps), CapacityProxy.summarize(phone, now))
     }
 
     private fun renderTitle() {
@@ -182,7 +183,7 @@ class StatsActivity : StyledActivity() {
             val t0 = android.os.SystemClock.elapsedRealtime(); block()
             sectionMs += name to android.os.SystemClock.elapsedRealtime() - t0
         }
-        timed("health") { renderPhoneHealth(phone, capacity) }
+        timed("health") { renderPhoneHealth(l.phoneCapacity, capacity) }
         timed("planner") { renderPlanner(devices, data, gaps) }
         timed("drain") { renderDrain(l.drain) }
         timed("nights") { renderNights(idle) }
@@ -202,7 +203,7 @@ class StatsActivity : StyledActivity() {
         timed("week") { renderWeek(devices, l.week) }
         timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
         // The same capacity figure as the Phone battery capacity headline.
-        timed("fun") { renderFun(stats[0], phoneCapacity(phone)?.first ?: capacity.combinedMah, phone) }
+        timed("fun") { renderFun(stats[0], l.phoneCapacity.estimateMah ?: capacity.combinedMah, phone) }
         timed("coverage") { renderCoverage(devices, l.coverage, gaps) }
         timed("overhead") { renderOverhead() }
         timed("capabilities") { renderCapabilities() }
@@ -214,22 +215,9 @@ class StatsActivity : StyledActivity() {
         scroll.post { scroll.scrollTo(0, oldScroll) }
     }
 
-    /**
-     * Estimated full capacity in mAh and when it was observed: Android's charge counter at the
-     * latest 100% reading, else the median implied by partial readings. Only the last 30 days
-     * count, so an old reading can't stand in for today's battery.
-     */
-    private fun phoneCapacity(phone: List<Reading>): Pair<Double, Long>? {
-        val recent = phone.filter { it.timeMs >= System.currentTimeMillis() - 30 * 86_400_000L }
-        recent.lastOrNull { it.percent == 100 && (it.remainingUah ?: 0) > 0 }?.let { return it.remainingUah!! / 1000.0 to it.timeMs }
-        val implied = recent.mapNotNull { r -> BatteryMath.impliedCapacityMah(r.percent, r.remainingUah, r.charging)?.let { it to r.timeMs } }
-        return BatteryMath.median(implied.map { it.first })?.let { it to implied.last().second }
-    }
-
-    private fun renderPhoneHealth(phone: List<Reading>, lab: CapacityEstimate) {
-        val estimate = phoneCapacity(phone)
+    private fun renderPhoneHealth(estimate: CapacityProxySummary, lab: CapacityEstimate) {
         // The recent (30-day) estimate first, so the headline and its caption describe one figure.
-        val capacity = estimate?.first ?: lab.combinedMah
+        val capacity = estimate.estimateMah ?: lab.combinedMah
         val spec = PhoneSpecs.forModel(Build.MODEL)
         val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val cycles = if (Build.VERSION.SDK_INT >= 34) sticky?.getIntExtra(BatteryManager.EXTRA_CYCLE_COUNT, -1)?.takeIf { it > 0 } else null
@@ -241,24 +229,30 @@ class StatsActivity : StyledActivity() {
             BatteryManager.BATTERY_HEALTH_COLD -> "Cold"
             else -> "Unknown"
         }
-        val pct = if (capacity != null && spec != null) capacity / spec.typicalMah * 100 else null
-        section("Phone battery capacity", capacity?.let { "About ${fmt(it)} mAh when full." } ?: "Measuring\u2026",
+        val pct = if (capacity != null && spec != null) (capacity / spec.typicalMah * 100 / 5).roundToInt() * 5 else null
+        section("Phone battery capacity", capacity?.let { "About ${fmt(it)} mAh when full (estimate)." } ?: "Measuring\u2026",
             tag = health).apply {
             addView(LinearLayout(this@StatsActivity).apply {
                 gravity = Gravity.CENTER_VERTICAL
                 setPadding(0, dp(8), 0, dp(4))
-                addView(GaugeView(this@StatsActivity, pct?.roundToInt()?.coerceAtMost(100), Palette.green),
+                addView(GaugeView(this@StatsActivity, pct?.coerceAtMost(100), Palette.green),
                     LinearLayout.LayoutParams(dp(84), dp(84)))
                 addView(label(buildString {
-                    if (pct != null) append("Roughly ${String.format(Locale.US, "%.0f", pct)}% of the ${fmt(spec!!.typicalMah)} mAh advertised" +
-                        if (pct > 100.5) ". New batteries often hold a little more than the label" else "")
-                    else if (spec != null) append("Advertised: ${fmt(spec.typicalMah)} mAh")
-                    if (spec != null) append(" (${fmt(spec.ratedMah)} mAh rated minimum).")
-                    if (estimate != null) append("\nEstimated from Android's charge counter, ${shortWhen(estimate.second)}. " +
-                        "A rough guide, not a measured health test.")
-                    else if (capacity != null) append("\nNo reading in the last 30 days; estimated from older charge-counter readings.")
+                    append(CapacityProxy.capacityCaption(pct, spec, ::fmt))
+                    if (pct == null && capacity != null) append("\nThis is a charge-counter estimate, not a battery health test.")
+                    if (estimate.estimateMah == null && capacity != null) append("\nNo usable reading in the last 30 days; estimated from older charge-counter readings.")
                 }, 13f, Palette.body).apply { setPadding(dp(14), 0, 0, 0) }, LinearLayout.LayoutParams(0, -2, 1f))
             })
+            if (estimate.estimateMah != null) addView(label(CapacityProxy.readingsCaption(estimate, ::fmt),
+                11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
+            addView(label(when (estimate.trend) {
+                Trend.NOT_ENOUGH -> "Not enough readings yet to tell if this is changing."
+                Trend.NO_CLEAR_CHANGE -> "No clear change over the last 30 days."
+                Trend.LOWER, Trend.HIGHER ->
+                    "${if (estimate.trend == Trend.LOWER) "Lower" else "Higher"} than earlier in the month " +
+                        "(about ${fmt(estimate.earlyMah!!)} to ${fmt(estimate.lateMah!!)} mAh). " +
+                        "Counter estimates drift with temperature and calibration, so this is not proof of battery wear."
+            }, 11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
             val tiles = mutableListOf<Triple<String, String, String?>>()
             if (cycles != null) tiles += Triple("$cycles", if (cycles == 1) "charge cycle" else "charge cycles", "as counted by Android")
             sticky?.getStringExtra(BatteryManager.EXTRA_TECHNOLOGY)?.let { tiles += Triple(it, "chemistry", null) }

@@ -142,6 +142,20 @@ class GuideStepsTest {
         }
     }
 
+    @Test fun backFromAnyLiveBluetoothSubStepStartsOverWithCleanFlags() {
+        for (sub in 3..5) {
+            val s = at(1, sub).copy(runningScope = Scope.MY_DEVICES, countdownEndMs = 21000,
+                bluetoothOff = true, bluetoothBack = true, sessionContinued = true)
+            val back = send(s, Back(1000))
+            assertEquals(2, back.subStep)
+            assertEquals(0, back.countdownEndMs)
+            assertEquals(Action.Start(Scope.MY_DEVICES, 180), GuideSteps.page(back).primary!!.action)
+            assertFalse(back.bluetoothOff)
+            assertFalse(back.bluetoothBack)
+            assertFalse(back.sessionContinued)
+        }
+    }
+
     @Test fun rotationOnlyAdvancesWhileInTheRotationSubStep() {
         assertEquals(0, send(at(2), RecreatedDuringSession).subStep)
         assertEquals(3, send(start(at(2)), RecreatedDuringSession).current)
@@ -515,7 +529,7 @@ class GuideStepsTest {
                 assertEquals(step, back.current)
                 val startSub = if (step == 4) 1 else 2
                 val expected = when {
-                    step == 1 && sub == 6 -> 2
+                    step == 1 && sub in 3..6 -> 2
                     step in 4..5 && sub - startSub in 1..6 -> startSub
                     else -> sub - 1
                 }

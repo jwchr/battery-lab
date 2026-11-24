@@ -205,7 +205,7 @@ object GuideSteps {
     fun onEvent(s: State, event: Event): State {
         if (!s.active) return s
         if (event is Back) {
-            if (s.current == 1 && s.subStep == 6) return s.copy(subStep = 2, countdownEndMs = 0,
+            if (s.current == 1 && s.subStep in 3..6) return s.copy(subStep = 2, countdownEndMs = 0,
                 bluetoothOff = false, bluetoothBack = false, sessionContinued = false, retryBluetooth = false,
                 attemptStartedAtMs = 0, done = s.done and (1 shl 1).inv(), skipped = s.skipped and (1 shl 1).inv())
             if (s.current in 4..5 && walkPhase(s) in 1..6) return s.copy(

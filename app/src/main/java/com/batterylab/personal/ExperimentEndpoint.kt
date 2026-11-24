@@ -34,7 +34,13 @@ object ExperimentEndpoint {
      */
     fun importAdds(endMs: Long?, anotherRunning: Boolean) = endMs != null || !anotherRunning
 
-    /** A start waits on its first reading (Bluetooth gives up after 20 seconds); after this long it is stale. */
+    /** An imported end is usable only with its percentage and after the start; anything else is a damaged row. */
+    fun importEndValid(startMs: Long, endMs: Long?, endPct: Int?) = endMs == null || (endPct != null && endMs > startMs)
+
+    /**
+     * A start waits on its first reading (Bluetooth gives up after 20 seconds); after this long it is
+     * stale. Times are [android.os.SystemClock.elapsedRealtime], which a clock change can't move.
+     */
     const val START_PENDING_MS = 60_000L
 
     fun startPending(sinceMs: Long, nowMs: Long) = sinceMs > 0 && nowMs - sinceMs in 0 until START_PENDING_MS

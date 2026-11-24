@@ -44,13 +44,13 @@ class CloudBackupAgent : BackupAgent() {
             check(fresh >= 1) { "empty archive" }
             val held = File(dir(this), HELD)
             val heldRows = if (held.exists() && target.exists()) heldRowsOrNull(target) else null
-            if (held.exists() && target.exists() && heldRows == null)
-                store.logProbe("backup", "Cloud backup replaced a restored copy it couldn't read")
+            val unreadableHeld = held.exists() && target.exists() && heldRows == null
             if (heldRows != null && !replacesHeld(heldRows, historyRows(staged))) {
                 store.logProbe("backup", "Cloud backup kept the restored copy (local history still shorter)")
             } else {
                 if (!staged.renameTo(target)) error("could not replace snapshot")
                 held.delete()
+                if (unreadableHeld) store.logProbe("backup", "Cloud backup replaced a restored copy it couldn't read")
             }
         } catch (e: Exception) {
             store.logProbe("backup", "Cloud backup snapshot failed: ${e.javaClass.simpleName}")
@@ -77,9 +77,10 @@ class CloudBackupAgent : BackupAgent() {
         private const val HELD = "restore.held"
         private const val MAX_TRIES = 3
 
-        private fun lineCount(gz: File) = GZIPInputStream(gz.inputStream()).bufferedReader().useLines { it.count() }
+        // The file stream is closed even when a damaged header makes GZIPInputStream throw.
+        private fun lineCount(gz: File) = gz.inputStream().use { GZIPInputStream(it).bufferedReader().useLines { l -> l.count() } }
 
-        private fun historyRows(gz: File) = GZIPInputStream(gz.inputStream()).bufferedReader().use { historyRows(it) }
+        private fun historyRows(gz: File) = gz.inputStream().use { GZIPInputStream(it).bufferedReader().use { r -> historyRows(r) } }
 
         /**
          * History rows in a held restore, or null if it can't be read (a cut-off or damaged archive).

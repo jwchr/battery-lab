@@ -659,7 +659,9 @@ class BatteryStore private constructor(context: Context) :
         val existingExp = experiments(100_000).associateBy { "${it.device}|${it.mode}|${it.startMs}" }.toMutableMap()
         val existingJournal = journal(Int.MAX_VALUE).mapTo(HashSet(), ContextRows::journalKey)
         val existingForecasts = forecasts().mapTo(HashSet(), ContextRows::forecastKey)
-        var added = 0; var addedExp = 0; var skippedRunning = 0
+        var added = 0; var addedExp = 0; var skippedRunning = 0; var skippedDamaged = 0
+        // New running tests are added after the import, under the test lock (see below).
+        val running = LinkedHashMap<String, ContentValues>()
         val parseTime = CsvCodec.utcParser()
         val db = writableDatabase
         db.beginTransaction()
@@ -735,20 +737,34 @@ class BatteryStore private constructor(context: Context) :
                             }
                             continue
                         }
-                        if (!ExperimentEndpoint.importAdds(endMs, existingExp.values.any { it.endMs == null })) { skippedRunning++; continue }
-                        val id = db.insertOrThrow("experiments", null, ContentValues().apply {
+                        if (!ExperimentEndpoint.importEndValid(time, endMs, endPct)) { skippedDamaged++; continue }
+                        val values = ContentValues().apply {
                             put("device", device); put("mode", mode); put("start_ms", time); put("start_pct", pct)
                             endMs?.let { put("end_ms", it) }
                             endPct?.let { put("end_pct", it) }
-                        }); addedExp++
+                        }
+                        if (endMs == null) { running["$device|$mode|$time"] = values; continue }
+                        val id = db.insertOrThrow("experiments", null, values); addedExp++
                         existingExp["$device|$mode|$time"] = Experiment(id, device, mode, time, pct, endMs, endPct)
                     }
                 }
             }
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
+        // A test started on this phone during the import must win over a running one from the file.
+        // Taking the test lock outside the import's transaction keeps the same order as starting a
+        // test (lock, then database), so the two can't wait on each other.
+        if (running.isNotEmpty()) synchronized(PollScheduler.experimentLock) {
+            for (values in running.values) {
+                if (!ExperimentEndpoint.importAdds(null, activeExperiment() != null)) { skippedRunning++; continue }
+                writableDatabase.insertOrThrow("experiments", null, values); addedExp++
+            }
+        }
         if (skippedRunning > 0) try {
             logProbe("experiment", "Restore skipped $skippedRunning running test(s): a test was already running here")
+        } catch (_: Exception) {}
+        if (skippedDamaged > 0) try {
+            logProbe("experiment", "Restore skipped $skippedDamaged test row(s) with a missing or impossible end")
         } catch (_: Exception) {}
         return added to addedExp
     }

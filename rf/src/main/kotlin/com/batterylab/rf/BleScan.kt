@@ -149,6 +149,10 @@ class BleScanHub(
     private fun scanFailed(code: Int) { synchronized(lock) {
         if (stopped) return
         scanning = false
+        // Like Bluetooth turning off: close the second in progress and stop the per-second rows,
+        // or an empty "0 devices" row would follow every second as if the scan were still running.
+        drainNow(scheduler.bootNs(), final = true)
+        bucket = -1
         setStatus(Status.ERROR, "scan failed (code $code)")
     } }
 

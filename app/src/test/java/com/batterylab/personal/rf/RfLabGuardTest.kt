@@ -72,7 +72,8 @@ class RfLabGuardTest {
     @Test fun rfLabIsOneActivityAndNotExported() {
         val activities = Regex("""<activity android:name="([^"]+)" android:exported="(\w+)"""").findAll(manifest())
             .map { it.groupValues[1] to it.groupValues[2] }.toList()
-        assertEquals(listOf(".MainActivity" to "true", ".StatsActivity" to "false", ".GlossaryActivity" to "false", ".rf.RfLabActivity" to "false"), activities)
+        assertEquals(listOf(".MainActivity" to "true", ".StatsActivity" to "false", ".RangeExportActivity" to "false",
+            ".GlossaryActivity" to "false", ".rf.RfLabActivity" to "false"), activities)
         assertFalse(manifest().contains(".rf.") && Regex("""<(service|receiver|provider)[^>]*\.rf\.""").containsMatchIn(manifest()))
     }
 

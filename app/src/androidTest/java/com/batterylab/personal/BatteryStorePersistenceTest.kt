@@ -1,0 +1,239 @@
+package com.batterylab.personal
+
+import android.content.Context
+import android.content.ContextWrapper
+import android.database.DatabaseErrorHandler
+import android.database.sqlite.SQLiteDatabase
+import org.junit.After
+import org.junit.Assert.*
+import org.junit.Before
+import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.IOException
+import java.io.Reader
+import java.io.StringReader
+import java.io.StringWriter
+import java.io.Writer
+import java.time.ZoneId
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+
+/** Actual Android SQLite, WAL enabled. Every test uses its own disposable database directory. */
+class BatteryStorePersistenceTest {
+    companion object { lateinit var context: Context }
+    private lateinit var dir: File
+    private val stores = mutableListOf<BatteryStore>()
+    private val opened = mutableListOf<SQLiteDatabase>()
+    private var databaseOpens = 0
+    private lateinit var store: BatteryStore
+
+    private fun newStore(allowOpen: Boolean = true): BatteryStore {
+        val dbDir = File(dir, "db-${stores.size}").apply { mkdirs() }
+        val isolated = object : ContextWrapper(context) {
+            override fun getApplicationContext(): Context = this
+            override fun getDatabasePath(name: String): File = File(dbDir, name)
+            override fun openOrCreateDatabase(name: String, mode: Int, factory: SQLiteDatabase.CursorFactory?): SQLiteDatabase =
+                openOrCreateDatabase(name, mode, factory, null)
+            override fun openOrCreateDatabase(name: String, mode: Int, factory: SQLiteDatabase.CursorFactory?, errorHandler: DatabaseErrorHandler?): SQLiteDatabase {
+                databaseOpens++
+                check(allowOpen) { "Database access forbidden in this test" }
+                return SQLiteDatabase.openOrCreateDatabase(getDatabasePath(name).path, factory, errorHandler).also { opened += it }
+            }
+        }
+        val constructor = BatteryStore::class.java.getDeclaredConstructor(Context::class.java).apply { isAccessible = true }
+        return constructor.newInstance(isolated).also { stores += it; if (allowOpen) it.writableDatabase }
+    }
+
+    @Before fun setup() {
+        dir = File(context.cacheDir, "range-persistence-${System.nanoTime()}").apply { mkdirs() }
+        store = newStore()
+    }
+
+    @After fun cleanup() {
+        // BatteryStore.close() intentionally keeps the shared production helper alive; these are
+        // private helpers, so close their databases explicitly before deleting the test directory.
+        opened.filter { it.isOpen }.forEach { it.close() }
+        dir.deleteRecursively()
+    }
+
+    private fun seed() {
+        val db = store.writableDatabase
+        db.execSQL("INSERT INTO readings(device,time_ms,percent,source,charging,plugged) VALUES('phone',100,50,'android',0,1)")
+        db.execSQL("INSERT INTO readings(device,time_ms,percent,source) VALUES('watch:synthetic',200,50,'wear_os')")
+        db.execSQL("INSERT INTO experiments(device,mode,start_ms,start_pct) VALUES('phone','baseline',100,50)")
+        db.execSQL("INSERT INTO probe_events(time_ms,device,message) VALUES(100,'phone','synthetic')")
+        db.execSQL("INSERT INTO context_journal(time_ms,device,category,title) VALUES(100,'phone','manual','synthetic')")
+        db.execSQL("INSERT INTO capability_probes(field_key,device_kind,firmware_build,status,source_api,units,checked_time_ms) VALUES('synthetic','phone','synthetic','unknown','synthetic','count',100)")
+        db.execSQL("INSERT INTO forecasts(device,issued_ms,start_pct,lab_rate_pp_per_hr,lab_hours_to_empty,model_version) VALUES('phone',100,50,1,50,'synthetic')")
+    }
+
+    /** Fail on any attempted row write, even one that would leave identical values behind. */
+    private fun guardWrites() {
+        val db = store.writableDatabase
+        val tables = db.rawQuery("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'", null).use { c ->
+            buildList { while (c.moveToNext()) add(c.getString(0)) }
+        }
+        for (table in tables) for (action in listOf("INSERT", "UPDATE", "DELETE"))
+            db.execSQL("CREATE TRIGGER guard_${table}_$action BEFORE $action ON \"$table\" BEGIN SELECT RAISE(ABORT, 'analysis must not write'); END")
+    }
+
+    /** Every table including sqlite_sequence, all columns including nulls, plus schema/version. */
+    private fun snapshot(s: BatteryStore = store): List<String> {
+        val db = s.readableDatabase
+        val tables = db.rawQuery("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name", null).use { c ->
+            buildList { while (c.moveToNext()) add(c.getString(0)) }
+        }
+        return buildList {
+            add("version=${db.version}")
+            db.rawQuery("SELECT type,name,sql FROM sqlite_master ORDER BY type,name", null).use { c ->
+                while (c.moveToNext()) add((0 until c.columnCount).joinToString("|") { if (c.isNull(it)) "<null>" else c.getString(it) })
+            }
+            for (table in tables) {
+                val rows = db.rawQuery("SELECT * FROM \"$table\"", null).use { c ->
+                    buildList { while (c.moveToNext()) add((0 until c.columnCount).joinToString("|") {
+                        if (c.isNull(it)) "<null>" else "${c.getType(it)}:${c.getString(it)}"
+                    }) }
+                }
+                add(table); addAll(rows.sorted())
+            }
+        }
+    }
+
+    private fun backup(s: BatteryStore = store) = StringWriter().also(s::exportCsv).toString()
+    private fun analysis(bounds: RangeExport.Bounds = RangeExport.Bounds(null, null)): String = StringWriter().also { out ->
+        val encoder = RangeExport.Encoder(out, RangeExport.Request(bounds, ZoneId.of("UTC"), false))
+        store.rangeExportReadings(bounds, store.rangeExportMaxId(), encoder::write)
+    }.toString()
+    private fun gzip(text: String): ByteArray = ByteArrayOutputStream().also { bytes ->
+        GZIPOutputStream(bytes).bufferedWriter().use { it.write(text) }
+    }.toByteArray()
+
+    @Test fun exportAndRepeatedPlainAndGzipRejectionsLeaveEveryTableAndBackupUnchanged() {
+        seed()
+        // A newer row and the active experiment must survive every rejected attempt.
+        store.writableDatabase.execSQL("INSERT INTO readings(device,time_ms,percent,source) VALUES('phone',9999,50,'android')")
+        guardWrites()
+        val before = snapshot()
+        val originalBackup = backup()
+        val output = analysis()
+        assertEquals(before, snapshot())
+        assertEquals(originalBackup, backup())
+        repeat(3) {
+            for (reader in listOf(StringReader(output), GZIPInputStream(ByteArrayInputStream(gzip(output))).reader())) {
+                reader.use {
+                    val failure = assertThrows(IllegalArgumentException::class.java) { store.importCsv(it) }
+                    assertEquals(RangeExport.RESTORE_ERROR, failure.message)
+                }
+                assertEquals(before, snapshot())
+                assertEquals(originalBackup, backup())
+            }
+        }
+    }
+
+    @Test fun rejectionDoesNotEvenOpenTheDatabase() {
+        val output = analysis()
+        val unopened = newStore(allowOpen = false)
+        val before = databaseOpens
+        assertEquals(RangeExport.RESTORE_ERROR,
+            assertThrows(IllegalArgumentException::class.java) { unopened.importCsv(StringReader(output)) }.message)
+        assertEquals(before, databaseOpens)
+    }
+
+    @Test fun rawChargingAndMultipleSourceRowsAreRetainedAndBoundariesMatchSql() {
+        seed()
+        store.writableDatabase.execSQL("INSERT INTO readings(device,time_ms,percent,source) VALUES('phone',100,50,'samsung_widget')")
+        val before = snapshot()
+        val rows = mutableListOf<Reading>()
+        store.rangeExportReadings(RangeExport.Bounds(100, 200), store.rangeExportMaxId(), rows::add)
+        assertEquals(2, rows.size)
+        assertEquals(listOf("android", "samsung_widget"), rows.map { it.source })
+        assertEquals(false, rows.first().charging) // The UI reader would reinterpret plugged=1.
+        assertEquals(before, snapshot())
+    }
+
+    @Test fun emptyExactAndMultiplePagesExcludeConcurrentBackdatedAppends() {
+        for (count in listOf(0, 499, 500, 501, 1000, 1001)) {
+            store.writableDatabase.execSQL("DELETE FROM readings")
+            store.writableDatabase.beginTransaction()
+            try {
+                repeat(count) { i ->
+                    store.writableDatabase.execSQL("INSERT INTO readings(device,time_ms,percent,source) VALUES('phone',?,50,'android')", arrayOf(i))
+                }
+                store.writableDatabase.setTransactionSuccessful()
+            } finally { store.writableDatabase.endTransaction() }
+            val max = store.rangeExportMaxId()
+            var seen = 0
+            store.rangeExportReadings(RangeExport.Bounds(null, null), max) {
+                seen++
+                if (seen == 1) store.writableDatabase.execSQL("INSERT INTO readings(device,time_ms,percent,source) VALUES('phone',0,50,'android')")
+            }
+            assertEquals(count, seen)
+        }
+    }
+
+    @Test fun failedWriterLeavesEveryTableAndBackupUntouched() {
+        seed()
+        guardWrites()
+        val before = snapshot(); val originalBackup = backup()
+        val failing = object : Writer() {
+            var fail = false
+            override fun write(cbuf: CharArray, off: Int, len: Int) { if (fail) throw IOException("synthetic output failure") }
+            override fun flush() = Unit
+            override fun close() = Unit
+        }
+        val encoder = RangeExport.Encoder(failing, RangeExport.Request(RangeExport.Bounds(null, null), ZoneId.of("UTC"), false))
+        failing.fail = true
+        assertThrows(IOException::class.java) {
+            store.rangeExportReadings(RangeExport.Bounds(null, null), store.rangeExportMaxId(), encoder::write)
+        }
+        assertEquals(before, snapshot()); assertEquals(originalBackup, backup())
+    }
+
+    @Test fun oldAndCurrentBackupsStillImportAndRepeatWithoutDuplicates() {
+        seed()
+        val target = newStore()
+        assertEquals(2 to 1, target.importCsv(StringReader(backup())))
+        val before = snapshot(target)
+        assertEquals(0 to 0, target.importCsv(StringReader(backup())))
+        assertEquals(before, snapshot(target))
+        store.writableDatabase.execSQL("UPDATE experiments SET end_ms=200,end_pct=50 WHERE end_ms IS NULL")
+        assertEquals(0 to 1, target.importCsv(StringReader(backup())))
+        val completed = snapshot(target)
+        assertEquals(0 to 0, target.importCsv(StringReader(backup())))
+        assertEquals(completed, snapshot(target))
+        val old = "kind,device,mode_or_source,timestamp_utc,percentage\n" +
+            "reading,phone,android,2024-01-01T00:00:00.000Z,50\n"
+        assertEquals(1 to 0, target.importCsv(StringReader(old)))
+        val after = snapshot(target)
+        assertEquals(0 to 0, target.importCsv(StringReader(old)))
+        assertEquals(after, snapshot(target))
+    }
+
+    @Test fun interruptedChunkRetryRetainsCommittedRowsAndDoesNotDuplicate() {
+        val header = "kind,device,mode_or_source,timestamp_utc,percentage\n"
+        val complete = header + (0 until 2501).joinToString("") { i ->
+            "reading,phone,android,${RangeExport.utc(i * 1000L)},50\n"
+        }
+        // Reader fails after more than one committed 2,000-row chunk.
+        val cut = header.length + complete.substring(header.length).lineSequence().take(2200).sumOf { it.length + 1 }
+        val interrupted = object : Reader() {
+            var position = 0
+            override fun read(cbuf: CharArray, off: Int, len: Int): Int {
+                if (position >= cut) throw IOException("synthetic interrupted input")
+                val size = minOf(len, cut - position)
+                complete.toCharArray(cbuf, off, position, position + size); position += size
+                return size
+            }
+            override fun close() = Unit
+        }
+        assertThrows(IOException::class.java) { store.importCsv(interrupted) }
+        val count = store.readableDatabase.rawQuery("SELECT COUNT(*) FROM readings", null).use { it.moveToFirst(); it.getInt(0) }
+        assertEquals(2000, count)
+        assertEquals(501 to 0, store.importCsv(StringReader(complete)))
+        val before = snapshot()
+        assertEquals(0 to 0, store.importCsv(StringReader(complete)))
+        assertEquals(before, snapshot())
+    }
+}

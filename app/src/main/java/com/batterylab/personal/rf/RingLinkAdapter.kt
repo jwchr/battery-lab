@@ -71,7 +71,7 @@ class RingLinkAdapter(context: Context, private val address: String) : RingLinkP
 
     override fun readRssi() = gatt?.readRemoteRssi() == true
 
-    override fun watchBluetooth(listener: (Boolean) -> Unit) = watch.start(handler, listener)
+    override fun watchBluetooth(listener: (Boolean) -> Unit) = watch.start(handler, receiveSystemBluetooth = true, listener = listener)
     override fun unwatchBluetooth() = watch.stop()
 
     override fun shutdown() {

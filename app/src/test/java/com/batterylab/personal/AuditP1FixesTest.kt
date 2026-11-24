@@ -52,6 +52,20 @@ class AuditP1FixesTest {
         assertFalse(ExperimentEndpoint.importEndValid(100L, 200L, null))
         assertFalse(ExperimentEndpoint.importEndValid(100L, 100L, 50))
         assertFalse(ExperimentEndpoint.importEndValid(100L, 90L, 50))
+        assertFalse(ExperimentEndpoint.importEndValid(100L, null, 50))
+    }
+
+    @Test fun aRunningRowTheSameFileAlsoFinishesIsNotAddedAgain() {
+        val running = linkedMapOf("ring|monitoring|1000" to "open A", "ring|baseline|2000" to "open B")
+        assertEquals(listOf("open B"), ExperimentEndpoint.runningLeft(running, setOf("ring|monitoring|1000")))
+        assertEquals(listOf("open A", "open B"), ExperimentEndpoint.runningLeft(running, emptySet()))
+    }
+
+    @Test fun aStartTakingOverFromAStaleOneRestoresTheOriginalMonitoringSetting() {
+        // The stale start saved "on" and switched monitoring off; the new start must keep "on".
+        assertTrue(ExperimentEndpoint.monitoringBeforeStart(5_000L, pendingWasMonitoring = true, monitoringNow = false))
+        assertFalse(ExperimentEndpoint.monitoringBeforeStart(0L, pendingWasMonitoring = true, monitoringNow = false))
+        assertTrue(ExperimentEndpoint.monitoringBeforeStart(0L, pendingWasMonitoring = false, monitoringNow = true))
     }
 
     @Test fun exportFallsBackToPlainWriteOnlyWhenTheProviderRejectsTruncate() {

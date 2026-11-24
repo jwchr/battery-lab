@@ -755,7 +755,7 @@ class BatteryStore private constructor(context: Context) :
         // Taking the test lock outside the import's transaction keeps the same order as starting a
         // test (lock, then database), so the two can't wait on each other.
         if (running.isNotEmpty()) synchronized(PollScheduler.experimentLock) {
-            for (values in running.values) {
+            for (values in ExperimentEndpoint.runningLeft(running, existingExp.keys)) {
                 if (!ExperimentEndpoint.importAdds(null, activeExperiment() != null)) { skippedRunning++; continue }
                 writableDatabase.insertOrThrow("experiments", null, values); addedExp++
             }

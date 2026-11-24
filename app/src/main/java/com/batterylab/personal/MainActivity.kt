@@ -37,6 +37,9 @@ import java.util.Locale
  */
 private var testStartingSinceMs = 0L
 
+/** The monitoring setting from before the pending start switched it off, for a start that takes over. */
+private var testStartingWasMonitoring = false
+
 /**
  * Opens a picked file for a fresh write. "wt" truncates, so a shorter export doesn't leave old rows
  * at the end; some document providers accept only "w", so that is the fallback.
@@ -838,12 +841,17 @@ class MainActivity : StyledActivity() {
         // Monitoring pauses during the start reading. If no test starts (refused, BLE failure, or
         // the screen rotating or closing mid-read), it goes back to how it was.
         val app = applicationContext
-        val wasMonitoring = PollScheduler.ringEnabled(app)
-        PollScheduler.setRingEnabled(app, false)
         // One start at a time: a second tap while a Bluetooth start reading is in flight would start
         // a test first, and this one would then hit "Finish the existing experiment first".
         val attempt = now
-        testStartingSinceMs = attempt
+        val wasMonitoring = synchronized(PollScheduler.experimentLock) {
+            ExperimentEndpoint.monitoringBeforeStart(testStartingSinceMs, testStartingWasMonitoring,
+                PollScheduler.ringEnabled(app)).also {
+                testStartingWasMonitoring = it
+                testStartingSinceMs = attempt
+                PollScheduler.setRingEnabled(app, false)
+            }
+        }
         freshRingReading(mode, failed = {
             // Only this start's own setup is undone: if a newer start took over, the setting is its.
             synchronized(PollScheduler.experimentLock) {

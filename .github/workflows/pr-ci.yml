@@ -1,0 +1,67 @@
+name: Battery Lab PR build and unit tests
+
+# Keep the existing manually dispatched APK-artifact workflow unchanged.
+# This separate, artifact-free gate checks pull-request code without exposing any secrets.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'app/**'
+      - 'wear/**'
+      - 'rf/**'
+      - 'widgetprobe/**'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/pr-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: battery-pr-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Java 17 (project target)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Android SDK
+        uses: android-actions/setup-android@v4
+      - name: Install compile SDK 35
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Gradle 8.9 (project intentionally has no wrapper)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Run Kotlin/RF and Android unit tests, build all debug variants
+        id: verify
+        run: >
+          gradle --no-daemon
+          :rf:test
+          :app:testDebugUnitTest
+          :app:assembleDebug
+          :wear:assembleDebug
+          :widgetprobe:assembleDebug
+      - name: Summarize scope
+        if: always()
+        env:
+          CHECK_RESULT: ${{ steps.verify.outcome }}
+        run: |
+          {
+            echo '### Battery Lab PR verification'
+            echo "- Build and unit-test step: $CHECK_RESULT"
+            echo '- Targets: RF JVM tests; app local unit tests; phone, Watch8 and widget-probe debug builds.'
+            echo '- Limits: no hardware BLE tests, no instrumented Android tests, no signing/deployment, and no APK artifacts.'
+          } >> "$GITHUB_STEP_SUMMARY"

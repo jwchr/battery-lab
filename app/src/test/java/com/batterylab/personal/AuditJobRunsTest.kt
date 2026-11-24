@@ -22,10 +22,13 @@ class AuditJobRunsTest {
         val runs = JobRuns()
         val threads = 8
         val each = 50_000
-        val pool = (1..threads).map { Thread { repeat(each) { runs.stop() } } }
+        // Half the threads start runs and half stop them, so start() and stop() race each other.
+        val pool = (1..threads).map { n ->
+            Thread { repeat(each) { if (n % 2 == 0) runs.start() else runs.stop() } }
+        }
         pool.forEach { it.start() }
         pool.forEach { it.join() }
-        assertEquals("every stop counted, so no stopped run can come back to life",
+        assertEquals("every start and stop counted, so no stopped run can come back to life",
             threads * each + 1, runs.start())
     }
 }

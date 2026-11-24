@@ -1,5 +1,6 @@
 package com.batterylab.personal
 
+import java.util.Locale
 import kotlin.math.abs
 
 data class ArmDetail(
@@ -31,6 +32,19 @@ fun armDetail(results: List<ExperimentResult>, mode: String): ArmDetail {
         // describes the arm's intended rate series, as selected by ExperimentStats.usesSource.
         if (ExperimentEndpoint.allowsBle(mode)) "direct Ring reads" else "Samsung's widget",
     )
+}
+
+fun armDetailText(arm: ArmDetail): String = buildString {
+    fun f(value: Double) = String.format(Locale.US, "%.2f", value)
+    if (arm.runs == 0 || arm.medianRate == null) {
+        append("${modeName(arm.mode)}: 0 runs, from ${arm.source}.")
+    } else {
+        append("${modeName(arm.mode)}: ${arm.runs} runs, median ${f(arm.medianRate)} pp/hour " +
+            "(${arm.minRate?.let(::f)} to ${arm.maxRate?.let(::f)}), ")
+        arm.meanHours?.let { append("about ${f(it)} h each, ") }
+        append("from ${arm.source}.")
+    }
+    if (arm.setAside > 0) append(" ${arm.setAside} set aside.")
 }
 
 enum class OrderCheck { ALTERNATED, BLOCKED, TOO_FEW }

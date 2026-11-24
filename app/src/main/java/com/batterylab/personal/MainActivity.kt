@@ -207,7 +207,10 @@ class MainActivity : StyledActivity() {
         section("Stats", "For the curious", "Battery health, charging habits, hungriest hours, " +
             "rolling averages and some very nerdy conversions.").apply {
             button("Open stats", primary = true) { startActivity(Intent(this@MainActivity, StatsActivity::class.java)) }
-            button("Open RF Lab") { startActivity(Intent(this@MainActivity, com.batterylab.personal.rf.RfLabActivity::class.java)) }
+            button("Open RF Lab") {
+                startActivity(Intent(this@MainActivity, com.batterylab.personal.rf.RfLabActivity::class.java)
+                    .putExtra(com.batterylab.personal.rf.RfLabActivity.EXTRA_FROM_MAIN_SCREEN, true))
+            }
         }
 
         section("Lab tools", "Sources, tests and your data", tag = if (labOpen) "Open" else null).apply {
@@ -291,12 +294,7 @@ class MainActivity : StyledActivity() {
                 val a = armDetail(results, armA)
                 val b = armDetail(results, armB)
                 for (arm in listOf(a, b)) {
-                    addView(label(buildString {
-                        append("${modeName(arm.mode)}: ${arm.runs} runs, median ${arm.medianRate?.let(::f)} pp/hour " +
-                            "(${arm.minRate?.let(::f)} to ${arm.maxRate?.let(::f)}), " +
-                            "about ${arm.meanHours?.let(::f)} h each, from ${arm.source}.")
-                        if (arm.setAside > 0) append(" ${arm.setAside} set aside.")
-                    }, 12f, quiet))
+                    addView(label(armDetailText(arm), 12f, quiet))
                 }
                 val notes = mutableListOf<String>()
                 when (order(results, armA, armB)) {

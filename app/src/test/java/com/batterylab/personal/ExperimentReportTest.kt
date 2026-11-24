@@ -58,6 +58,35 @@ class ExperimentReportTest {
         assertNull(arm.meanStartPct)
     }
 
+    @Test fun emptyArmTextShowsZeroRunsWhenOnlyTheOtherArmHasRuns() {
+        val arm = armDetail(listOf(run(0, "monitoring")), "baseline")
+        assertEquals("Baseline: 0 runs, from Samsung's widget.", armDetailText(arm))
+    }
+
+    @Test fun emptyArmTextIncludesSetAsideCount() {
+        val arm = armDetail(listOf(run(0, "monitoring", quarantine = "Synthetic exclusion")), "monitoring")
+        assertEquals("Monitored: 0 runs, from direct Ring reads. 1 set aside.", armDetailText(arm))
+    }
+
+    @Test fun missingMedianTextShowsZeroRuns() {
+        val arm = armDetail(listOf(run(0)), "baseline").copy(medianRate = null)
+        assertEquals("Baseline: 0 runs, from Samsung's widget.", armDetailText(arm))
+    }
+
+    @Test fun countedArmTextIncludesRatesDurationAndSetAsideCount() {
+        val arm = armDetail(listOf(run(0, rate = 1.0), run(4, rate = 3.0),
+            run(8, quarantine = "Synthetic exclusion")), "baseline")
+        assertEquals("Baseline: 2 runs, median 2.00 pp/hour (1.00 to 3.00), " +
+            "about 2.00 h each, from Samsung's widget. 1 set aside.", armDetailText(arm))
+    }
+
+    @Test fun countedArmTextOmitsMissingDuration() {
+        val arm = armDetail(listOf(run(0, rate = 1.0), run(4, rate = 3.0)), "baseline")
+            .copy(meanHours = null)
+        assertEquals("Baseline: 2 runs, median 2.00 pp/hour (1.00 to 3.00), " +
+            "from Samsung's widget.", armDetailText(arm))
+    }
+
     private fun sequence(vararg modes: String) = modes.mapIndexed { i, mode -> run(i * 4L, mode) }
 
     @Test fun orderSortsCountedRunsBeforeCheckingAlternation() {

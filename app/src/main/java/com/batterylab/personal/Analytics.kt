@@ -496,7 +496,9 @@ object ExperimentStats {
         val pts = (first + changes.map { BatteryPoint.of(it) } + last).distinctBy { it.timeMs }
         val fit = if (pts.map { it.percent }.distinct().size >= 4)
             HonestyAuditor.ols(pts.map { (it.timeMs - e.startMs) / 3_600_000.0 }, pts.map { it.percent.toDouble() }) else null
-        return ExperimentResult(e, armEndpoint, fit?.first?.let { -it }?.takeIf { it >= 0 }, changes.size, null)
+        val fittedRate = fit?.first?.let { -it }?.takeIf { it >= 0 }
+        val quarantine = if (ble && armEndpoint == null && fittedRate == null) "Too few direct Ring readings" else null
+        return ExperimentResult(e, armEndpoint, fittedRate, changes.size, quarantine)
     }
 
     private val WIDGET_SOURCES = setOf(SamsungWidgetSource.SOURCE, "manual_widget")

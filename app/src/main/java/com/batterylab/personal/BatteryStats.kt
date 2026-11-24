@@ -176,7 +176,7 @@ object BatteryStats {
     }
 
     fun temperature(readings: List<Reading>): TempStats? {
-        val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in 0..700 }
+        val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in -400..700 }
         if (t.isEmpty()) return null
         val c = t.map { it.tempTenthsC!! / 10.0 }
         val hottest = t.maxByOrNull { it.tempTenthsC!! }!!

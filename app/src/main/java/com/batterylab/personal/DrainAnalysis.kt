@@ -250,6 +250,30 @@ class ForegroundSpans(private val out: MutableMap<String, MutableList<Span>> = H
 
 /** Reads screen and app-on-screen history from Android's usage data (needs Usage access). */
 object UsageSource {
+    internal data class ServiceEvent(val type: Int, val packageName: String, val className: String?, val timeMs: Long)
+
+    internal fun serviceSpans(events: List<ServiceEvent>, toMs: Long): Map<String, List<Span>> {
+        val spans = HashMap<String, MutableList<Span>>()
+        val since = HashMap<Pair<String, String>, Long>()
+        fun record(pkg: String, start: Long, end: Long) {
+            if (end > start) spans.getOrPut(pkg) { mutableListOf() } += Span(start, end)
+        }
+        fun closeAll(at: Long) {
+            since.forEach { (key, start) -> record(key.first, start, at) }
+            since.clear()
+        }
+        for (event in events) {
+            val key = event.packageName to (event.className ?: "")
+            when (event.type) {
+                FOREGROUND_SERVICE_START -> since.putIfAbsent(key, event.timeMs)
+                FOREGROUND_SERVICE_STOP -> since.remove(key)?.let { record(event.packageName, it, event.timeMs) }
+                DEVICE_SHUTDOWN -> closeAll(event.timeMs)
+            }
+        }
+        closeAll(toMs)
+        return spans
+    }
+
     fun granted(context: Context): Boolean {
         val ops = context.getSystemService(AppOpsManager::class.java) ?: return false
         val mode = if (android.os.Build.VERSION.SDK_INT >= 29)
@@ -273,8 +297,7 @@ object UsageSource {
         var screenSince: Long? = null
         var screenKnown = false
         val foreground = ForegroundSpans(apps)
-        val services = HashMap<String, MutableList<Span>>()
-        val serviceSince = HashMap<String, Long>()
+        val serviceEvents = mutableListOf<ServiceEvent>()
         fun closeApp(at: Long) = foreground.close(at)
         while (events.hasNextEvent()) {
             events.getNextEvent(e)
@@ -295,23 +318,19 @@ object UsageSource {
                 }
                 UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED ->
                     foreground.pausedOrStopped(e.packageName, e.className, t)
-                FOREGROUND_SERVICE_START -> serviceSince.putIfAbsent(e.packageName, t)
-                FOREGROUND_SERVICE_STOP -> serviceSince.remove(e.packageName)?.let {
-                    if (t > it) services.getOrPut(e.packageName) { mutableListOf() } += Span(it, t)
-                }
+                FOREGROUND_SERVICE_START, FOREGROUND_SERVICE_STOP ->
+                    serviceEvents += ServiceEvent(e.eventType, e.packageName, e.className, t)
                 DEVICE_SHUTDOWN -> {
                     // Nothing runs while the phone is off: close everything at shutdown.
                     if (screenKnown) screenSince?.let { if (t > it) screen += Span(it, t) }
                     screenSince = null
                     closeApp(t)
-                    serviceSince.forEach { (pkg, since) -> if (t > since) services.getOrPut(pkg) { mutableListOf() } += Span(since, t) }
-                    serviceSince.clear()
+                    serviceEvents += ServiceEvent(DEVICE_SHUTDOWN, "", null, t)
                 }
             }
         }
         screenSince?.let { if (toMs > it) screen += Span(it, toMs) }
         closeApp(toMs)
-        serviceSince.forEach { (pkg, since) -> if (toMs > since) services.getOrPut(pkg) { mutableListOf() } += Span(since, toMs) }
         // Private apps are folded into "Other" here, before anything else sees their names.
         // If a hidden list exists but can't be read, hide every app rather than risk showing one.
         val hidden = privateApps(context)
@@ -323,7 +342,7 @@ object UsageSource {
             }
             return folded
         }
-        return UsageWindow(screen, fold(apps), coverage, fold(services))
+        return UsageWindow(screen, fold(apps), coverage, fold(serviceSpans(serviceEvents, toMs)))
     }
 
     /**

@@ -29,14 +29,21 @@ else
   $have_phone || { echo "No phone over adb and no database path given." >&2; exit 1; }
   DB=$WORK/battery_lab.db
   "$ADB" exec-out run-as "$PKG" cat databases/battery_lab.db >"$DB"
+  for suffix in -wal -shm; do
+    if ! "$ADB" exec-out run-as "$PKG" cat "databases/battery_lab.db$suffix" >"$DB$suffix" \
+      || [[ ! -s "$DB$suffix" ]] \
+      || { head -c 7 "$DB$suffix" | LC_ALL=C grep -aqE '^(run-as:|cat:)'; }; then
+      rm -f "$DB$suffix"
+    fi
+  done
 fi
 
 # App foreground times (epoch ms) from usagestats, if the phone is attached.
 : >"$WORK/fg.txt"
 if $have_phone; then
   "$ADB" shell dumpsys usagestats 2>/dev/null \
-    | grep "package=$PKG" | grep 'type=ACTIVITY_RESUMED' \
-    | grep -oE 'time="[^"]+"' | cut -d'"' -f2 | sort -u \
+    | { grep "package=$PKG" || true; } | { grep 'type=ACTIVITY_RESUMED' || true; } \
+    | { grep -oE 'time="[^"]+"' || true; } | cut -d'"' -f2 | sort -u \
     | while read -r t; do
         # Phone and Mac are assumed to share a timezone.
         echo $(( $(date -j -f '%Y-%m-%d %H:%M:%S' "$t" +%s) * 1000 ))

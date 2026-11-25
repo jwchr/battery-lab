@@ -82,8 +82,11 @@ class WatchBatteryJob : JobService() {
         val gate = JobFinishGate()
         jobs.put(params.jobId, gate)?.stop()
         WatchReporter.send(this) {
-            gate.finish { jobFinished(params, false) }
-            jobs.remove(params.jobId, gate)
+            try {
+                gate.finish { jobFinished(params, false) }
+            } finally {
+                jobs.remove(params.jobId, gate)
+            }
         }
         return true
     }

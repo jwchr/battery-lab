@@ -57,7 +57,7 @@ class WatchReceiverIsolationTest {
     }
 
     @Test fun receiverUsesIsolationAndAlwaysClosesTheStore() {
-        val source = File("src/main/java/com/batterylab/personal/WatchReceiver.kt").readText()
+        val source = listOf(File("src/main/java/com/batterylab/personal/WatchReceiver.kt"), File("app/src/main/java/com/batterylab/personal/WatchReceiver.kt")).first { it.isFile }.readText()
             .substringAfter("override fun onDataChanged(")
         assertTrue(source.contains("forEachIsolated(events"))
         assertTrue(Regex("finally\\s*\\{\\s*store\\.close\\(\\)").containsMatchIn(source))

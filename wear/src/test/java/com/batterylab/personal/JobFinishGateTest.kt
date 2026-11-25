@@ -64,7 +64,7 @@ class JobFinishGateTest {
     }
 
     @Test fun reporterFinishesCancelledSends() {
-        val source = File("src/main/java/com/batterylab/personal/WatchBatteryJob.kt").readText()
+        val source = listOf(File("src/main/java/com/batterylab/personal/WatchBatteryJob.kt"), File("wear/src/main/java/com/batterylab/personal/WatchBatteryJob.kt")).first { it.isFile }.readText()
             .substringAfter("fun send(").substringBefore("class WatchBatteryJob")
         assertTrue(source.contains("addOnCanceledListener { finish(false) }"))
     }

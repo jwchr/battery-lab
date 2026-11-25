@@ -12,6 +12,7 @@ import android.os.BatteryManager
 import android.os.Build
 import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
+import java.util.concurrent.ConcurrentHashMap
 
 /** Samples locally, then sends an update via the Wear OS Data Layer. No phone polling. */
 object WatchReporter {
@@ -44,9 +45,13 @@ object WatchReporter {
     }
 
     fun send(context: Context, onFinished: (Boolean) -> Unit) {
+        val completion = JobFinishGate()
+        fun finish(success: Boolean) {
+            completion.finish { onFinished(success) }
+        }
         val percent = batteryPercent(context)
         if (percent == null) {
-            onFinished(false)
+            finish(false)
             return
         }
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -64,15 +69,26 @@ object WatchReporter {
             dataMap.putString("model", Build.MODEL)
         }.asPutDataRequest()
         Wearable.getDataClient(context).putDataItem(request)
-            .addOnSuccessListener { onFinished(true) }
-            .addOnFailureListener { onFinished(false) }
+            .addOnSuccessListener { finish(true) }
+            .addOnFailureListener { finish(false) }
+            .addOnCanceledListener { finish(false) }
     }
 }
 
 class WatchBatteryJob : JobService() {
+    private val jobs = ConcurrentHashMap<Int, JobFinishGate>()
+
     override fun onStartJob(params: JobParameters): Boolean {
-        WatchReporter.send(this) { jobFinished(params, false) }
+        val gate = JobFinishGate()
+        jobs.put(params.jobId, gate)?.stop()
+        WatchReporter.send(this) {
+            gate.finish { jobFinished(params, false) }
+            jobs.remove(params.jobId, gate)
+        }
         return true
     }
-    override fun onStopJob(params: JobParameters): Boolean = false
+    override fun onStopJob(params: JobParameters): Boolean {
+        jobs.remove(params.jobId)?.stop()
+        return false
+    }
 }

@@ -16,7 +16,7 @@ This app's SSOT rows: W098, W099.
 ## Build and test (Linux cloud)
 - Modules: `app` (phone), `rf` (RF Lab core, plain Kotlin, no Android), `wear` (Watch), `widgetprobe` (widget test tool). compileSdk 37.2 and targetSdk 37 (Android 17), AGP 9.5.2, Kotlin 2.4.21, Java 17 target, Gradle 9.9.2 in CI (no wrapper).
 - SDK setup (cloud environment "battery-lab" allows dl.google.com): install the command-line tools into `$HOME/android-sdk`, then `sdkmanager "platforms;android-37.2" "build-tools;37.0.0" "platform-tools"`.
-- Quiet check: `gradle --no-daemon -q :rf:test :app:assembleDebug :app:testDebugUnitTest :wear:assembleDebug :widgetprobe:assembleDebug`. If Maven Central reports a missing dependency, rerun with `--refresh-dependencies`.
+- Quiet check: `gradle --no-daemon -q :rf:test :app:assembleDebug :app:testDebugUnitTest :wear:testDebugUnitTest :wear:assembleDebug :widgetprobe:assembleDebug`. If Maven Central reports a missing dependency, rerun with `--refresh-dependencies`.
 - `.github/workflows/build-apks.yml` builds the phone and Watch APKs, manual run only. It costs GitHub Actions minutes, so run it only when Jeff needs APKs.
 
 ## Needs Jeff's devices

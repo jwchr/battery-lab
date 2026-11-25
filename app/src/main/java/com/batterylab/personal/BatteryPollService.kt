@@ -123,10 +123,11 @@ object Background {
  * can't finish the new run or start a second Ring read.
  */
 internal class JobRuns {
-    @Volatile private var current = 0
-    fun start(): Int = ++current
-    fun stop() { current++ }
-    fun live(run: Int) = run == current
+    // Atomic so a start and a stop on different threads can't lose a count and revive a stopped run.
+    private val current = java.util.concurrent.atomic.AtomicInteger(0)
+    fun start(): Int = current.incrementAndGet()
+    fun stop() { current.incrementAndGet() }
+    fun live(run: Int) = run == current.get()
 }
 
 class BatteryPollService : JobService() {

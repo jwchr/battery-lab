@@ -16,7 +16,7 @@ import android.os.Handler
 class BluetoothWatch(private val context: Context) {
     private var receiver: BroadcastReceiver? = null
 
-    fun start(handler: Handler?, receiveSystemBluetooth: Boolean, listener: (Boolean) -> Unit) {
+    fun start(handler: Handler?, listener: (Boolean) -> Unit) {
         if (receiver != null) return
         val r = object : BroadcastReceiver() {
             override fun onReceive(c: Context, intent: Intent) {
@@ -30,8 +30,9 @@ class BluetoothWatch(private val context: Context) {
         // Bluetooth broadcasts can come from a privileged UID rather than the system UID, which a
         // not-exported receiver would miss. ACTION_STATE_CHANGED is a protected broadcast that only
         // the system can send, so exporting this receiver lets no app spoof it.
-        if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(r, filter, null, handler,
-            if (receiveSystemBluetooth) Context.RECEIVER_EXPORTED else Context.RECEIVER_NOT_EXPORTED)
+        // Always exported: a not-exported receiver silently misses these broadcasts on API 33+.
+        val flags = receiverFlags(Build.VERSION.SDK_INT)
+        if (flags != null) context.registerReceiver(r, filter, null, handler, flags)
         else context.registerReceiver(r, filter, null, handler)
         receiver = r
     }
@@ -40,5 +41,10 @@ class BluetoothWatch(private val context: Context) {
         val r = receiver ?: return
         receiver = null
         try { context.unregisterReceiver(r) } catch (_: Exception) { }
+    }
+
+    internal companion object {
+        /** The registerReceiver flag on [sdk]: exported on API 33 and later, none before (no flags there). */
+        fun receiverFlags(sdk: Int): Int? = if (sdk >= 33) Context.RECEIVER_EXPORTED else null
     }
 }

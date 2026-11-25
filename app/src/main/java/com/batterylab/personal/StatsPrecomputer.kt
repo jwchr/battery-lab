@@ -17,6 +17,9 @@ internal sealed interface SectionResult<out T> {
 
 /** History analysis with no Android calls. */
 internal object StatsPrecomputer {
+    /** Battery the "Will it last?" planner keeps in reserve; the section subtitle shows the same number. */
+    const val RESERVE_PCT = 15
+
     data class Raw(
         val devices: List<Triple<String, String, Int>>,
         val data: List<List<Reading>>,
@@ -140,7 +143,7 @@ internal object StatsPrecomputer {
                 PlanInput(device.second, last.percent, allStretches[i].map { it.drop / it.hours }, chargeRate)
             }
             val assessed = listOf(8, 12, 18, 24).associateWith { hours -> inputs.map {
-                ReadinessPlanner.assess(it.name, it.percent, it.rates, it.chargeRate, hours.toDouble(), 15)
+                ReadinessPlanner.assess(it.name, it.percent, it.rates, it.chargeRate, hours.toDouble(), RESERVE_PCT)
             } }
             Plan(inputs, assessed, assessed.mapValues { ReadinessPlanner.order(it.value) })
         }

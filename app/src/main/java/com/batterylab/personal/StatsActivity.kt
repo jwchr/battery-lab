@@ -40,12 +40,15 @@ class StatsActivity : StyledActivity() {
 
     override fun onDestroy() {
         ++renderGeneration
+        journalDialog?.dismiss() // a Save or Delete still in flight must not leak its dialog window
+        journalDialog = null
         super.onDestroy()
     }
 
     private class Loaded(val computed: StatsPrecomputer.Result, val spec: PhoneSpec?, val sticky: Intent?, val firmware: String)
 
     @Volatile private var renderGeneration = 0
+    private var journalDialog: android.app.AlertDialog? = null
 
     override fun iconFor(eyebrow: String): String? = SECTION_ICONS[eyebrow]
 
@@ -753,10 +756,9 @@ class StatsActivity : StyledActivity() {
     }
 
     private var targetHours = 12
-    private val reservePct = 15
 
     private fun renderPlanner(prep: StatsPrecomputer.Plan) {
-        val card = section("Will it last?", null, "Keeps a $reservePct% reserve. Each device is judged on its own history.")
+        val card = section("Will it last?", null, "Keeps a ${StatsPrecomputer.RESERVE_PCT}% reserve. Each device is judged on its own history.")
         val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         fun fill() {
             holder.removeAllViews()
@@ -885,12 +887,14 @@ class StatsActivity : StyledActivity() {
         button.isEnabled = false
         dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).isEnabled = false
         dialog.setCancelable(false)
+        journalDialog = dialog
         ++renderGeneration
         val context = applicationContext
         Background.io.execute {
             val result = SectionResult.capture { write(BatteryStore.get(context)) }
             Background.onMain {
                 if (isDestroyed || isFinishing) return@onMain
+                if (journalDialog === dialog) journalDialog = null
                 when (result) {
                     is SectionResult.Ok -> { dialog.dismiss(); render() }
                     is SectionResult.Failed -> {

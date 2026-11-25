@@ -248,7 +248,7 @@ class RfLabActivity : StyledActivity() {
 
     private fun watchGuideBluetooth() {
         if (!guide.active || !visible) return
-        guideBluetooth.start(main, receiveSystemBluetooth = true) { on ->
+        guideBluetooth.start(main) { on ->
             observeGuideSession()
             guideEvent(GuideSteps.BluetoothChanged(on, System.currentTimeMillis()))
         }

@@ -13,7 +13,7 @@ class WatchReceiver : WearableListenerService() {
         val store = BatteryStore.get(this)
         try {
             forEachIsolated(events, onError = { _, error ->
-                Log.w("BatteryLab", "Watch event processing failed (${error.javaClass.simpleName})")
+                Log.w("BatteryLab", "Watch event processing failed", error)
             }) { event ->
                 // Each sample has its own path (/batterylab/watch/<time>); older watch builds use
                 // the single /batterylab/watch item.

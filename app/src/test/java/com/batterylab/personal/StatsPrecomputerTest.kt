@@ -9,7 +9,8 @@ class StatsPrecomputerTest {
     private val day = 24 * hour
     private val start = 1_700_000_000_000L
     private val now = start + 28 * day
-    private val gaps = GapLimits(2 * hour, 8 * hour)
+    // Stretch limit set below the 8-hour default so the test fails if the precompute ignores the gap limits.
+    private val gaps = GapLimits(2 * hour, 4 * hour)
     private fun <T> ok(value: T) = SectionResult.Ok(value)
     private fun <T> SectionResult<T>.value(): T {
         assertTrue("Expected Ok, got $this", this is SectionResult.Ok)
@@ -29,7 +30,7 @@ class StatsPrecomputerTest {
             val drain = listOf(96, 76, 74, 72, 70, 68, 66).mapIndexed { i, pct ->
                 Reading("phone", base + 2 * hour + i * 3 * hour / 2, pct, false, "android", 290, 3800, pct * 50_000,
                     ReadingDetail(displayState = 1, transport = "wifi", cycleCount = cycle + 1))
-            }.filterIndexed { i, _ -> cycle != 4 || i != 4 }
+            }.filterIndexed { i, _ -> (cycle != 4 || i != 4) && (cycle != 6 || i !in 3..4) } // cycle 6: a 4.5-hour gap, over the stretch limit
             charging + drain
         }
         val watch = phone.map { it.copy(device = "watch:sample", source = "samsung_widget", remainingUah = null) }
@@ -89,6 +90,8 @@ class StatsPrecomputerTest {
         assertEquals(IdleAnalysis.report(idle), nights.report)
         assertEquals(idle.minByOrNull { it.rate }, nights.best)
         assertEquals(idle.maxByOrNull { it.rate }, nights.worst)
+        val unsplit = data.map { BatteryMath.dischargeStretches(it.map(BatteryPoint::of), gaps = GapLimits(gaps.stepMs)) }
+        assertNotEquals("The 4.5-hour gap should end a phone stretch early", unsplit[0], stretches[0])
         val plan = r.planner.value()
         assertEquals(listOf("Phone", "Watch"), plan.inputs.map { it.name })
         plan.inputs.forEachIndexed { i, input ->

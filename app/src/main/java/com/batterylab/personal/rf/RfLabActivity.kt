@@ -100,6 +100,10 @@ class RfLabActivity : StyledActivity() {
     /** Between onStart and onStop. A replay prepared in the background starts only while visible. */
     private var visible = false
     private var showAllSessions = false
+    @Volatile private var sessionsGeneration = 0
+    /** The last saved-session list read in the background, and whether it was the "show all" list. */
+    private var lastSessions: Pair<SavedSessions.Snapshot, Boolean>? = null
+    private val TAG = "BatteryLabRf"
     /** "Everything nearby": store names this session (on by default, Jeff's decision of Nov 19). */
     private var storeNames = NearbyDefaults.STORE_NAMES
     private var strongestFirst = true
@@ -197,6 +201,7 @@ class RfLabActivity : StyledActivity() {
     }
 
     override fun onDestroy() {
+        ++sessionsGeneration
         guideDialog?.dismiss()
         guideDialog = null
         super.onDestroy()
@@ -502,6 +507,7 @@ class RfLabActivity : StyledActivity() {
     }
 
     private fun render(scrollToTop: Boolean = false) {
+        ++sessionsGeneration
         val oldScroll = if (scrollToTop) 0 else scroll.scrollY
         body.removeAllViews()
         liveBox = null
@@ -514,7 +520,7 @@ class RfLabActivity : StyledActivity() {
                 "Sessions stay on this phone in their own files; the battery history and backups do not change.")
             if (rf.running) renderLive() else renderSetup()
             renderResult()
-            renderSessions()
+            renderSessions(oldScroll)
         }
         if (guide.active) body.addView(guideLink(if (showAllRfLab) "Show only the guide" else "Show all of RF Lab") {
             showAllRfLab = !showAllRfLab
@@ -940,28 +946,66 @@ class RfLabActivity : StyledActivity() {
 
     // Saved sessions, export and import (R15, R16)
 
-    private fun renderSessions() {
-        val store = rf.store
-        val ids = store.ids().reversed()
-        section("Saved sessions", if (ids.isEmpty()) "None yet" else "${ids.size} on this phone",
+    private fun renderSessions(oldScroll: Int) {
+        val generation = sessionsGeneration
+        val showAll = showAllSessions
+        val position = body.childCount
+        // Show the last list right away so a tap elsewhere on the screen doesn't make the card blink;
+        // the fresh list replaces it when the background read finishes.
+        val shown = lastSessions?.takeIf { it.second == showAll }?.let { showSessions(it.first, showAll) }
+        Background.io.execute {
+            if (isDestroyed || isFinishing || generation != sessionsGeneration) return@execute
+            val snapshot = try { SavedSessions.load(rf.store, showAll) } catch (e: Exception) {
+                android.util.Log.w(TAG, "Saved session load failed", e); null
+            }
+            Background.onMain {
+                if (isDestroyed || isFinishing || generation != sessionsGeneration) return@onMain
+                if (snapshot != null) lastSessions = snapshot to showAll
+                val at = shown?.let { body.indexOfChild(it) }?.takeIf { it >= 0 } ?: position
+                shown?.let { body.removeView(it) }
+                val card = if (snapshot == null) section("Saved sessions", "Couldn't read the stored history. Try again in a moment.")
+                    else showSessions(snapshot, showAll)
+                // section() appends to body; keep the card ahead of the guide link, as before.
+                body.removeView(card)
+                body.addView(card, at.coerceAtMost(body.childCount))
+                scroll.post {
+                    if (!isDestroyed && !isFinishing && generation == sessionsGeneration) scroll.scrollTo(0, oldScroll)
+                }
+            }
+        }
+    }
+
+    private fun showSessions(snapshot: SavedSessions.Snapshot, showAll: Boolean): LinearLayout =
+        section("Saved sessions", if (snapshot.count == 0) "None yet" else "${snapshot.count} on this phone",
             "Up to ${com.batterylab.rf.SessionStore.MAX_SESSIONS} sessions or 200 MB; the oldest go first.").apply {
-            for (id in if (showAllSessions) ids else ids.take(20)) {
-                val props = try { Props.parse(File(store.dir(id), FileNames.PROPERTIES).readText()) } catch (_: Exception) { null }
-                val start = props?.get(Keys.START_WALL_MS)?.toLongOrNull()
-                val len = props?.let { p ->
-                    val s = p[Keys.START_BOOT_NS]?.toLongOrNull(); val e = p[Keys.END_BOOT_NS]?.toLongOrNull()
-                    if (s != null && e != null) "${(e - s) / 1_000_000_000L} s" else null
-                } ?: props?.get(Keys.STATE) ?: "unreadable"
-                val prov = props?.get(Keys.PROVENANCE) ?: "?"
-                val scope = Scope.parse(props?.get(Keys.SCOPE))?.label ?: "?"
-                val imported = if (props?.get(Keys.IMPORTED) == "true") " · IMPORTED" else ""
-                addView(makeButton("${start?.let { date(it) } ?: id} · $prov · $scope · $len$imported · ${kb(store.sizeOf(id))}") {
-                    sessionMenu(id)
+            for (row in snapshot.rows) {
+                addView(makeButton("${row.startMs?.let { date(it) } ?: row.id} · ${row.provenance} · ${row.scope} · ${row.length}${row.imported} · ${kb(row.bytes)}") {
+                    sessionMenu(row.id)
                 }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
             }
-            if (ids.size > 20 && !showAllSessions) button("Show ${ids.size - 20} older sessions") { showAllSessions = true; render() }
+            if (snapshot.count > 20 && !showAll) button("Show ${snapshot.count - 20} older sessions") { showAllSessions = true; render() }
             button("Import a session (.zip)") { pickImport() }
-            if (ids.isNotEmpty()) button("Delete all sessions") { confirmDeleteAll() }
+            if (snapshot.count > 0) button("Delete all sessions") { confirmDeleteAll() }
+        }
+
+    private fun deleteSession(id: String) {
+        Background.io.execute {
+            val deleted = try { rf.store.delete(id, rf.activeId) } catch (e: Exception) {
+                android.util.Log.w(TAG, "Session delete failed", e); null
+            }
+            Background.onMain {
+                if (isDestroyed || isFinishing) return@onMain
+                when (deleted) {
+                    true -> {
+                        lastSessions = null
+                        if (resultId == id) resultId = null
+                        refreshGuideHistory()
+                        render()
+                    }
+                    false -> toast("A running session cannot be deleted")
+                    null -> toast("Couldn't delete the session. Try again in a moment.")
+                }
+            }
         }
     }
 
@@ -971,14 +1015,7 @@ class RfLabActivity : StyledActivity() {
                 0 -> { resultId = id; result = null; render() }
                 1 -> startReplay(id)
                 2 -> chooseExport(id)
-                3 -> {
-                    if (rf.store.delete(id, rf.activeId)) {
-                        if (resultId == id) resultId = null
-                        refreshGuideHistory()
-                        render()
-                    }
-                    else toast("A running session cannot be deleted")
-                }
+                3 -> deleteSession(id)
             }
         }.show()
     }
@@ -988,10 +1025,20 @@ class RfLabActivity : StyledActivity() {
             .setMessage("This removes every saved session and every pinned device on this phone, and device numbers " +
                 "start fresh. Your battery history is not touched.")
             .setPositiveButton("Delete all") { _, _ ->
-                rf.store.deleteAll(rf.activeId)
-                resultId = null
-                refreshGuideHistory()
-                render()
+                Background.io.execute {
+                    val deleted = try { rf.store.deleteAll(rf.activeId); true } catch (e: Exception) {
+                        android.util.Log.w(TAG, "Delete all sessions failed", e); false
+                    }
+                    Background.onMain {
+                        if (isDestroyed || isFinishing) return@onMain
+                        if (deleted) {
+                            lastSessions = null
+                            resultId = null
+                            refreshGuideHistory()
+                            render()
+                        } else toast("Couldn't delete the sessions. Try again in a moment.")
+                    }
+                }
             }
             .setNegativeButton("Cancel", null).show()
     }

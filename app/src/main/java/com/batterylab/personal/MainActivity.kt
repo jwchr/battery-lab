@@ -66,6 +66,8 @@ class MainActivity : StyledActivity() {
     private var reader: RingReader? = null
     private var labOpen = false
     private val HISTORY_WEEKS = 26
+    private val TAG = "BatteryLabMain"
+    @Volatile private var renderGeneration = 0
     private val REQUEST_BLUETOOTH = 108
     private val EXPORT_CSV = 109
     private val BIND_WIDGET = 110
@@ -130,49 +132,117 @@ class MainActivity : StyledActivity() {
         val now = android.os.SystemClock.elapsedRealtime()
         renderMarks += name to (now - renderMarkAt); renderMarkAt = now
     }
-    private fun logRender() {
-        android.util.Log.i("BatteryLabMain", "Render (main): total ${renderMarks.sumOf { it.second }} ms · " +
+    private fun logRender(loadMs: Long) {
+        android.util.Log.i("BatteryLabMain", "Render: load $loadMs ms (background), views ${renderMarks.sumOf { it.second }} ms (main) · " +
             renderMarks.joinToString { "${it.first} ${it.second}" })
     }
 
+    private data class Loaded(
+        val devices: List<Pair<String, String>>, val ringAddress: String?,
+        val boards: List<HomeHistory.Board>, val series: List<List<Reading>>, val units: Double?,
+        val life: List<HomeHistory.Life>, val event: String?, val active: Experiment?,
+        val results: List<ExperimentResult>, val interval: Int, val ringEnabled: Boolean,
+        val widgetConnected: Boolean,
+        val backupOn: Boolean, val singleFile: Boolean, val lastBackupMs: Long?,
+        val androidEstimate: AndroidEstimate?, val widget: WidgetSnapshot?, val phone: Reading?,
+        val slotLabels: Map<WidgetSlot, String?>
+    )
+
+    private fun load(widget: WidgetSnapshot?, includeLab: Boolean): Loaded {
+        val now = System.currentTimeMillis()
+        val ringAddress = PollScheduler.ringAddress(this)
+        val ringId = PollScheduler.ringDeviceId(this)
+        val watchId = store.primaryWatchId()
+        val devices = listOf("phone" to "Phone", (watchId ?: "watch:unknown") to "Galaxy Watch8", ringId to "Galaxy Ring")
+        val gaps = PollScheduler.gapLimits(this)
+        val interval = PollScheduler.intervalMinutes(this)
+        val missing = SamsungWidgetSource.missingDevices(this)
+        val boards = devices.map { (id, _) ->
+            val history = store.recent(id, 1000)
+            val last = DeviceCard.shown(history)
+            val other = when {
+                last == null -> null
+                id == "phone" -> store.latest(SamsungWidgetSource.PHONE_WIDGET_DEVICE)
+                id == SamsungWidgetSource.WATCH_DEVICE -> store.companionWatchReadings(last.timeMs - 30 * 60_000L).maxByOrNull { it.timeMs }
+                else -> BatteryStats.fullHoldAsCharging(history).lastOrNull { it.source != last.source }
+            }
+            val staleAfter = if (id == "phone") maxOf(6 * 3_600_000L, gaps.stepMs)
+                else maxOf(45 * 60_000L, 3L * interval * 60_000L)
+            HomeHistory.board(history, other, now, staleAfter, id in missing, gaps)
+        }
+        val series = devices.map { (id, _) -> store.since(id, now - 48 * 3_600_000L) }
+        val units = HonestyAuditor.currentUnitsPerMa(store.since("phone", now - 7 * 86_400_000L), gaps)
+        val life = devices.map { (id, _) -> HomeHistory.life(store.since(id, now - HISTORY_WEEKS * 7 * 86_400_000L),
+            gaps, weekStart(now), ::weekStart) }
+        val runs = if (includeLab) store.experiments(40).filter { it.device == ringId } else emptyList()
+        val results = HomeHistory.experiments(runs, if (runs.isEmpty()) emptyList() else store.since(ringId, runs.minOf { it.startMs }))
+        return Loaded(devices, ringAddress, boards, series, units, life,
+            if (includeLab) store.lastProbeEvent(ringId) else null, if (includeLab) store.activeExperiment() else null,
+            results, interval, PollScheduler.ringEnabled(this), SamsungWidgetSource.widgetId(this) != null,
+            DriveBackup.isOn(this), DriveBackup.treeUri(this) == null && DriveBackup.uri(this) != null, DriveBackup.lastBackupMs(this),
+            if (boards[0].fresh) AndroidEstimates.read(this) else null, widget,
+            if (includeLab && widget != null && widget.slots.isNotEmpty()) PhoneBattery.read(this, "app") else null,
+            widget?.slots?.associateWith { SamsungWidgetSource.labelFor(this, it.fingerprint) } ?: emptyMap())
+    }
+
     private fun render() {
+        val generation = ++renderGeneration
+        val widget = widgetSnapshot
+        val includeLab = labOpen
+        if (body.childCount == 0) body.addView(label("Loading your history…", 13f, Palette.quiet)
+            .apply { setPadding(dp(6), dp(4), dp(6), 0) })
+        Background.io.execute {
+            if (isDestroyed || isFinishing || generation != renderGeneration) return@execute
+            val started = android.os.SystemClock.elapsedRealtime()
+            val loaded = try { load(widget, includeLab) } catch (e: Exception) {
+                android.util.Log.w(TAG, "Home load failed", e); null
+            }
+            val loadMs = android.os.SystemClock.elapsedRealtime() - started
+            Background.onMain {
+                if (isDestroyed || isFinishing || generation != renderGeneration) return@onMain
+                if (loaded == null) {
+                    body.removeAllViews()
+                    body.addView(label("Couldn't read the stored history. Try again in a moment.", 13f, Palette.quiet))
+                    return@onMain
+                }
+                show(loaded, loadMs)
+            }
+        }
+    }
+
+    private fun show(l: Loaded, loadMs: Long) {
         renderMarks.clear(); renderMarkAt = android.os.SystemClock.elapsedRealtime()
         val oldScroll = scroll.scrollY
         body.removeAllViews()
         val exempt = (getSystemService(POWER_SERVICE) as PowerManager).isIgnoringBatteryOptimizations(packageName)
         renderHeader(exempt)
-
-        val ringAddress = PollScheduler.ringAddress(this)
-        val ringId = PollScheduler.ringDeviceId(this)
-        val watchId = store.primaryWatchId()
-        val devices = listOf("phone" to "Phone", (watchId ?: "watch:unknown") to "Galaxy Watch8",
-            ringId to "Galaxy Ring")
+        val ringAddress = l.ringAddress
+        val devices = l.devices
         if (!exempt) section("Heads up", "Background checks may pause for hours",
             "Android limits apps it thinks you don't use. Set Battery Lab's battery usage to Unrestricted " +
-                "(App info → Battery → Unrestricted) so it keeps checking every ${PollScheduler.intervalLabel(PollScheduler.intervalMinutes(this))}.", fill = Palette.amberSoft).apply {
+                "(App info → Battery → Unrestricted) so it keeps checking every ${PollScheduler.intervalLabel(l.interval)}.", fill = Palette.amberSoft).apply {
             button("Open Battery Lab app info", primary = true) {
                 startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null)))
             }
         }
-        if (SamsungWidgetSource.widgetId(this) == null) section("Get started", "Follow your Ring and Watch",
+        if (!l.widgetConnected) section("Get started", "Follow your Ring and Watch",
             "Battery Lab reads the numbers Samsung's Battery widget already shows. No Bluetooth, no extra wakeups.").apply {
             button("Connect Samsung's Battery widget", primary = true) { connectWidget() }
         }
 
         val colors = listOf(Palette.phone, Palette.watch, Palette.ring)
-        section("Right now", "How your batteries are doing.", tagView = intervalPill(exempt)).apply {
-            devices.forEachIndexed { i, (id, _) ->
+        section("Right now", "How your batteries are doing.", tagView = intervalPill(exempt, l.interval)).apply {
+            devices.forEachIndexed { i, _ ->
                 if (i > 0) addView(hairline(), LinearLayout.LayoutParams(-1, dp(1)).apply { topMargin = dp(12); bottomMargin = dp(4) })
-                addView(deviceBoard(id, devices[i].second, colors[i]))
+                addView(deviceBoard(devices[i].second, colors[i], l.boards[i], if (i == 0) l.androidEstimate else null))
             }
         }
 
         mark("header+right now")
         section("Last 48 hours", "How the last two days went.").apply {
             addView(chipRow(chip("Phone", colors[0]), chip("Watch", colors[1]), chip("Ring", colors[2])))
-            val series = devices.map { (id, _) -> store.since(id, System.currentTimeMillis() - 48 * 3_600_000L) }
-            val units = HonestyAuditor.currentUnitsPerMa(store.since("phone", System.currentTimeMillis() - 7 * 86_400_000L),
-                PollScheduler.gapLimits(this@MainActivity))
+            val series = l.series
+            val units = l.units
             val graph = BatteryGraph(this@MainActivity, series, colors, devices.map { it.second }, units)
             val readout = label("Drag across the graph to see each reading.", 11.5f, Palette.quiet)
             graph.onScrub = { text -> readout.text = text; readout.setTextColor(ink) }
@@ -203,14 +273,14 @@ class MainActivity : StyledActivity() {
         }
 
         mark("48h graph")
-        renderBatteryLifeSection(devices, colors)
+        renderBatteryLifeSection(devices, colors, l.life)
         mark("battery life")
 
-        val backupOn = DriveBackup.isOn(this)
-        val singleFile = DriveBackup.treeUri(this) == null && DriveBackup.uri(this) != null
+        val backupOn = l.backupOn
+        val singleFile = l.singleFile
         fun pickFolder() = startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), PICK_BACKUP)
         section("Backup", if (backupOn) "Backing up to your Drive." else "Keep a copy in Google Drive.",
-            if (backupOn) (DriveBackup.lastBackupMs(this)?.let {
+            if (backupOn) (l.lastBackupMs?.let {
                 "Last saved ${BatteryStore.format(it)}. Updated about twice a day with your full history (zipped CSV)."
             } ?: "Waiting for the first save.") + (if (singleFile) " Each save replaces the one file; a folder keeps " +
                 "the last ${DriveBackup.KEEP} copies, so a failed save can't erase the good one." else
@@ -249,14 +319,14 @@ class MainActivity : StyledActivity() {
             addView(label("The widget connection, Ring Bluetooth, the A/B test and CSV export.", 13f))
             button(if (labOpen) "Hide lab tools" else "Show lab tools") { labOpen = !labOpen; render() }
         }
-        if (!labOpen) { mark("rest"); logRender(); scroll.post { scroll.scrollTo(0, oldScroll) }; return }
+        if (!labOpen) { mark("rest"); logRender(loadMs); scroll.post { if (!isDestroyed && !isFinishing) scroll.scrollTo(0, oldScroll) }; return }
 
-        renderWidgetSection()
+        renderWidgetSection(l)
 
         section("Ring Bluetooth", "Direct Ring reading", "Optional fallback when the widget is unavailable. " +
             "Each request wakes the Ring, so it is off by default.").apply {
             addView(label("Selected: ${ringAddress ?: "None"}", 13f, quiet))
-            addView(label("Periodic Ring sampling: ${if (PollScheduler.ringEnabled(this@MainActivity)) "ON" else "OFF"}. " +
+            addView(label("Periodic Ring sampling: ${if (l.ringEnabled) "ON" else "OFF"}. " +
                 "The default is OFF to avoid influencing your battery tests.", 13f, quiet))
             button("Choose paired Ring") { chooseRing() }
             button("Read Ring battery now") {
@@ -267,7 +337,7 @@ class MainActivity : StyledActivity() {
                 readRing { }
             }
             button("Enter Ring % manually") { manualReading() }
-            button(if (PollScheduler.ringEnabled(this@MainActivity)) "Stop Ring monitoring" else "Enable Ring monitoring (15 min)") {
+            button(if (l.ringEnabled) "Stop Ring monitoring" else "Enable Ring monitoring (15 min)") {
                 if (ringAddress == null) { toast("Choose your Ring first"); return@button }
                 if (!ExperimentEndpoint.monitoringSwitchAllowed(store.activeExperiment()?.mode)) {
                     toast("Finish the current test before changing Ring monitoring")
@@ -277,13 +347,13 @@ class MainActivity : StyledActivity() {
                     !PollScheduler.ringEnabled(this@MainActivity))
                 render()
             }
-            val event = store.lastProbeEvent(ringId)
+            val event = l.event
             if (event != null) addView(label("Last BLE diagnostic: $event", 12f, quiet))
         }
 
         section("Experiment", "What costs the Ring battery?", "Run each arm for similar durations, ideally starting " +
             "near the same charge, and alternate the order. Only Ring monitoring polls Bluetooth; the others keep it off.").apply {
-            val active = store.activeExperiment()
+            val active = l.active
             if (active != null) {
                 addView(label("ACTIVE: ${modeName(active.mode).uppercase(Locale.US)} · " +
                     "started ${BatteryStore.format(active.startMs)} at ${active.startPct}%", 14f, ink, true))
@@ -297,12 +367,8 @@ class MainActivity : StyledActivity() {
                 button("Start Ring alone · watch off your wrist") { startTest("ring_alone") }
                 button("Start Ring + Watch · both worn") { startTest("ring_with_watch") }
             }
-            val runs = store.experiments(40).filter { it.device == ringId }
-            if (runs.isEmpty()) addView(label("No completed tests yet", 13f, quiet))
-            val ringReadings = if (runs.isEmpty()) emptyList() else store.since(ringId, runs.minOf { it.startMs })
-            val results = runs.map { e ->
-                ExperimentStats.result(e, ringReadings.filter { it.timeMs >= e.startMs && it.timeMs <= (e.endMs ?: Long.MAX_VALUE) })
-            }
+            val results = l.results
+            if (results.isEmpty()) addView(label("No completed tests yet", 13f, quiet))
             for (r in results.take(8)) {
                 val e = r.experiment
                 addView(label("${modeName(e.mode)} · ${BatteryStore.format(e.startMs)} · " +
@@ -360,7 +426,7 @@ class MainActivity : StyledActivity() {
             addView(label("For Watch8 data, install the included Wear OS companion and open it once. " +
                 "The optional watch app checks about every 2 hours, as a cross-check on Samsung's widget.", 12f, quiet))
         }
-        mark("rest+lab tools"); logRender()
+        mark("rest+lab tools"); logRender(loadMs)
         scroll.post { scroll.scrollTo(0, oldScroll) }
     }
 
@@ -378,20 +444,15 @@ class MainActivity : StyledActivity() {
      * weekly full-charge runtime is the longevity signal; the phone also gets capacity from
      * Android's charge counter.
      */
-    private fun renderBatteryLifeSection(devices: List<Pair<String, String>>, colors: List<Int>) {
-        val from = System.currentTimeMillis() - HISTORY_WEEKS * 7 * 86_400_000L
+    private fun renderBatteryLifeSection(devices: List<Pair<String, String>>, colors: List<Int>, perDevice: List<HomeHistory.Life>) {
         val day = java.text.SimpleDateFormat("EEE h:mm a", Locale.getDefault())
         val weekFmt = java.text.SimpleDateFormat("MMM d", Locale.getDefault())
-        val perDevice = devices.map { (id, _) ->
-            val readings = BatteryStats.fullHoldAsCharging(store.since(id, from))
-            readings to BatteryMath.dischargeStretches(readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = PollScheduler.gapLimits(this))
-        }
         // One scale for every bar so devices compare at a glance.
-        val maxHours = perDevice.flatMap { (_, s) -> s.takeLast(4).map { it.fullChargeHours } }.maxOrNull() ?: 1.0
+        val maxHours = perDevice.flatMap { it.stretches.takeLast(4).map { it.fullChargeHours } }.maxOrNull() ?: 1.0
         section("Battery life", "How long a charge lasts.", "Each bar is one stretch between charges, " +
             "projected to a full 100% → 0% at the rate it actually drained.").apply {
             devices.forEachIndexed { i, (id, name) ->
-                val (readings, stretches) = perDevice[i]
+                val stretches = perDevice[i].stretches
                 addView(deviceBanner(name, colors[i]))
                 if (stretches.isEmpty()) {
                     addView(label("Not enough yet: needs an hour of use between charges.", 12.5f, Palette.quiet))
@@ -401,7 +462,7 @@ class MainActivity : StyledActivity() {
                     day.format(s.startMs).uppercase(Locale.getDefault()), s.fullChargeHours / maxHours,
                     "${s.fullChargeHours.roundToInt()} h", colors[i],
                     "${s.fromPct}% → ${s.toPct}% over ${f1(s.hours)} h"))
-                val weeks = BatteryMath.weeklyRuntime(stretches, ::weekStart).takeLast(6)
+                val weeks = perDevice[i].weeks
                 if (weeks.size > 1) {
                     addView(eyebrow("By week").apply { setPadding(0, dp(10), 0, dp(2)) })
                     val top = weeks.maxOf { it.fullChargeHours }
@@ -409,8 +470,7 @@ class MainActivity : StyledActivity() {
                         w.fullChargeHours / top, "${w.fullChargeHours.roundToInt()} h", colors[i]))
                 }
                 if (id == "phone") {
-                    val mah = BatteryMath.median(readings.filter { it.timeMs >= weekStart(System.currentTimeMillis()) }
-                        .mapNotNull { BatteryMath.impliedCapacityMah(it.percent, it.remainingUah, it.charging) })
+                    val mah = perDevice[i].capacityMah
                     if (mah != null) addView(label("Battery capacity this week: about ${String.format(Locale.getDefault(), "%,d", mah.roundToInt())} mAh " +
                         "· estimated from Android's charge counter", 12f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
                 }
@@ -451,8 +511,7 @@ class MainActivity : StyledActivity() {
     }
 
     /** "● Every 15 min ▾" pill for the Right now card; tapping it picks how often to check. */
-    private fun intervalPill(exempt: Boolean): View = TextView(this).apply {
-        val minutes = PollScheduler.intervalMinutes(this@MainActivity)
+    private fun intervalPill(exempt: Boolean, minutes: Int): View = TextView(this).apply {
         val words = if (exempt) "Every ${PollScheduler.intervalLabel(minutes)}" else "Checks limited"
         val s = android.text.SpannableString("●  $words  ▾")
         s.setSpan(android.text.style.ForegroundColorSpan(if (exempt) Palette.green else Palette.amber), 0, 1, 0)
@@ -485,41 +544,19 @@ class MainActivity : StyledActivity() {
     }
 
     /** One device: color gauge, name with a status pill, hours left on the right, a quiet meta line. */
-    private fun deviceBoard(id: String, name: String, color: Int): View {
-        val history = store.recent(id, 1000)
-        val recent = BatteryStats.fullHoldAsCharging(history)
-        // The card shows the newest reading as read; charging inferred for a full hold is for the
-        // analysis only, so a wearable parked at 100% still shows "Full".
-        val last = DeviceCard.shown(history)
-        val now = System.currentTimeMillis()
-        // The phone's own job can sleep for hours in Doze, so it gets a long allowance. A wearable
-        // that misses three checks in a row, or drops out of Samsung's widget, is treated as offline:
-        // its last number is history, not a live reading.
-        val staleAfter = if (id == "phone") maxOf(6 * 3_600_000L, PollScheduler.gapLimits(this).stepMs)
-            else maxOf(45 * 60_000L, 3L * PollScheduler.intervalMinutes(this) * 60_000L)
-        val dropped = last?.source == SamsungWidgetSource.SOURCE && id in SamsungWidgetSource.missingDevices(this)
-        val fresh = last != null && !dropped && now - last.timeMs <= staleAfter
-        val points = recent.map { BatteryPoint(it.timeMs, it.percent, it.charging) }
-        val projection = if (fresh) BatteryMath.estimate(points, PollScheduler.gapLimits(this)) else null
-        // While the current stretch is too short to time, fall back on this device's past drain.
-        val historyRate = if (fresh && projection == null && last?.charging != true) BatteryMath.historicalRate(
-            BatteryMath.dischargeStretches(points, gaps = PollScheduler.gapLimits(this)).filter { it.endMs < last!!.timeMs }) else null
+    private fun deviceBoard(name: String, color: Int, board: HomeHistory.Board, androidEstimate: AndroidEstimate?): View {
+        val recent = board.recent
+        val last = board.last
+        val fresh = board.fresh
+        val projection = board.projection
+        val historyRate = board.historyRate
         val time = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT)
         val seenAt = last?.let {
             android.text.format.DateUtils.formatDateTime(this, it.timeMs, android.text.format.DateUtils.FORMAT_SHOW_TIME or
                 if (android.text.format.DateUtils.isToday(it.timeMs)) 0
                 else android.text.format.DateUtils.FORMAT_SHOW_DATE or android.text.format.DateUtils.FORMAT_ABBREV_MONTH)
         }
-        // A second source's latest number, shown only when it was read near the same time and
-        // disagrees. The phone's comes from Samsung's widget; a wearable's from its other source.
-        val other = when {
-            last == null || !fresh -> null
-            id == "phone" -> store.latest(SamsungWidgetSource.PHONE_WIDGET_DEVICE)
-            // The watch app's readings live under their own id, not in the widget's history.
-            id == SamsungWidgetSource.WATCH_DEVICE ->
-                store.companionWatchReadings(last.timeMs - 30 * 60_000L).maxByOrNull { it.timeMs }
-            else -> recent.lastOrNull { it.source != last.source }
-        }?.takeIf { kotlin.math.abs(it.timeMs - last!!.timeMs) <= 30 * 60_000L && it.percent != last.percent }
+        val other = board.other
         val otherLabel = when (other?.source) {
             SamsungWidgetSource.SOURCE -> "Samsung widget"
             "ring_ble" -> "Ring over Bluetooth"
@@ -529,7 +566,6 @@ class MainActivity : StyledActivity() {
             else -> "Other source"
         }
         // Android's own estimates exist only for this phone; Samsung's widget offers none.
-        val androidEstimate = if (id == "phone" && fresh) AndroidEstimates.read(this) else null
         fun span(ms: Long) = BatteryMath.timeLeftLabel(ms / 3_600_000.0).let { (v, u) -> "$v ${u.removeSuffix(" left")}" }
         val androidLine = when {
             androidEstimate == null -> null
@@ -632,8 +668,8 @@ class MainActivity : StyledActivity() {
         timeInMillis
     }
 
-    private fun renderWidgetSection() {
-        val connected = SamsungWidgetSource.widgetId(this) != null
+    private fun renderWidgetSection(l: Loaded) {
+        val connected = l.widgetConnected
         // The Unrestricted warning lives at the top of the page (see render): without the exemption,
         // Adaptive Battery demoted the app to RARE in the soak test and the job stopped for hours.
         section("Widget source", "Samsung Battery widget", "Reads the percentages Samsung's widget already shows, " +
@@ -644,14 +680,14 @@ class MainActivity : StyledActivity() {
                 button("Connect Samsung Battery widget") { connectWidget() }
                 return@apply
             }
-            val snap = widgetSnapshot
+            val snap = l.widget
             if (snap == null || snap.slots.isEmpty()) {
                 addView(label("Connected, but no battery values were readable yet. Tap Read now in a few seconds.", 13f, quiet))
             } else {
-                val phone = PhoneBattery.read(this@MainActivity, "app")
+                val phone = l.phone
                 addView(label("Widget read ${BatteryStore.format(snap.timeMs)}. Tap a device to label it once.", 13f, quiet))
-                for (slot in snap.slots) addView(slotRow(slot, phone))
-                if (snap.slots.any { SamsungWidgetSource.labelFor(this@MainActivity, it.fingerprint) == null })
+                for (slot in snap.slots) addView(slotRow(slot, phone, l.slotLabels[slot]))
+                if (snap.slots.any { l.slotLabels[it] == null })
                     addView(label("Unlabeled devices are not recorded. Compare with your home-screen widget to label them.", 12f, quiet))
             }
             button("Read widget now") { refreshWidget(); render() }
@@ -663,8 +699,8 @@ class MainActivity : StyledActivity() {
         }
     }
 
-    private fun slotRow(slot: WidgetSlot, phone: Reading?): View {
-        val labelName = when (SamsungWidgetSource.labelFor(this, slot.fingerprint)) {
+    private fun slotRow(slot: WidgetSlot, phone: Reading?, slotLabel: String?): View {
+        val labelName = when (slotLabel) {
             SamsungWidgetSource.LABEL_RING -> "Galaxy Ring"
             SamsungWidgetSource.LABEL_WATCH -> "Galaxy Watch"
             SamsungWidgetSource.LABEL_PHONE -> "This phone (kept for comparison)"
@@ -1026,6 +1062,7 @@ class MainActivity : StyledActivity() {
     }
 
     override fun onDestroy() {
+        ++renderGeneration
         reader?.cancel()
         if (::store.isInitialized) store.close()
         super.onDestroy()

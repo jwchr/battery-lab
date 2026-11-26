@@ -16,7 +16,7 @@ This app's SSOT rows: W098, W099.
 ## Build and test (Linux cloud)
 - Modules: `app` (phone), `rf` (RF Lab core, plain Kotlin, no Android), `wear` (Watch), `widgetprobe` (widget test tool). compileSdk 37.2 and targetSdk 37 (Android 17), AGP 9.5.2, Kotlin 2.4.21, Java 17 target, Gradle 9.9.2 in CI (no wrapper).
 - SDK setup (cloud environment "battery-lab" allows dl.google.com): install the command-line tools into `$HOME/android-sdk`, then `sdkmanager "platforms;android-37.2" "build-tools;37.0.0" "platform-tools"`.
-- Quiet check: `gradle --no-daemon -q :rf:test :app:assembleDebug :app:testDebugUnitTest :wear:testDebugUnitTest :wear:assembleDebug :widgetprobe:assembleDebug`. If Maven Central reports a missing dependency, rerun with `--refresh-dependencies`.
+- Quiet check: `gradle --no-daemon -q --continue :rf:test :app:assembleDebug :app:testDebugUnitTest :wear:testDebugUnitTest :app:lintDebug :wear:lintDebug :wear:assembleDebug :widgetprobe:assembleDebug`. Lint was added Nov 25, 2026 (#64; reason: it catches mechanical bugs such as a receiver missing its export flag before reviewers spend time on them). Problems that existed then are in each module's `lint-baseline.xml`, so only new lint errors fail the check. Never run `updateLintBaselineDebug` to make a new failure go away (reason: Neon review of #73, Nov 26, 2026: that would hide real bugs); run it only after fixing an old problem, and check that its git diff only removes entries. If Maven Central reports a missing dependency, rerun with `--refresh-dependencies`.
 - `.github/workflows/build-apks.yml` builds the phone and Watch APKs, manual run only. It costs GitHub Actions minutes, so run it only when Jeff needs APKs.
 
 ## Needs Jeff's devices

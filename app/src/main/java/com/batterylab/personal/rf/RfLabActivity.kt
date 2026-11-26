@@ -1008,6 +1008,8 @@ class RfLabActivity : StyledActivity() {
             } finally { RfRuntime.deletesInFlight.decrementAndGet() }
             Background.onMain {
                 if (isDestroyed || isFinishing) return@onMain
+                // A list read queued before the tap may have refilled the cache meanwhile.
+                lastSessions = null
                 when (deleted) {
                     true -> {
                         if (resultId == id) resultId = null
@@ -1047,6 +1049,7 @@ class RfLabActivity : StyledActivity() {
                     } finally { RfRuntime.deletesInFlight.decrementAndGet() }
                     Background.onMain {
                         if (isDestroyed || isFinishing) return@onMain
+                        lastSessions = null
                         if (deleted) resultId = null
                         else toast("Couldn't delete every session. Try again in a moment.")
                         // Even after a partial failure, show what is left on the phone.

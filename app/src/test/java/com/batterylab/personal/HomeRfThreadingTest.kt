@@ -103,6 +103,12 @@ class HomeRfThreadingTest {
         assertTrue(rf().substringAfter("IMPORT_ZIP").contains("lastSessions = null"))
         // Both places that notice a session ended.
         assertEquals(2, Regex("resultId = rf.lastEndedId; result = null; lastSessions = null").findAll(rf()).count())
+        // A delete clears it at the tap and again when it finishes, since a list read queued
+        // before the tap can refill it while the delete runs.
+        for (name in listOf("deleteSession", "confirmDeleteAll")) {
+            val onMain = method(rf(), name).substringAfter("Background.onMain")
+            assertTrue(name, onMain.substringBefore("render()").contains("lastSessions = null"))
+        }
     }
 
     @Test fun homeScrollRestoreChecksTheScreenAndGeneration() {

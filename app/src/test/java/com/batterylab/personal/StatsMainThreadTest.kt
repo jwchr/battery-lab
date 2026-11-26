@@ -49,8 +49,14 @@ class StatsMainThreadTest {
 
     @Test fun clockAndLabelLookupsStayInLoad() {
         val outside = outsideLoad(source())
-        assertTrue(!outside.contains("System.currentTimeMillis()"))
+        // The one allowed clock read outside load(): the journal Save tap, so the entry keeps the tap time.
+        assertEquals(listOf("val tappedAtMs = System.currentTimeMillis()"),
+            outside.lines().filter { it.contains("System.currentTimeMillis()") }.map { it.trim().substringBefore(" //") })
         assertTrue(!outside.contains("UsageSource.label("))
         assertTrue(!outside.contains("UsageSource.hiddenCount("))
+    }
+
+    @Test fun journalSaveUsesTheTapTime() {
+        assertTrue(source().contains("db.addJournal(device, category, title, timeMs = tappedAtMs)"))
     }
 }

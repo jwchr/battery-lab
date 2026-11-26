@@ -876,7 +876,8 @@ class StatsActivity : StyledActivity() {
                 dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                     val device = when (category) { "ring_firmware" -> BatteryStore.RING_ID; "watch_face" -> "watch"; else -> "phone" }
                     val title = input.text.toString().ifBlank { name }
-                    writeJournal(dialog, "save") { db -> db.addJournal(device, category, title) }
+                    val tappedAtMs = System.currentTimeMillis() // the entry's time is the tap, not when the queued write runs
+                    writeJournal(dialog, "save") { db -> db.addJournal(device, category, title, timeMs = tappedAtMs) }
                 }
             }.show()
     }

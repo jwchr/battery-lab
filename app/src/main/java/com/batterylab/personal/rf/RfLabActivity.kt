@@ -83,7 +83,6 @@ class RfLabActivity : StyledActivity() {
     private var pendingExportId: String? = null
     private var wasRunning = false
     private var stopRequested = false
-    private var markNearOnStart = false
     private lateinit var guidePrefs: android.content.SharedPreferences
     private var guide = GuideSteps.State()
     private var showAllRfLab = false
@@ -121,6 +120,7 @@ class RfLabActivity : StyledActivity() {
     private val EXPORT_ZIP = 201
     private val IMPORT_ZIP = 202
     private val RF_PERMISSIONS = 203
+    private val RF_PERMISSIONS_NEAR = 204
     private val durations = listOf(90 to "90 s", 180 to "3 min", 300 to "5 min", 600 to "10 min")
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -138,7 +138,6 @@ class RfLabActivity : StyledActivity() {
         storeNames = savedInstanceState?.getBoolean("storeNames", storeNames) ?: storeNames
         pendingExportId = savedInstanceState?.getString("exportId")
         pendingExportNames = savedInstanceState?.getBoolean("exportNames", false) ?: false
-        markNearOnStart = savedInstanceState?.getBoolean("markNearOnStart", false) ?: false
         showAllRfLab = savedInstanceState?.getBoolean("showAllRfLab", false) ?: false
         resultId = savedInstanceState?.getString("resultId") ?: rf.lastEndedId
         setUpPage()
@@ -164,7 +163,6 @@ class RfLabActivity : StyledActivity() {
         outState.putString("scope", scope.id)
         outState.putBoolean("storeNames", storeNames)
         outState.putBoolean("exportNames", pendingExportNames)
-        outState.putBoolean("markNearOnStart", markNearOnStart)
         pendingExportId?.let { outState.putString("exportId", it) }
         resultId?.let { outState.putString("resultId", it) }
         outState.putInt("guideOrientation", createdOrientation)
@@ -605,7 +603,7 @@ class RfLabActivity : StyledActivity() {
      * together. The session starts whatever the answer; a stream without its permission says so.
      */
     private fun startLive(markNear: Boolean = false) {
-        markNearOnStart = markNear
+        val requestCode = if (markNear) RF_PERMISSIONS_NEAR else RF_PERMISSIONS
         val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
         if (scope == Scope.EVERYTHING_NEARBY && !prefs.getBoolean(NEARBY_OK, false)) {
             AlertDialog.Builder(this).setTitle("Everything nearby")
@@ -622,19 +620,22 @@ class RfLabActivity : StyledActivity() {
             SCAN_PERMISSIONS.any { !granted(it) }
         if (scanMissing) needed += SCAN_PERMISSIONS
         when {
-            needed.isEmpty() -> beginLive()
+            needed.isEmpty() -> beginLive(markNear)
             scanMissing -> AlertDialog.Builder(this).setTitle("Scanning")
                 .setMessage(SCAN_TEXT)
-                .setPositiveButton("Continue") { _, _ -> requestPermissions(needed.toTypedArray(), RF_PERMISSIONS) }
+                .setPositiveButton("Continue") { _, _ -> requestPermissions(needed.toTypedArray(), requestCode) }
                 .setNegativeButton("Cancel", null)
                 .show()
-            else -> requestPermissions(needed.toTypedArray(), RF_PERMISSIONS)
+            else -> requestPermissions(needed.toTypedArray(), requestCode)
         }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == RF_PERMISSIONS && !rf.running) beginLive()
+        if (!rf.running) when (requestCode) {
+            RF_PERMISSIONS -> beginLive(false)
+            RF_PERMISSIONS_NEAR -> beginLive(true)
+        }
     }
 
     /** True (with a note) while a delete is still running; a session started now could be removed by it. */
@@ -642,10 +643,8 @@ class RfLabActivity : StyledActivity() {
         if (it) toast("Still deleting sessions. Try again in a moment.")
     }
 
-    private fun beginLive() {
+    private fun beginLive(markNear: Boolean) {
         if (deleteRunning()) return
-        val markNear = markNearOnStart
-        markNearOnStart = false
         val app = applicationContext
         val chosen = scope
         val ring = PollScheduler.ringAddress(app)

@@ -130,7 +130,7 @@ object DriveBackup {
         return try {
             GZIPOutputStream(staged.outputStream()).bufferedWriter().use(store::exportCsv)
             // Read it back: a truncated or corrupt archive never reaches the backup file.
-            val lines = java.util.zip.GZIPInputStream(staged.inputStream()).bufferedReader().useLines { it.count() }
+            val lines = BackupStreams.readGzip(staged.inputStream()) { it.lineSequence().count() }
             check(lines >= 1) { "empty archive" }
             if (tree != null) writeToFolder(context, tree, staged, now)
             else {

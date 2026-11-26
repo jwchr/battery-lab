@@ -10,9 +10,11 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Build
+import com.google.android.gms.tasks.Task
 import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executor
 
 /** Samples locally, then sends an update via the Wear OS Data Layer. No phone polling. */
 object WatchReporter {
@@ -68,10 +70,14 @@ object WatchReporter {
             dataMap.putBoolean("charging", charging)
             dataMap.putString("model", Build.MODEL)
         }.asPutDataRequest()
-        Wearable.getDataClient(context).putDataItem(request)
-            .addOnSuccessListener { finish(true) }
-            .addOnFailureListener { finish(false) }
-            .addOnCanceledListener { finish(false) }
+        finishWhenDone(Wearable.getDataClient(context).putDataItem(request), context.mainExecutor, ::finish)
+    }
+
+    /** Reports the send's outcome once: success is true, a failure or a cancel is false. */
+    internal fun finishWhenDone(task: Task<*>, executor: Executor, finish: (Boolean) -> Unit) {
+        task.addOnSuccessListener(executor) { finish(true) }
+            .addOnFailureListener(executor) { finish(false) }
+            .addOnCanceledListener(executor) { finish(false) }
     }
 }
 

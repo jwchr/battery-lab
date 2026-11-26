@@ -1,6 +1,8 @@
 package com.batterylab.personal
 
-import java.io.File
+import com.google.android.gms.tasks.Task
+import com.google.android.gms.tasks.TaskCompletionSource
+import com.google.android.gms.tasks.Tasks
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -63,9 +65,25 @@ class JobFinishGateTest {
         assertTrue(current.finish {})
     }
 
-    @Test fun reporterFinishesCancelledSends() {
-        val source = listOf(File("src/main/java/com/batterylab/personal/WatchBatteryJob.kt"), File("wear/src/main/java/com/batterylab/personal/WatchBatteryJob.kt")).first { it.isFile }.readText()
-            .substringAfter("fun send(").substringBefore("class WatchBatteryJob")
-        assertTrue(source.contains("addOnCanceledListener { finish(false) }"))
+    /** Runs the real listener wiring on [task] and returns every outcome it reported. */
+    private fun outcomes(task: Task<Unit>): List<Boolean> {
+        val seen = mutableListOf<Boolean>()
+        WatchReporter.finishWhenDone(task, Runnable::run) { seen += it }
+        return seen
+    }
+
+    @Test fun reporterFinishesSucceededFailedAndCancelledSends() {
+        assertEquals(listOf(true), outcomes(Tasks.forResult(Unit)))
+        assertEquals(listOf(false), outcomes(Tasks.forException(RuntimeException("no phone"))))
+        assertEquals("A cancelled send must still finish the job", listOf(false), outcomes(Tasks.forCanceled()))
+    }
+
+    @Test fun reporterReportsASendThatSettlesLater() {
+        val pending = TaskCompletionSource<Unit>()
+        val seen = mutableListOf<Boolean>()
+        WatchReporter.finishWhenDone(pending.task, Runnable::run) { seen += it }
+        assertEquals(emptyList<Boolean>(), seen)
+        pending.setResult(Unit)
+        assertEquals(listOf(true), seen)
     }
 }

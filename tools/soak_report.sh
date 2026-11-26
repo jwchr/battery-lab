@@ -39,7 +39,7 @@ else
       2>/dev/null | tr -d '\r'
   }
   pulled=false
-  for attempt in 1 2 3; do
+  for _ in 1 2 3; do
     "$ADB" exec-out run-as "$PKG" cat databases/battery_lab.db >"$DB" \
       || { echo "Couldn't copy the database from the phone." >&2; exit 1; }
     rm -f "$DB-wal" "$DB-shm"

@@ -1,0 +1,455 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<issues format="6" by="lint 9.5.2" type="baseline" client="gradle" dependencies="false" name="AGP (9.5.2)" variant="all" version="9.5.2">
+
+    <issue
+        id="MissingPermission"
+        message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`"
+        errorLine1="        try { manager?.adapter?.bluetoothLeScanner?.stopScan(cb) } catch (_: Exception) { }"
+        errorLine2="              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/BleScanAdapter.kt"
+            line="73"
+            column="15"/>
+    </issue>
+
+    <issue
+        id="MissingPermission"
+        message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`"
+        errorLine1="        gatt = device.connectGatt(app, false, callback, BluetoothDevice.TRANSPORT_LE, BluetoothDevice.PHY_LE_1M_MASK, h)"
+        errorLine2="               ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RingLinkAdapter.kt"
+            line="60"
+            column="16"/>
+    </issue>
+
+    <issue
+        id="MissingPermission"
+        message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`"
+        errorLine1="    override fun disconnect() { gatt?.disconnect() }"
+        errorLine2="                                ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RingLinkAdapter.kt"
+            line="64"
+            column="33"/>
+    </issue>
+
+    <issue
+        id="MissingPermission"
+        message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`"
+        errorLine1="        g.close()"
+        errorLine2="        ~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RingLinkAdapter.kt"
+            line="69"
+            column="9"/>
+    </issue>
+
+    <issue
+        id="MissingPermission"
+        message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`"
+        errorLine1="    override fun readRssi() = gatt?.readRemoteRssi() == true"
+        errorLine2="                              ~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RingLinkAdapter.kt"
+            line="72"
+            column="31"/>
+    </issue>
+
+    <issue
+        id="MissingPermission"
+        message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`"
+        errorLine1="        try { gatt?.disconnect() } catch (_: Exception) { }"
+        errorLine2="              ~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/RingReader.kt"
+            line="84"
+            column="15"/>
+    </issue>
+
+    <issue
+        id="MissingPermission"
+        message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`"
+        errorLine1="            try { g.close() } catch (_: Exception) { }"
+        errorLine2="                  ~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/RingReader.kt"
+            line="100"
+            column="19"/>
+    </issue>
+
+    <issue
+        id="MissingPermission"
+        message="Call requires permission which may be rejected by user: code should explicitly check to see if permission is available (with `checkPermission`) or explicitly handle a potential `SecurityException`"
+        errorLine1="    override fun results(): List&lt;WifiHit> = (wifi?.scanResults ?: emptyList()).mapNotNull { r ->"
+        errorLine2="                                             ~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/WifiScanAdapter.kt"
+            line="61"
+            column="46"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 33 (current min is 28): `android.content.Context#RECEIVER_EXPORTED`"
+        errorLine1="        fun receiverFlags(sdk: Int): Int? = if (sdk >= 33) Context.RECEIVER_EXPORTED else null"
+        errorLine2="                                                           ~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/BluetoothWatch.kt"
+            line="48"
+            column="60"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 34 (current min is 31): `android.content.pm.PackageManager#FEATURE_UWB`"
+        errorLine1="            &quot;Ultra-wideband (UWB)&quot; to (if (Build.VERSION.SDK_INT >= 31) safe { pm.hasSystemFeature(PackageManager.FEATURE_UWB) } else false),"
+        errorLine2="                                                                                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RadioCapabilities.kt"
+            line="29"
+            column="100"/>
+    </issue>
+
+    <issue
+        id="InlinedApi"
+        message="Field requires API level 31 (current min is 28): `android.Manifest.permission#BLUETOOTH_SCAN`"
+        errorLine1="        private val SCAN_PERMISSIONS = listOf(Manifest.permission.BLUETOOTH_SCAN,"
+        errorLine2="                                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RfLabActivity.kt"
+            line="668"
+            column="47"/>
+    </issue>
+
+    <issue
+        id="GradleDependency"
+        message="A newer version of com.google.android.gms:play-services-wearable than 19.0.0 is available: 20.0.1"
+        errorLine1="    implementation(&quot;com.google.android.gms:play-services-wearable:19.0.0&quot;)"
+        errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="build.gradle.kts"
+            line="33"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="DrawAllocation"
+        message="Avoid object allocations during draw/layout operations (preallocate and reuse instead)"
+        errorLine1="            val path = Path()"
+        errorLine2="                       ~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/MainActivity.kt"
+            line="1164"
+            column="24"/>
+    </issue>
+
+    <issue
+        id="DrawAllocation"
+        message="Avoid object allocations during draw/layout operations (preallocate and reuse instead)"
+        errorLine1="        val path = Path()"
+        errorLine2="                   ~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RfLabActivity.kt"
+            line="1090"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="DrawAllocation"
+        message="Avoid object allocations during draw/layout operations (preallocate and reuse instead)"
+        errorLine1="        val oval = android.graphics.RectF(inset, inset, width - inset, height - inset)"
+        errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/Ui.kt"
+            line="58"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="DrawAllocation"
+        message="Avoid object allocations during draw/layout operations (preallocate and reuse instead)"
+        errorLine1="                val hand = android.graphics.Paint(stroke).apply { color = Palette.ink; strokeWidth = u * 0.07f; alpha = 140 }"
+        errorLine2="                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/Ui.kt"
+            line="194"
+            column="28"/>
+    </issue>
+
+    <issue
+        id="UnusedResources"
+        message="The resource `R.string.app_name` appears to be unused"
+        errorLine1="&lt;resources>&lt;string name=&quot;app_name&quot;>Battery Lab&lt;/string>&lt;/resources>"
+        errorLine2="                   ~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/res/values/strings.xml"
+            line="1"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="MissingApplicationIcon"
+        message="Should explicitly set `android:icon`, there is no default"
+        errorLine1="    &lt;application"
+        errorLine2="     ~~~~~~~~~~~">
+        <location
+            file="src/main/AndroidManifest.xml"
+            line="34"
+            column="6"/>
+    </issue>
+
+    <issue
+        id="ViewConstructor"
+        message="Custom view `BatteryGraph` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`"
+        errorLine1="class BatteryGraph(context: android.content.Context, private val series: List&lt;List&lt;Reading>>,"
+        errorLine2="      ~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/MainActivity.kt"
+            line="1046"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="ViewConstructor"
+        message="Custom view `TraceView` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`"
+        errorLine1="class TraceView(context: Context, private val points: List&lt;TracePoint>, private val nowNs: Long,"
+        errorLine2="      ~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RfLabActivity.kt"
+            line="1063"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="ViewConstructor"
+        message="Custom view `HourBars` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`"
+        errorLine1="class HourBars(context: Context, private val values: List&lt;Double?>, private val barColor: Int) : View(context) {"
+        errorLine2="      ~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/StatsActivity.kt"
+            line="1174"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="ViewConstructor"
+        message="Custom view `GaugeView` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`"
+        errorLine1="class GaugeView(context: Context, private val percent: Int?, private val arcColor: Int) : View(context) {"
+        errorLine2="      ~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/Ui.kt"
+            line="41"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="ViewConstructor"
+        message="Custom view `DeviceIcon` is missing constructor used by tools: `(Context)` or `(Context,AttributeSet)` or `(Context,AttributeSet,int)`"
+        errorLine1="class DeviceIcon(context: android.content.Context, private val name: String, private val tint: Int) : android.view.View(context) {"
+        errorLine2="      ~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/Ui.kt"
+            line="177"
+            column="7"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="            text = &quot;←  Back&quot;"
+        errorLine2="                    ~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/GlossaryActivity.kt"
+            line="17"
+            column="21"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="                    text = &quot;battery lab.&quot;"
+        errorLine2="                            ~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/MainActivity.kt"
+            line="438"
+            column="29"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="                    text = &quot;Every charge, every device.&quot;"
+        errorLine2="                            ~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/MainActivity.kt"
+            line="445"
+            column="29"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="                    text = &quot;$otherLabel says ${other.percent}%&quot;"
+        errorLine2="                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/MainActivity.kt"
+            line="586"
+            column="28"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="                    text = &quot;$otherLabel says ${other.percent}%&quot;"
+        errorLine2="                                       ~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/MainActivity.kt"
+            line="586"
+            column="40"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="                text = &quot;Include device names&quot;"
+        errorLine2="                        ~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/RangeExportActivity.kt"
+            line="67"
+            column="25"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="                text = &quot;Export CSV…&quot;"
+        errorLine2="                        ~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/RangeExportActivity.kt"
+            line="73"
+            column="25"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="        fromButton.text = &quot;From: $from&quot;"
+        errorLine2="                          ~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/RangeExportActivity.kt"
+            line="88"
+            column="27"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="        fromButton.text = &quot;From: $from&quot;"
+        errorLine2="                           ~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/RangeExportActivity.kt"
+            line="88"
+            column="28"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="        toButton.text = &quot;Through: $to&quot;"
+        errorLine2="                        ~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/RangeExportActivity.kt"
+            line="89"
+            column="25"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="        toButton.text = &quot;Through: $to&quot;"
+        errorLine2="                         ~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/RangeExportActivity.kt"
+            line="89"
+            column="26"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Number formatting does not take into account locale settings. Consider using `String.format` instead."
+        errorLine1="        guideSessionStatus?.text = GuideSteps.secondsLeft(guide, System.currentTimeMillis()).toString()"
+        errorLine2="                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RfLabActivity.kt"
+            line="413"
+            column="36"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="        val box = CheckBox(this).apply { text = &quot;Include device names&quot;; isChecked = false }"
+        errorLine2="                                                 ~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/rf/RfLabActivity.kt"
+            line="1004"
+            column="50"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="            text = &quot;←  Back&quot;"
+        errorLine2="                    ~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/StatsActivity.kt"
+            line="153"
+            column="21"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="            text = &quot;Stats for the curious.&quot;"
+        errorLine2="                    ~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/StatsActivity.kt"
+            line="160"
+            column="21"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="        this.text = &quot;●  $text&quot;"
+        errorLine2="                    ~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/Styled.kt"
+            line="195"
+            column="21"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="Do not concatenate text displayed with `setText`. Use resource string with placeholders."
+        errorLine1="            text = &quot;\u24d8  How this is worked out&quot;"
+        errorLine2="                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/Styled.kt"
+            line="272"
+            column="20"/>
+    </issue>
+
+    <issue
+        id="SetTextI18n"
+        message="String literal in `setText` can not be translated. Use Android resources instead."
+        errorLine1="            text = &quot;\u24d8  How this is worked out&quot;"
+        errorLine2="                          ~~~~~~~~~~~~~~~~~~~~~~~~">
+        <location
+            file="src/main/java/com/batterylab/personal/Styled.kt"
+            line="272"
+            column="27"/>
+    </issue>
+
+</issues>

@@ -45,13 +45,15 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.9.2'
-      - name: Run Kotlin/RF and Android unit tests, build all debug variants
+      - name: Run Kotlin/RF and Android unit tests, Android Lint, build all debug variants
         id: verify
         run: >
-          gradle --no-daemon
+          gradle --no-daemon --continue
           :rf:test
           :app:testDebugUnitTest
           :wear:testDebugUnitTest
+          :app:lintDebug
+          :wear:lintDebug
           :app:assembleDebug
           :wear:assembleDebug
           :widgetprobe:assembleDebug
@@ -63,6 +65,6 @@ jobs:
           {
             echo '### Battery Lab PR verification'
             echo "- Build and unit-test step: $CHECK_RESULT"
-            echo '- Targets: RF JVM tests; app local unit tests; phone, Watch8 and widget-probe debug builds.'
+            echo '- Targets: RF JVM tests; phone and Watch unit tests; phone and Watch Android Lint (new problems only, see lint-baseline.xml); phone, Watch8 and widget-probe debug builds.'
             echo '- Limits: no hardware BLE tests, no instrumented Android tests, no signing/deployment, and no APK artifacts.'
           } >> "$GITHUB_STEP_SUMMARY"

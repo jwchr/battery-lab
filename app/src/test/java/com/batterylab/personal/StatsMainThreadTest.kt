@@ -59,4 +59,12 @@ class StatsMainThreadTest {
     @Test fun journalSaveUsesTheTapTime() {
         assertTrue(source().contains("db.addJournal(device, category, title, timeMs = tappedAtMs)"))
     }
+
+    @Test fun aFailedJournalWriteKeepsItsDialogForOnDestroy() {
+        val write = source().substringAfter("    private fun writeJournal(").substringBefore("\n    private fun ")
+        val failed = write.substringAfter("is SectionResult.Failed ->")
+        val beforeOutcome = write.substringBefore("when (result)")
+        assertTrue("The success path must forget the closed dialog", write.substringAfter("is SectionResult.Ok ->").substringBefore("is SectionResult.Failed").contains("journalDialog = null"))
+        assertTrue("Only the success path may forget the dialog", !beforeOutcome.substringAfter("Background.onMain").contains("journalDialog = null") && !failed.contains("journalDialog = null"))
+    }
 }

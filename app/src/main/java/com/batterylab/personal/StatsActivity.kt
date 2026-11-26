@@ -895,9 +895,12 @@ class StatsActivity : StyledActivity() {
             val result = SectionResult.capture { write(BatteryStore.get(context)) }
             Background.onMain {
                 if (isDestroyed || isFinishing) return@onMain
-                if (journalDialog === dialog) journalDialog = null
                 when (result) {
-                    is SectionResult.Ok -> { dialog.dismiss(); render() }
+                    is SectionResult.Ok -> {
+                        // Forget it only once it closes: a failed write leaves it open, and onDestroy must still dismiss it.
+                        if (journalDialog === dialog) journalDialog = null
+                        dialog.dismiss(); render()
+                    }
                     is SectionResult.Failed -> {
                         android.util.Log.w(TAG, "Stats journal $operation failed: ${result.cause.javaClass.simpleName}")
                         button.isEnabled = true

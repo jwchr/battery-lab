@@ -111,6 +111,21 @@ class HomeRfThreadingTest {
         }
     }
 
+    @Test fun pinningWaitsForDeleteAllAndRechecksKeysOnConfirm() {
+        val menu = method(rf(), "deviceMenu")
+        assertTrue(menu.substringBefore("AlertDialog").contains("if (deleteRunning()) return"))
+        val confirm = menu.substringAfter("setPositiveButton(\"Pin\")").substringBefore("pins.pin(")
+        assertTrue(confirm.contains("deleteRunning()"))
+        assertTrue(confirm.contains("rf.store.keysStale(sessionId)"))
+    }
+
+    @Test fun lateSessionListKeepsTheUsersScroll() {
+        val sessions = method(rf(), "renderSessions")
+        assertTrue(sessions.contains("val keep = if (userScrolled) scroll.scrollY else oldScroll"))
+        assertTrue(sessions.contains("scroll.scrollTo(0, keep)"))
+        assertTrue(method(rf(), "render").contains("userScrolled = false"))
+    }
+
     @Test fun homeScrollRestoreChecksTheScreenAndGeneration() {
         assertTrue(method(home(), "restoreScroll").contains("!isDestroyed && !isFinishing && generation == renderGeneration"))
         assertEquals(0, Regex("scroll\\.post").findAll(method(home(), "show")).count())

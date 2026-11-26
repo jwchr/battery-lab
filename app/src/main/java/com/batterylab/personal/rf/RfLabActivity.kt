@@ -103,6 +103,8 @@ class RfLabActivity : StyledActivity() {
     @Volatile private var sessionsGeneration = 0
     /** The last saved-session list read in the background, and whether it was the "show all" list. */
     private var lastSessions: Pair<SavedSessions.Snapshot, Boolean>? = null
+    /** Set when the user drags the screen after a render, so a late session list doesn't jump it back. */
+    private var userScrolled = false
     private val TAG = "BatteryLabRf"
     /** "Everything nearby": store names this session (on by default, Jeff's decision of Nov 19). */
     private var storeNames = NearbyDefaults.STORE_NAMES
@@ -125,6 +127,10 @@ class RfLabActivity : StyledActivity() {
         super.onCreate(savedInstanceState)
         rf = RfRuntime.controller(this)
         wasRunning = rf.running
+        scroll.setOnTouchListener { _, e ->
+            if (e.actionMasked == android.view.MotionEvent.ACTION_MOVE) userScrolled = true
+            false
+        }
         guidePrefs = getSharedPreferences("rf_guide", MODE_PRIVATE)
         guide = GuideSteps.load(guidePrefs.all.mapNotNull { (key, value) ->
             (value as? Long)?.let { key to it }
@@ -509,6 +515,7 @@ class RfLabActivity : StyledActivity() {
     private fun render(scrollToTop: Boolean = false) {
         ++sessionsGeneration
         val oldScroll = if (scrollToTop) 0 else scroll.scrollY
+        userScrolled = false
         body.removeAllViews()
         liveBox = null
         deviceBox = null
@@ -804,6 +811,7 @@ class RfLabActivity : StyledActivity() {
     /** R31: pin a Bluetooth device as yours. A pin stores a key and an alias; it never connects or pairs. */
     private fun deviceMenu(d: DeviceView, sessionId: String?) {
         val pins = rf.store.pins
+        if (deleteRunning()) return
         if (rf.store.keysStale(sessionId)) {
             toast("Delete all ran during this session, so its devices cannot be pinned. Pin from a new session.")
             return
@@ -824,6 +832,13 @@ class RfLabActivity : StyledActivity() {
         AlertDialog.Builder(this).setTitle("Pin as my device").setMessage(PIN_TEXT).setView(edit)
             .setPositiveButton("Pin") { _, _ ->
                 val alias = edit.text.toString().trim().lowercase(Locale.US).replace(' ', '_')
+                // Delete all may have started or finished while this dialog was open; its old key
+                // would make a pin that never matches again.
+                if (deleteRunning()) return@setPositiveButton
+                if (rf.store.keysStale(sessionId)) {
+                    toast("Delete all ran during this session, so its devices cannot be pinned. Pin from a new session.")
+                    return@setPositiveButton
+                }
                 if (pins.pin(d.key, alias)) { toast("Pinned as \"$alias\""); refreshDevices() }
                 else toast("Not pinned. Use 1 to 24 letters, digits or _, not ring, and not a name already in use.")
             }
@@ -969,6 +984,8 @@ class RfLabActivity : StyledActivity() {
             Background.onMain {
                 if (isDestroyed || isFinishing || generation != sessionsGeneration) return@onMain
                 lastSessions = snapshot?.let { it to showAll }
+                // Put the screen back where render() left it, unless the user has scrolled since.
+                val keep = if (userScrolled) scroll.scrollY else oldScroll
                 val at = shown?.let { body.indexOfChild(it) }?.takeIf { it >= 0 } ?: position
                 shown?.let { body.removeView(it) }
                 val card = if (snapshot == null) section("Saved sessions", "Couldn't read the saved sessions. Try again in a moment.")
@@ -977,7 +994,7 @@ class RfLabActivity : StyledActivity() {
                 body.removeView(card)
                 body.addView(card, at.coerceAtMost(body.childCount))
                 scroll.post {
-                    if (!isDestroyed && !isFinishing && generation == sessionsGeneration) scroll.scrollTo(0, oldScroll)
+                    if (!isDestroyed && !isFinishing && generation == sessionsGeneration) scroll.scrollTo(0, keep)
                 }
             }
         }

@@ -178,7 +178,7 @@ class RfLabActivity : StyledActivity() {
         super.onResume()
         // A session that ended while the screen was paused still gets its result card.
         val running = rf.running
-        if ((wasRunning || stopRequested) && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null }
+        if ((wasRunning || stopRequested) && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null; lastSessions = null }
         wasRunning = running
         observeGuideSession()
         refreshGuideHistory()
@@ -219,7 +219,7 @@ class RfLabActivity : StyledActivity() {
         guideEvent(GuideSteps.Tick(System.currentTimeMillis()))
         fillGuideSession()
         if (running) fillLive()
-        if ((wasRunning || stopRequested) && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null; render() }
+        if ((wasRunning || stopRequested) && !running) { stopRequested = false; resultId = rf.lastEndedId; result = null; lastSessions = null; render() }
         if (!running) RfRuntime.liveTable = null
         wasRunning = running
     }
@@ -580,7 +580,8 @@ class RfLabActivity : StyledActivity() {
     }
 
     private fun started(r: StartResult) {
-        if (r is StartResult.Started) stopRequested = false
+        // Starting can remove the oldest sessions (retention), so the cached list is out of date.
+        if (r is StartResult.Started) { stopRequested = false; lastSessions = null }
         if (r is StartResult.Refused) toast(r.reason)
         else { resultId = null; result = null }
         wasRunning = rf.running
@@ -628,7 +629,13 @@ class RfLabActivity : StyledActivity() {
         if (requestCode == RF_PERMISSIONS && !rf.running) beginLive()
     }
 
+    /** True (with a note) while a delete is still running; a session started now could be removed by it. */
+    private fun deleteRunning(): Boolean = (RfRuntime.deletesInFlight.get() > 0).also {
+        if (it) toast("Still deleting sessions. Try again in a moment.")
+    }
+
     private fun beginLive() {
+        if (deleteRunning()) return
         val markNear = markNearOnStart
         markNearOnStart = false
         val app = applicationContext
@@ -686,6 +693,7 @@ class RfLabActivity : StyledActivity() {
     }
 
     private fun startSimulated() {
+        if (deleteRunning()) return
         val seed = System.currentTimeMillis()
         started(rf.start(StartRequest(Scope.MY_LINKS, Provenance.SIMULATED, durationS, mapOf("seed" to seed.toString()),
             { SimulatedStream.pair(seed, it) })))
@@ -697,7 +705,7 @@ class RfLabActivity : StyledActivity() {
             val req = try { Replay.request(dir) } catch (e: Exception) { null }
             Background.onMain {
                 if (isDestroyed || !visible) return@onMain
-                if (req == null) toast("This session could not be read") else started(rf.start(req))
+                if (req == null) toast("This session could not be read") else if (!deleteRunning()) started(rf.start(req))
             }
         }
     }
@@ -960,7 +968,7 @@ class RfLabActivity : StyledActivity() {
             }
             Background.onMain {
                 if (isDestroyed || isFinishing || generation != sessionsGeneration) return@onMain
-                if (snapshot != null) lastSessions = snapshot to showAll
+                lastSessions = snapshot?.let { it to showAll }
                 val at = shown?.let { body.indexOfChild(it) }?.takeIf { it >= 0 } ?: position
                 shown?.let { body.removeView(it) }
                 val card = if (snapshot == null) section("Saved sessions", "Couldn't read the saved sessions. Try again in a moment.")
@@ -989,21 +997,25 @@ class RfLabActivity : StyledActivity() {
         }
 
     private fun deleteSession(id: String) {
+        // Read the running session here, on the main thread where sessions start, and hold new
+        // starts until the delete is done, so the delete can't remove a session started meanwhile.
+        val activeId = rf.activeId
+        lastSessions = null
+        RfRuntime.deletesInFlight.incrementAndGet()
         Background.io.execute {
-            val deleted = try { rf.store.delete(id, rf.activeId) } catch (e: Exception) {
+            val deleted = try { rf.store.delete(id, activeId) } catch (e: Exception) {
                 android.util.Log.w(TAG, "Session delete failed", e); null
-            }
+            } finally { RfRuntime.deletesInFlight.decrementAndGet() }
             Background.onMain {
                 if (isDestroyed || isFinishing) return@onMain
                 when (deleted) {
                     true -> {
-                        lastSessions = null
                         if (resultId == id) resultId = null
                         refreshGuideHistory()
                         render()
                     }
                     false -> toast("A running session cannot be deleted")
-                    null -> toast("Couldn't delete the session. Try again in a moment.")
+                    null -> { toast("Couldn't delete the session. Try again in a moment."); render() }
                 }
             }
         }
@@ -1025,18 +1037,21 @@ class RfLabActivity : StyledActivity() {
             .setMessage("This removes every saved session and every pinned device on this phone, and device numbers " +
                 "start fresh. Your battery history is not touched.")
             .setPositiveButton("Delete all") { _, _ ->
+                // Same as deleteSession: the running session is read here and new starts wait.
+                val activeId = rf.activeId
+                lastSessions = null
+                RfRuntime.deletesInFlight.incrementAndGet()
                 Background.io.execute {
-                    val deleted = try { rf.store.deleteAll(rf.activeId); true } catch (e: Exception) {
+                    val deleted = try { rf.store.deleteAll(activeId); true } catch (e: Exception) {
                         android.util.Log.w(TAG, "Delete all sessions failed", e); false
-                    }
+                    } finally { RfRuntime.deletesInFlight.decrementAndGet() }
                     Background.onMain {
                         if (isDestroyed || isFinishing) return@onMain
-                        if (deleted) {
-                            lastSessions = null
-                            resultId = null
-                            refreshGuideHistory()
-                            render()
-                        } else toast("Couldn't delete the sessions. Try again in a moment.")
+                        if (deleted) resultId = null
+                        else toast("Couldn't delete every session. Try again in a moment.")
+                        // Even after a partial failure, show what is left on the phone.
+                        refreshGuideHistory()
+                        render()
                     }
                 }
             }
@@ -1095,6 +1110,8 @@ class RfLabActivity : StyledActivity() {
                         ?: ImportResult.Rejected("The file could not be opened")
                 } catch (_: Exception) { ImportResult.Rejected("The file could not be opened") }
                 Background.onMain {
+                    // An import can remove the oldest sessions (retention).
+                    lastSessions = null
                     when (r) {
                         is ImportResult.Imported -> { toast("Session imported"); resultId = r.id; result = null }
                         is ImportResult.Rejected -> toast("Not imported: ${r.reason}")

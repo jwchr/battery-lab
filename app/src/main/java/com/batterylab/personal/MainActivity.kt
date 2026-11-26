@@ -205,12 +205,12 @@ class MainActivity : StyledActivity() {
                     body.addView(label("Couldn't read the stored history. Try again in a moment.", 13f, Palette.quiet))
                     return@onMain
                 }
-                show(loaded, loadMs)
+                show(loaded, loadMs, generation)
             }
         }
     }
 
-    private fun show(l: Loaded, loadMs: Long) {
+    private fun show(l: Loaded, loadMs: Long, generation: Int) {
         renderMarks.clear(); renderMarkAt = android.os.SystemClock.elapsedRealtime()
         val oldScroll = scroll.scrollY
         body.removeAllViews()
@@ -319,7 +319,7 @@ class MainActivity : StyledActivity() {
             addView(label("The widget connection, Ring Bluetooth, the A/B test and CSV export.", 13f))
             button(if (labOpen) "Hide lab tools" else "Show lab tools") { labOpen = !labOpen; render() }
         }
-        if (!labOpen) { mark("rest"); logRender(loadMs); scroll.post { if (!isDestroyed && !isFinishing) scroll.scrollTo(0, oldScroll) }; return }
+        if (!labOpen) { mark("rest"); logRender(loadMs); restoreScroll(oldScroll, generation); return }
 
         renderWidgetSection(l)
 
@@ -427,7 +427,12 @@ class MainActivity : StyledActivity() {
                 "The optional watch app checks about every 2 hours, as a cross-check on Samsung's widget.", 12f, quiet))
         }
         mark("rest+lab tools"); logRender(loadMs)
-        scroll.post { scroll.scrollTo(0, oldScroll) }
+        restoreScroll(oldScroll, generation)
+    }
+
+    /** Puts the scroll back after a rebuild, unless the screen closed or a newer render took over. */
+    private fun restoreScroll(oldScroll: Int, generation: Int) = scroll.post {
+        if (!isDestroyed && !isFinishing && generation == renderGeneration) scroll.scrollTo(0, oldScroll)
     }
 
     private fun sourceName(source: String) = when (source) {

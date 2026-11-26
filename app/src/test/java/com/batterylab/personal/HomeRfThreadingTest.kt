@@ -54,13 +54,60 @@ class HomeRfThreadingTest {
         assertTrue(rf().substringAfter("override fun onDestroy()").contains("++sessionsGeneration"))
     }
 
-    @Test fun rfDeletesRunOnWorkerUsingActiveIdAtExecutionTime() {
-        listOf("deleteSession" to "rf.store.delete(id, rf.activeId)", "confirmDeleteAll" to "rf.store.deleteAll(rf.activeId)").forEach { (name, call) ->
-            val action = method(rf(), name)
-            assertTrue(action.indexOf(call) > action.indexOf("Background.io.execute"))
-            assertTrue(action.indexOf(call) < action.indexOf("Background.onMain"))
-            assertTrue(action.substringAfter("Background.onMain").contains("render()"))
-            assertTrue(action.substringAfter("Background.onMain").contains("if (isDestroyed || isFinishing) return@onMain"))
-        }
+    /** Problems with a delete action; empty when it is safe against a session started during the delete. */
+    private fun deleteProblems(action: String, call: String): List<String> {
+        val worker = action.indexOf("Background.io.execute")
+        val onMain = action.indexOf("Background.onMain")
+        val before = action.substring(0, worker.coerceAtLeast(0))
+        return listOfNotNull(
+            "running session read on the worker".takeIf { action.substring(worker, onMain).contains("rf.activeId") },
+            "running session not read before the worker".takeIf { !before.contains("val activeId = rf.activeId") },
+            "new starts not held".takeIf { !before.contains("RfRuntime.deletesInFlight.incrementAndGet()") },
+            "hold not released on every path".takeIf { !action.substring(worker, onMain).contains("finally { RfRuntime.deletesInFlight.decrementAndGet() }") },
+            "cached list not cleared at the tap".takeIf { !before.contains("lastSessions = null") },
+            "delete not on the worker".takeIf { action.indexOf(call) !in worker..onMain },
+            "screen not refreshed".takeIf { !action.substringAfter("Background.onMain").contains("render()") },
+            "closed screen touched".takeIf { !action.substringAfter("Background.onMain").contains("if (isDestroyed || isFinishing) return@onMain") },
+        )
+    }
+
+    private fun deleteAll() = method(rf(), "confirmDeleteAll").substringAfter("setPositiveButton")
+
+    @Test fun rfDeletesHoldNewSessionsAndUseTheSessionRunningAtTheTap() {
+        assertEquals(emptyList<String>(), deleteProblems(method(rf(), "deleteSession"), "rf.store.delete(id, activeId)"))
+        assertEquals(emptyList<String>(), deleteProblems(deleteAll(), "rf.store.deleteAll(activeId)"))
+        // A partial Delete all failure still refreshes, so the list shows what is left.
+        assertFalse(deleteAll().substringAfter("Background.onMain").contains("if (deleted) {"))
+    }
+
+    @Test fun deleteGuardDetectsTheOldRace() {
+        // The Nov 26 Neon P1: the running session read on the worker, with nothing holding new starts.
+        val old = deleteAll().replace("rf.store.deleteAll(activeId)", "rf.store.deleteAll(rf.activeId)")
+            .replace("RfRuntime.deletesInFlight.incrementAndGet()", "")
+        assertTrue(deleteProblems(old, "rf.store.deleteAll(rf.activeId)").containsAll(
+            listOf("running session read on the worker", "new starts not held")))
+    }
+
+    @Test fun everySessionStartWaitsForARunningDelete() {
+        assertTrue(method(rf(), "deleteRunning").contains("RfRuntime.deletesInFlight.get() > 0"))
+        assertTrue(method(rf(), "beginLive").lines()[1].contains("if (deleteRunning()) return"))
+        assertTrue(method(rf(), "startSimulated").lines()[1].contains("if (deleteRunning()) return"))
+        assertTrue(method(rf(), "startReplay").contains("else if (!deleteRunning()) started(rf.start(req))"))
+        // Only these three places start a session.
+        assertEquals(3, Regex("rf\\.start\\(").findAll(rf()).count())
+    }
+
+    @Test fun cachedSessionListIsDroppedWheneverSessionsMayHaveChanged() {
+        assertTrue(method(rf(), "renderSessions").contains("lastSessions = snapshot?.let { it to showAll }"))
+        assertTrue(method(rf(), "started").contains("lastSessions = null"))
+        assertTrue(rf().substringAfter("IMPORT_ZIP").contains("lastSessions = null"))
+        // Both places that notice a session ended.
+        assertEquals(2, Regex("resultId = rf.lastEndedId; result = null; lastSessions = null").findAll(rf()).count())
+    }
+
+    @Test fun homeScrollRestoreChecksTheScreenAndGeneration() {
+        assertTrue(method(home(), "restoreScroll").contains("!isDestroyed && !isFinishing && generation == renderGeneration"))
+        assertEquals(0, Regex("scroll\\.post").findAll(method(home(), "show")).count())
+        assertEquals(2, Regex("restoreScroll\\(oldScroll, generation\\)").findAll(method(home(), "show")).count())
     }
 }

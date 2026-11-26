@@ -220,7 +220,7 @@ class StatsActivity : StyledActivity() {
             sticky?.getIntExtra(BatteryManager.EXTRA_VOLTAGE, -1)?.takeIf { it > 0 }?.let {
                 tiles += Triple(String.format(Locale.US, "%.2f V", it / 1000.0), "voltage now", null)
             }
-            sticky?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -1)?.takeIf { it > 0 }?.let {
+            sticky?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, Int.MIN_VALUE)?.takeIf { it in BatteryStats.VALID_TEMP_TENTHS_C }?.let {
                 tiles += Triple("${String.format(Locale.US, "%.1f", it / 10.0)}°C", "temperature now", null)
             }
             addTiles(tiles)

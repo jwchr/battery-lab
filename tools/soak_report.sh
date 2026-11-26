@@ -28,15 +28,42 @@ if [[ $# -ge 1 ]]; then
 else
   $have_phone || { echo "No phone over adb and no database path given." >&2; exit 1; }
   DB=$WORK/battery_lab.db
-  "$ADB" exec-out run-as "$PKG" cat databases/battery_lab.db >"$DB"
+  # Recent readings may sit in the -wal file. Pull only that: a -shm pulled a moment later could
+  # describe frames this -wal doesn't have, so sqlite3 rebuilds the index from the -wal instead.
+  # Keep the -wal only if it starts with SQLite's WAL magic, so an error message is never used.
+  # A checkpoint between the two copies would pair an old database with a newer -wal and silently
+  # drop readings, so the database is copied again afterwards and the pair is used only if it
+  # did not change. A -wal the phone has but that didn't copy is retried, never quietly skipped.
+  wal_on_phone() {
+    "$ADB" shell "run-as $PKG sh -c 'test -s databases/battery_lab.db-wal && echo present || echo absent'" \
+      2>/dev/null | tr -d '\r'
+  }
+  pulled=false
+  for _ in 1 2 3; do
+    "$ADB" exec-out run-as "$PKG" cat databases/battery_lab.db >"$DB" \
+      || { echo "Couldn't copy the database from the phone." >&2; exit 1; }
+    rm -f "$DB-wal" "$DB-shm"
+    wal_ok=true
+    if ! "$ADB" exec-out run-as "$PKG" cat databases/battery_lab.db-wal >"$DB-wal" \
+      || ! head -c 4 "$DB-wal" | od -An -tx1 | tr -d ' \n' | grep -qE '^377f068[23]$'; then
+      rm -f "$DB-wal"
+      [[ $(wal_on_phone) == absent ]] || wal_ok=false
+    fi
+    "$ADB" exec-out run-as "$PKG" cat databases/battery_lab.db >"$WORK/recheck.db" || wal_ok=false
+    if $wal_ok && cmp -s "$DB" "$WORK/recheck.db"; then pulled=true; break; fi
+    sleep 1
+  done
+  rm -f "$WORK/recheck.db"
+  $pulled || { echo "Couldn't get a matching copy of the database and its -wal file after 3 tries" \
+    "(the app may be saving a lot right now). Try again in a minute." >&2; exit 1; }
 fi
 
 # App foreground times (epoch ms) from usagestats, if the phone is attached.
 : >"$WORK/fg.txt"
 if $have_phone; then
   "$ADB" shell dumpsys usagestats 2>/dev/null \
-    | grep "package=$PKG" | grep 'type=ACTIVITY_RESUMED' \
-    | grep -oE 'time="[^"]+"' | cut -d'"' -f2 | sort -u \
+    | { grep "package=$PKG" || true; } | { grep 'type=ACTIVITY_RESUMED' || true; } \
+    | { grep -oE 'time="[^"]+"' || true; } | cut -d'"' -f2 | sort -u \
     | while read -r t; do
         # Phone and Mac are assumed to share a timezone.
         echo $(( $(date -j -f '%Y-%m-%d %H:%M:%S' "$t" +%s) * 1000 ))

@@ -12,6 +12,7 @@ The page is refreshed from the phone each time you press "Pull again". It shows 
 levels, forecasts, journal and capability status. From dumpsys it shows only a fixed list of
 battery keys and the batterystats summary lines (never the per-app list).
 """
+import contextlib
 import html
 import http.server
 import os
@@ -22,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 
 PKG = "com.batterylab.personal"
 HOST, PORT = "127.0.0.1", 8765
@@ -86,45 +88,45 @@ def page():
     path = pull()
     if not os.path.exists(path):
         return "<p>No database. Is the phone connected with USB debugging on and a debug build installed?</p>"
-    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    now = time.time() * 1000
-    parts = []
-    version = q(db, "PRAGMA user_version")
-    parts.append(f"<p class=quiet>Schema v{version[0][0] if version else '?'} · pulled {time.strftime('%a %H:%M:%S')}</p>")
+    with contextlib.closing(sqlite3.connect(
+            f"file:{urllib.parse.quote(os.path.abspath(path))}?mode=ro", uri=True)) as db:
+        now = time.time() * 1000
+        parts = []
+        version = q(db, "PRAGMA user_version")
+        parts.append(f"<p class=quiet>Schema v{version[0][0] if version else '?'} · pulled {time.strftime('%a %H:%M:%S')}</p>")
 
-    devices = q(db, """SELECT device, source, COUNT(*), MAX(time_ms) FROM readings
-                       GROUP BY device, source ORDER BY device, source""")
-    parts.append("<h2>Readings</h2>" + table(["device", "source", "rows", "latest"],
-        [(d, s, n, time.strftime("%a %H:%M", time.localtime(t / 1000))) for d, s, n, t in devices]))
+        devices = q(db, """SELECT device, source, COUNT(*), MAX(time_ms) FROM readings
+                           GROUP BY device, source ORDER BY device, source""")
+        parts.append("<h2>Readings</h2>" + table(["device", "source", "rows", "latest"],
+            [(d, s, n, time.strftime("%a %H:%M", time.localtime(t / 1000))) for d, s, n, t in devices]))
 
-    lines = [("Phone", "device = 'phone'", "#5b8fd6"),
-             ("Watch", "device LIKE 'watch:%'", "#74a658"),
-             ("Ring", "device LIKE 'ring:%'", "#e9a23b")]
-    parts.append("<h2>Last 48 hours</h2>")
-    for key, where, color in lines:
-        rows = q(db, f"""SELECT time_ms, percent FROM readings WHERE {where} AND time_ms >= ?
-                         ORDER BY time_ms""", (now - 48 * 3600_000,))
-        parts.append(f"<h3>{key}</h3>" + sparkline(rows, color))
+        lines = [("Phone", "device = 'phone'", "#5b8fd6"),
+                 ("Watch", "device LIKE 'watch:%'", "#74a658"),
+                 ("Ring", "device LIKE 'ring:%'", "#e9a23b")]
+        parts.append("<h2>Last 48 hours</h2>")
+        for key, where, color in lines:
+            rows = q(db, f"""SELECT time_ms, percent FROM readings WHERE {where} AND time_ms >= ?
+                             ORDER BY time_ms""", (now - 48 * 3600_000,))
+            parts.append(f"<h3>{key}</h3>" + sparkline(rows, color))
 
-    parts.append("<h2>Prediction report card</h2>" + table(
-        ["status", "forecasts", "mean |lab error| 4h", "mean |Android error| 4h"],
-        q(db, """SELECT status, COUNT(*),
-                   ROUND(AVG(ABS(start_pct - lab_rate_pp_per_hr * 4 - actual_4h_pct)), 1),
-                   ROUND(AVG(CASE WHEN android_hours_to_empty > 0 THEN ABS(start_pct - start_pct / android_hours_to_empty * 4 - actual_4h_pct) END), 1)
-                 FROM forecasts GROUP BY status""")))
+        parts.append("<h2>Prediction report card</h2>" + table(
+            ["status", "forecasts", "mean |lab error| 4h", "mean |Android error| 4h"],
+            q(db, """SELECT status, COUNT(*),
+                       ROUND(AVG(ABS(MAX(0.0, start_pct - lab_rate_pp_per_hr * 4) - actual_4h_pct)), 1),
+                       ROUND(AVG(CASE WHEN android_hours_to_empty > 0 THEN ABS(MAX(0.0, start_pct - start_pct / android_hours_to_empty * 4) - actual_4h_pct) END), 1)
+                     FROM forecasts GROUP BY status""")))
 
-    parts.append("<h2>Journal</h2>" + table(["when", "category", "title"],
-        [(time.strftime("%a %d %b %H:%M", time.localtime(t / 1000)), c, ti)
-         for t, c, ti in q(db, "SELECT time_ms, category, title FROM context_journal ORDER BY time_ms DESC LIMIT 30")]))
+        parts.append("<h2>Journal</h2>" + table(["when", "category", "title"],
+            [(time.strftime("%a %d %b %H:%M", time.localtime(t / 1000)), c, ti)
+             for t, c, ti in q(db, "SELECT time_ms, category, title FROM context_journal ORDER BY time_ms DESC LIMIT 30")]))
 
-    parts.append("<h2>Capabilities</h2>" + table(["device", "field", "status", "units", "step"],
-        q(db, "SELECT device_kind, field_key, status, units, observed_min_step FROM capability_probes ORDER BY device_kind, field_key")))
+        parts.append("<h2>Capabilities</h2>" + table(["device", "field", "status", "units", "step"],
+            q(db, "SELECT device_kind, field_key, status, units, observed_min_step FROM capability_probes ORDER BY device_kind, field_key")))
 
-    parts.append("<h2>Experiments</h2>" + table(["mode", "start", "start %", "end %", "hours"],
-        [(m, time.strftime("%a %d %b %H:%M", time.localtime(s / 1000)), sp, ep,
-          None if e is None else round((e - s) / 3600_000, 1))
-         for m, s, sp, e, ep in q(db, "SELECT mode, start_ms, start_pct, end_ms, end_pct FROM experiments ORDER BY start_ms DESC LIMIT 20")]))
-    db.close()
+        parts.append("<h2>Experiments</h2>" + table(["mode", "start", "start %", "end %", "hours"],
+            [(m, time.strftime("%a %d %b %H:%M", time.localtime(s / 1000)), sp, ep,
+              None if e is None else round((e - s) / 3600_000, 1))
+             for m, s, sp, e, ep in q(db, "SELECT mode, start_ms, start_pct, end_ms, end_pct FROM experiments ORDER BY start_ms DESC LIMIT 20")]))
 
     if not FIXED_DB:
         battery = [l.strip() for l in adb("shell", "dumpsys", "battery").splitlines() if BATTERY_KEYS.match(l)]

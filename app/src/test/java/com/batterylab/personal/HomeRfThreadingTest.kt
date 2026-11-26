@@ -124,6 +124,9 @@ class HomeRfThreadingTest {
         assertTrue(sessions.contains("val keep = if (userScrolled) scroll.scrollY else oldScroll"))
         assertTrue(sessions.contains("scroll.scrollTo(0, keep)"))
         assertTrue(method(rf(), "render").contains("userScrolled = false"))
+        // scroll is lateinit and set by setUpPage(); touching it earlier crashes RF Lab on open.
+        val create = rf().substringAfter("override fun onCreate(")
+        assertTrue(create.indexOf("setUpPage()") in 0 until create.indexOf("scroll.setOnTouchListener"))
     }
 
     @Test fun homeScrollRestoreChecksTheScreenAndGeneration() {

@@ -127,10 +127,6 @@ class RfLabActivity : StyledActivity() {
         super.onCreate(savedInstanceState)
         rf = RfRuntime.controller(this)
         wasRunning = rf.running
-        scroll.setOnTouchListener { _, e ->
-            if (e.actionMasked == android.view.MotionEvent.ACTION_MOVE) userScrolled = true
-            false
-        }
         guidePrefs = getSharedPreferences("rf_guide", MODE_PRIVATE)
         guide = GuideSteps.load(guidePrefs.all.mapNotNull { (key, value) ->
             (value as? Long)?.let { key to it }
@@ -146,6 +142,11 @@ class RfLabActivity : StyledActivity() {
         showAllRfLab = savedInstanceState?.getBoolean("showAllRfLab", false) ?: false
         resultId = savedInstanceState?.getString("resultId") ?: rf.lastEndedId
         setUpPage()
+        // scroll exists only after setUpPage().
+        scroll.setOnTouchListener { _, e ->
+            if (e.actionMasked == android.view.MotionEvent.ACTION_MOVE) userScrolled = true
+            false
+        }
         observeGuideSession()
         if (savedInstanceState != null && savedInstanceState.getString("guideSession") == rf.activeId && rf.activeId != null) {
             // Restore session-local evidence only if this very session is still alive in this process.

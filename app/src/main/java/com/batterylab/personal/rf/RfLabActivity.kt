@@ -963,7 +963,7 @@ class RfLabActivity : StyledActivity() {
                 if (snapshot != null) lastSessions = snapshot to showAll
                 val at = shown?.let { body.indexOfChild(it) }?.takeIf { it >= 0 } ?: position
                 shown?.let { body.removeView(it) }
-                val card = if (snapshot == null) section("Saved sessions", "Couldn't read the stored history. Try again in a moment.")
+                val card = if (snapshot == null) section("Saved sessions", "Couldn't read the saved sessions. Try again in a moment.")
                     else showSessions(snapshot, showAll)
                 // section() appends to body; keep the card ahead of the guide link, as before.
                 body.removeView(card)

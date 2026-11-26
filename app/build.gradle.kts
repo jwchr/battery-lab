@@ -3,7 +3,7 @@ plugins {
 }
 
 android {
-    // Problems found before lint joined PR CI (#64) are recorded here; only new ones fail the check.
+    // Problems found before lint joined PR CI (#64) are recorded here; only new lint errors fail the check (new warnings do not).
     lint { baseline = file("lint-baseline.xml") }
     namespace = "com.batterylab.personal"
     compileSdk {

@@ -199,10 +199,15 @@ class RfLabGuardTest {
         val start = activity.substringAfter("private fun startLive(").substringBefore("override fun onRequestPermissionsResult")
         assertTrue(start.contains("val requestCode = if (markNear) RF_PERMISSIONS_NEAR else RF_PERMISSIONS"))
         assertEquals(2, Regex("""requestPermissions\(needed\.toTypedArray\(\), requestCode\)""").findAll(start).count())
+        assertEquals("every request in startLive uses the keyed code", 2, Regex("""requestPermissions\(""").findAll(start).count())
         assertTrue(start.contains("needed.isEmpty() -> beginLive(markNear)"))
         assertTrue(start.contains("startLive(markNear)"))
 
         val callback = activity.substringAfter("override fun onRequestPermissionsResult").substringBefore("private fun deleteRunning")
+        // A cancelled request (empty arrays, e.g. a second tap while a dialog is open) starts nothing.
+        val cancelGuard = callback.indexOf("if (permissions.isEmpty() || grantResults.isEmpty()) return")
+        assertTrue("cancelled permission callbacks are ignored", cancelGuard >= 0)
+        assertTrue(cancelGuard < callback.indexOf("beginLive("))
         assertTrue(callback.contains("if (!rf.running) when (requestCode)"))
         assertTrue(callback.contains("RF_PERMISSIONS -> beginLive(false)"))
         assertTrue(callback.contains("RF_PERMISSIONS_NEAR -> beginLive(true)"))

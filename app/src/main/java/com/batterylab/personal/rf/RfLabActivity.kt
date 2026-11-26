@@ -632,6 +632,9 @@ class RfLabActivity : StyledActivity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        // Empty arrays mean Android cancelled the request (another one was already showing, or it was
+        // interrupted). That is no answer, so start nothing; a real Allow or Deny starts the session.
+        if (permissions.isEmpty() || grantResults.isEmpty()) return
         if (!rf.running) when (requestCode) {
             RF_PERMISSIONS -> beginLive(false)
             RF_PERMISSIONS_NEAR -> beginLive(true)

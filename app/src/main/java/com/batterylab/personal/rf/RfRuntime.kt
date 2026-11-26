@@ -29,6 +29,11 @@ object RfRuntime {
     @Volatile private var instance: SessionController? = null
     /** The running "Everything nearby" session's device table, for the live device list. */
     @Volatile var liveTable: Pair<String, com.batterylab.rf.EmitterTable>? = null
+    /**
+     * Deletes still running in the background. A new session waits until they finish, so a delete
+     * can never remove a session that started after its tap. Kept here so it survives rotation.
+     */
+    val deletesInFlight = java.util.concurrent.atomic.AtomicInteger()
 
     fun controller(context: Context): SessionController = instance ?: synchronized(this) {
         instance ?: build(context.applicationContext).also { instance = it }

@@ -2,10 +2,16 @@ package com.batterylab.personal
 
 import java.io.BufferedInputStream
 import java.io.BufferedReader
+import java.io.BufferedWriter
 import java.io.InputStream
+import java.io.OutputStream
 import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
 
-/** Reads backup files as text and always closes the opened stream, even when a damaged gzip header throws. */
+/**
+ * Reads and writes backup files as text and always closes the opened stream, even when the gzip
+ * header throws (a damaged file on read, a full disk on write).
+ */
 internal object BackupStreams {
     /** Reads [raw] as gzip. */
     fun <T> readGzip(raw: InputStream, block: (BufferedReader) -> T): T =
@@ -18,4 +24,8 @@ internal object BackupStreams {
         input.reset()
         (if (gz) GZIPInputStream(input) else input).bufferedReader().use(block)
     }
+
+    /** Writes [raw] as gzip. */
+    fun <T> writeGzip(raw: OutputStream, block: (BufferedWriter) -> T): T =
+        raw.use { GZIPOutputStream(it).bufferedWriter().use(block) }
 }

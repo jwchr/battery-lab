@@ -51,6 +51,7 @@ jobs:
           gradle --no-daemon
           :rf:test
           :app:testDebugUnitTest
+          :wear:testDebugUnitTest
           :app:assembleDebug
           :wear:assembleDebug
           :widgetprobe:assembleDebug

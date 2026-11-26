@@ -21,7 +21,7 @@ class BluetoothWatchFlagsTest {
     }
 
     @Test fun startRegistersWithTheCheckedFlags() {
-        val src = File("src/main/java/com/batterylab/personal/rf/BluetoothWatch.kt").readText()
+        val src = listOf(File("src/main/java/com/batterylab/personal/rf/BluetoothWatch.kt"), File("app/src/main/java/com/batterylab/personal/rf/BluetoothWatch.kt")).first { it.isFile }.readText()
         assertTrue("start() passes receiverFlags(...) to registerReceiver",
             src.contains("val flags = receiverFlags(Build.VERSION.SDK_INT)") &&
                 src.contains("context.registerReceiver(r, filter, null, handler, flags)"))

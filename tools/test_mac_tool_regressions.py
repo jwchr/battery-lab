@@ -92,9 +92,24 @@ import sys
 args = sys.argv[1:]
 if args == ["get-state"]:
     sys.exit(0)
+if args[0] == "shell" and "test -s" in args[-1]:
+    print(os.environ.get("WAL_PRESENT", "absent"))
+    sys.exit(0)
 if args[0] == "exec-out":
     suffix = args[-1].split("battery_lab.db", 1)[1]
     mode = os.environ["SIDECAR_MODE"]
+    if not suffix:
+        # Count main-database copies; "once" changes the 2nd copy (a checkpoint between the
+        # first pair), "always" changes every re-check, so no pair ever matches.
+        counter = Path(os.environ["COUNTER"])
+        n = int(counter.read_text() or "0") + 1 if counter.exists() else 1
+        counter.write_text(str(n))
+        race = os.environ.get("MAIN_RACE", "none")
+        data = Path(os.environ["FIXTURE_DB"]).read_bytes()
+        if (race == "once" and n == 2) or (race == "always" and n % 2 == 0):
+            data += b"checkpointed"
+        sys.stdout.buffer.write(data)
+        sys.exit(0)
     if suffix and mode != "valid":
         if mode == "error":
             print("cat: unavailable")
@@ -127,6 +142,7 @@ os.execv(os.environ["REAL_SQLITE"], [os.environ["REAL_SQLITE"], *sys.argv[1:]])
                     with self.subTest(sidecars=mode, usage=usage):
                         env = dict(os.environ, ADB=str(adb), FIXTURE_DB=str(path),
                                    SIDECAR_MODE=mode, USAGE_TEXT=usage, REAL_SQLITE=sqlite_cli,
+                                   COUNTER=str(root / f"count-{mode}-{len(usage)}"),
                                    PATH=str(root) + os.pathsep + os.environ["PATH"])
                         result = subprocess.run(["bash", str(TOOLS / "soak_report.sh")],
                                                 env=env, capture_output=True, text=True, timeout=20)
@@ -134,6 +150,32 @@ os.execv(os.environ["REAL_SQLITE"], [os.environ["REAL_SQLITE"], *sys.argv[1:]])
                         self.assertIn("App foreground starts logged: 0", result.stdout)
                         if mode == "valid":
                             self.assertRegex(result.stdout, re.compile(r"dev1\s+test_source\s+1\s+1"))
+            base = dict(os.environ, ADB=str(adb), FIXTURE_DB=str(path), USAGE_TEXT="",
+                        REAL_SQLITE=sqlite_cli, PATH=str(root) + os.pathsep + os.environ["PATH"])
+
+            def run(name, **extra):
+                env = dict(base, COUNTER=str(root / f"count-{name}"), **extra)
+                return subprocess.run(["bash", str(TOOLS / "soak_report.sh")],
+                                      env=env, capture_output=True, text=True, timeout=60)
+
+            with self.subTest("a -wal the phone has but that didn't copy is never skipped"):
+                for mode in ("partial", "error", "missing"):
+                    result = run(f"present-{mode}", SIDECAR_MODE=mode, WAL_PRESENT="present")
+                    self.assertEqual(1, result.returncode, result.stdout)
+                    self.assertIn("after 3 tries", result.stderr)
+            with self.subTest("can't tell whether the phone has a -wal: fail, don't guess"):
+                result = run("unknown", SIDECAR_MODE="partial", WAL_PRESENT="")
+                self.assertEqual(1, result.returncode, result.stdout)
+            with self.subTest("a checkpoint between copies is retried"):
+                result = run("race-once", SIDECAR_MODE="valid", MAIN_RACE="once")
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertRegex(result.stdout, re.compile(r"dev1\s+test_source\s+1\s+1"))
+                self.assertEqual("4", (root / "count-race-once").read_text())
+            with self.subTest("a database that keeps changing gives a clear error, not a report"):
+                result = run("race-always", SIDECAR_MODE="valid", MAIN_RACE="always")
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn("after 3 tries", result.stderr)
+                self.assertNotIn("App foreground", result.stdout)
 
 
 if __name__ == "__main__":

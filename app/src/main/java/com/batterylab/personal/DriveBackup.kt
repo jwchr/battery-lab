@@ -8,7 +8,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
-import java.util.zip.GZIPOutputStream
 
 /**
  * Automatic backup of the full history as a gzipped CSV (about a tenth of the plain size) to a file the user picked once with Android's
@@ -128,7 +127,7 @@ object DriveBackup {
         }
         val staged = java.io.File(context.cacheDir, "backup-staging.csv.gz")
         return try {
-            GZIPOutputStream(staged.outputStream()).bufferedWriter().use(store::exportCsv)
+            BackupStreams.writeGzip(staged.outputStream(), store::exportCsv)
             // Read it back: a truncated or corrupt archive never reaches the backup file.
             val lines = BackupStreams.readGzip(staged.inputStream()) { it.lineSequence().count() }
             check(lines >= 1) { "empty archive" }

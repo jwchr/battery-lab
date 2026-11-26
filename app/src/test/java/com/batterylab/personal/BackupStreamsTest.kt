@@ -3,6 +3,8 @@ package com.batterylab.personal
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.FilterInputStream
+import java.io.IOException
+import java.io.OutputStream
 import java.util.zip.GZIPOutputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -47,5 +49,28 @@ class BackupStreamsTest {
     @Test fun anEmptyOrOneByteFileReadsAsPlainText() {
         assertEquals("", BackupStreams.readMaybeGzip(Tracking(ByteArray(0))) { it.readText() })
         assertEquals("\u001f", BackupStreams.readMaybeGzip(Tracking(byteArrayOf(0x1f))) { it.readText() })
+    }
+
+    private class FullDisk : OutputStream() {
+        var closed = false
+        override fun write(b: Int) = throw IOException("No space left on device")
+        override fun close() { closed = true }
+    }
+
+    @Test fun aFullDiskWhileWritingTheGzipHeaderStillClosesTheFile() {
+        val raw = FullDisk()
+        try { BackupStreams.writeGzip(raw) { it.write("a\n") }; fail("a full disk must fail the backup") }
+        catch (e: IOException) { }
+        assertTrue("the staging file was left open", raw.closed)
+    }
+
+    @Test fun writesGzipThatReadsBack() {
+        val out = object : ByteArrayOutputStream() {
+            var closed = false
+            override fun close() { closed = true; super.close() }
+        }
+        BackupStreams.writeGzip(out) { it.write("a\nb\n") }
+        assertTrue(out.closed)
+        assertEquals("a\nb\n", BackupStreams.readGzip(Tracking(out.toByteArray())) { it.readText() })
     }
 }

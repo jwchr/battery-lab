@@ -7,7 +7,6 @@ import android.app.backup.FullBackupDataOutput
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import java.io.File
-import java.util.zip.GZIPOutputStream
 
 /**
  * Android's own backup (Google account, end-to-end encrypted with the screen lock on Android 9+).
@@ -37,7 +36,7 @@ class CloudBackupAgent : BackupAgent() {
         val target = File(dir(this), FILE)
         val staged = File(target.parentFile, "$FILE.tmp")
         try {
-            GZIPOutputStream(staged.outputStream()).bufferedWriter().use(store::exportCsv)
+            BackupStreams.writeGzip(staged.outputStream(), store::exportCsv)
             // Same check as the Drive backup: only a complete, readable archive replaces the last one.
             val fresh = lineCount(staged)
             check(fresh >= 1) { "empty archive" }

@@ -39,6 +39,10 @@ class HomeRfThreadingTest {
         assertTrue(render.indexOf("load(widget, includeLab)") > render.indexOf("Background.io.execute"))
         assertEquals(2, Regex("isDestroyed \\|\\| isFinishing \\|\\| generation != renderGeneration").findAll(render).count())
         assertTrue(render.contains("Couldn't read the stored history. Try again in a moment."))
+        // #80: the failure message has a button that clears the screen and loads Home again.
+        assertTrue(render.contains("body.button(\"Try again\", primary = true) { body.removeAllViews(); render() }"))
+        assertTrue(render.indexOf("\"Try again\"") > render.indexOf("if (loaded == null)"))
+        assertTrue(render.indexOf("\"Try again\"") < render.indexOf("show(loaded, loadMs, generation)"))
         assertTrue(home().substringAfter("override fun onDestroy()").contains("++renderGeneration"))
         assertTrue(method(home(), "logRender").contains("ms (background), views"))
     }

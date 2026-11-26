@@ -203,6 +203,8 @@ class MainActivity : StyledActivity() {
                 if (loaded == null) {
                     body.removeAllViews()
                     body.addView(label("Couldn't read the stored history. Try again in a moment.", 13f, Palette.quiet))
+                    // Clearing first brings back "Loading your history…" so the tap shows it worked.
+                    body.button("Try again", primary = true) { body.removeAllViews(); render() }
                     return@onMain
                 }
                 show(loaded, loadMs, generation)

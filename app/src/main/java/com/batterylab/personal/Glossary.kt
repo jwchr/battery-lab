@@ -267,7 +267,7 @@ object Glossary {
         val energyRule = "Total battery energy in watt-hours (Wh) equals full batteries used times estimated capacity in mAh times 3.87 volts, divided by 1,000."
         section = "What it costs"
         entry("Electricity so far", "Estimated cost of energy that passed through the phone battery since tracking began.",
-            "$energyRule Divide Wh by 1,000 to get kilowatt-hours (kWh), then multiply by the price in cents per kWh. Use the saved rate, or 18 cents per kWh until one is set; charger losses are excluded.")
+            "$energyRule Divide Wh by 1,000 to get kilowatt-hours (kWh), then multiply by the price in cents per kWh. Use the saved rate, or 18 cents per kWh until one is set: the U.S. average home electricity price over the 12 months ending September 2026, from the U.S. Energy Information Administration (Electric Power Monthly, Table 5.3). Charger losses are excluded.")
         entry("Per full charge", "Estimated battery-side electricity cost for one full charge, with its energy in Wh.",
             "Full-charge Wh equals estimated mAh capacity times 3.87 divided by 1,000. Divide Wh by 1,000 and multiply by the saved cents-per-kWh rate, or the default 18 cents. This does not include charger losses.")
         entry("A year at this pace", "Estimated yearly cost if use continues at the recorded pace.",

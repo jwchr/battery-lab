@@ -457,7 +457,7 @@ class StatsActivity : StyledActivity() {
         val fullCharge = prep.fullCharge
         section("What it costs", "${money(cents)} of electricity so far.",
             if (prep.rateIsSet) "At ${f1(rate)}\u00a2 per kWh, the rate you set." else
-                "At ${f1(rate)}\u00a2 per kWh, a rough US average. Set your own rate from your bill." +
+                "At ${f1(rate)}\u00a2 per kWh, the U.S. average home price. Set your own rate from your bill." +
                     " Battery side only; charger losses add roughly 15\u201320% at the wall.").apply {
             addTileList(listOfNotNull(
                 Tile(money(fullCharge / 1000 * rate), "per full charge", "${f1(fullCharge)} Wh", "\uD83D\uDCB5"),
@@ -1024,7 +1024,12 @@ class StatsActivity : StyledActivity() {
         const val FLOOR_M = 3.0
         const val BANANA_WH = 122.0          // 105 kcal
         const val LAPTOP_WH = 50.0
-        /** Shown until the user sets their own rate; their rate lives only in the phone's settings. */
+        /**
+         * Shown until the user sets their own rate; their rate lives only in the phone's settings.
+         * U.S. average residential price, rolling 12 months ending September 2026: 18.05 cents per kWh,
+         * rounded to the nearest cent. Source: U.S. Energy Information Administration, Electric Power
+         * Monthly, Table 5.3 (eia.gov/electricity/monthly, data released November 24, 2026).
+         */
         const val DEFAULT_CENTS_PER_KWH = 18.0
         const val KEY_CENTS_PER_KWH = "cents_per_kwh"
         const val FRIDGE_KWH_PER_DAY = 1.5

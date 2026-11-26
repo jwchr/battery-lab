@@ -2,17 +2,6 @@
 <issues format="6" by="lint 9.5.2" type="baseline" client="gradle" dependencies="false" name="AGP (9.5.2)" variant="all" version="9.5.2">
 
     <issue
-        id="WearStandaloneAppFlag"
-        message="Missing `&lt;meta-data android:name=&quot;com.google.android.wearable.standalone&quot; ../>` element"
-        errorLine1="    &lt;application android:allowBackup=&quot;false&quot; android:label=&quot;Battery Lab Watch&quot;"
-        errorLine2="     ~~~~~~~~~~~">
-        <location
-            file="src/main/AndroidManifest.xml"
-            line="5"
-            column="6"/>
-    </issue>
-
-    <issue
         id="GradleDependency"
         message="A newer version of com.google.android.gms:play-services-wearable than 19.0.0 is available: 20.0.1"
         errorLine1="    implementation(&quot;com.google.android.gms:play-services-wearable:19.0.0&quot;)"
@@ -63,7 +52,7 @@
         errorLine2="        ^">
         <location
             file="src/main/AndroidManifest.xml"
-            line="7"
+            line="9"
             column="9"/>
     </issue>
 

@@ -117,9 +117,22 @@ object Background {
     fun onMainDelayed(delayMs: Long, block: () -> Unit) { main.postDelayed(block, delayMs) }
 }
 
+/**
+ * Which run of the job is current. Android can stop one run and start the next on the same
+ * service before the first run's background work returns; that late work checks [live] so it
+ * can't finish the new run or start a second Ring read.
+ */
+internal class JobRuns {
+    // Atomic so a start and a stop on different threads can't lose a count and revive a stopped run.
+    private val current = java.util.concurrent.atomic.AtomicInteger(0)
+    fun start(): Int = current.incrementAndGet()
+    fun stop() { current.incrementAndGet() }
+    fun live(run: Int) = run == current.get()
+}
+
 class BatteryPollService : JobService() {
     private var reader: RingReader? = null
-    @Volatile private var stopped = false
+    private val runs = JobRuns()
 
     /**
      * Runs on the main thread, so it only does what must happen there: render Samsung's widget
@@ -127,7 +140,7 @@ class BatteryPollService : JobService() {
      * once that work (and the optional Ring read) is done.
      */
     override fun onStartJob(params: JobParameters): Boolean {
-        stopped = false
+        val run = runs.start()
         PowerConnectionReceiver.ensureRegistered(this)
         val store = BatteryStore.get(this)
         val startedMs = android.os.SystemClock.elapsedRealtime()
@@ -149,7 +162,7 @@ class BatteryPollService : JobService() {
                 ForecastKeeper.tick(this, store, listOfNotNull("phone", store.primaryWatchId(), BatteryStore.RING_ID))
                 refreshCapabilitiesIfDue(store)
                 // Phone-side only: writes the backup file (at most every 12 h); the Drive app uploads it.
-                if (!stopped) DriveBackup.maybeBackup(this, store)
+                if (runs.live(run)) DriveBackup.maybeBackup(this, store)
             } catch (e: Throwable) {
                 // Throwable, not Exception: an Error here would kill the single io thread's process.
                 try { store.logProbe("job", "Background work failed: ${e.javaClass.simpleName}") } catch (_: Throwable) { }
@@ -164,13 +177,13 @@ class BatteryPollService : JobService() {
                 ExperimentEndpoint.backgroundReadAllowed(PollScheduler.ringEnabled(this),
                     PollScheduler.ringAddress(this) != null, store.activeExperiment()?.mode)
             } catch (_: Throwable) { false }
-            Background.onMain { readRingOrFinish(params, store, ringAllowed) }
+            Background.onMain { readRingOrFinish(params, store, ringAllowed, run) }
         }
         return true
     }
 
-    private fun readRingOrFinish(params: JobParameters, store: BatteryStore, ringAllowed: Boolean) {
-        if (stopped) return
+    private fun readRingOrFinish(params: JobParameters, store: BatteryStore, ringAllowed: Boolean, run: Int) {
+        if (!runs.live(run)) return
         val address = PollScheduler.ringAddress(this)
         if (!ringAllowed || !PollScheduler.ringEnabled(this) || address == null) {
             jobFinished(params, false)
@@ -186,7 +199,7 @@ class BatteryPollService : JobService() {
                     if (error != null) store.logProbe(BatteryStore.RING_ID, error)
                 } catch (_: Throwable) { }
                 // Always finish, or the job holds its wakelock until the system stops it.
-                Background.onMain { if (!stopped) jobFinished(params, false) }
+                Background.onMain { if (runs.live(run)) jobFinished(params, false) }
             }
         }.also { it.start() }
     }
@@ -212,7 +225,7 @@ class BatteryPollService : JobService() {
     }
 
     override fun onStopJob(params: JobParameters): Boolean {
-        stopped = true
+        runs.stop()
         reader?.cancel()
         reader = null
         return false

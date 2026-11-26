@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.ranging.RangingManager
 
 /**
  * What this phone's radios support, for the read-only card in RF Lab (R31). Only yes/no feature
@@ -26,6 +27,26 @@ object RadioCapabilities {
             "Wi-Fi round-trip timing (RTT)" to safe { pm.hasSystemFeature(PackageManager.FEATURE_WIFI_RTT) },
             "Wi-Fi Aware" to safe { pm.hasSystemFeature(PackageManager.FEATURE_WIFI_AWARE) },
             "Ultra-wideband (UWB)" to (if (Build.VERSION.SDK_INT >= 31) safe { pm.hasSystemFeature(PackageManager.FEATURE_UWB) } else false),
+        ) + ranging(
+            Build.VERSION.SDK_INT,
+            channelSounding = { if (Build.VERSION.SDK_INT >= 36) safe { pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE_CHANNEL_SOUNDING) } else false },
+            rangingManager = { if (Build.VERSION.SDK_INT >= 36) safe { app.getSystemService(RangingManager::class.java) != null } else false },
         )
     }
+
+    /** First Android version with Channel Sounding and the ranging service (Android 16, API 36). */
+    const val RANGING_SDK = 36
+
+    /**
+     * Android 16+ distance features. Older phones answer "no" without asking, since the
+     * feature names and the service don't exist there. Presence checks only: no session starts.
+     */
+    fun ranging(
+        sdk: Int,
+        channelSounding: () -> Boolean?,
+        rangingManager: () -> Boolean?,
+    ): List<Pair<String, Boolean?>> = listOf(
+        "Bluetooth Channel Sounding (distance)" to (if (sdk >= RANGING_SDK) channelSounding() else false),
+        "Android ranging service" to (if (sdk >= RANGING_SDK) rangingManager() else false),
+    )
 }

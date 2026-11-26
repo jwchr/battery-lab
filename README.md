@@ -41,9 +41,9 @@ repository `jwchr/battery-lab` and run
 both artifacts (phone and Wear OS APK). Builds require no paid services other than
 GitHub Actions if your account exceeds its included build minutes.
 
-Alternatively, open this folder as a project in Android Studio with Java 17, Android SDK 35,
-and Gradle 8.9, and build the `app` and `wear` debug variants. This project intentionally
-omits a Gradle wrapper binary; CI provisions Gradle 8.9 directly.
+Alternatively, open this folder as a project in Android Studio with Java 17, Android SDK 37.2,
+and Gradle 9.9.2, and build the `app` and `wear` debug variants. This project intentionally
+omits a Gradle wrapper binary; CI provisions Gradle 9.9.2 directly.
 
 Install the `app` APK on the Samsung phone and the `wear` APK on the paired Galaxy Watch8.
 Apps have matching `applicationId` and need matching signing (debug keys from a single

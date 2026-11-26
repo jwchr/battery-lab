@@ -10,8 +10,11 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.os.BatteryManager
 import android.os.Build
+import com.google.android.gms.tasks.Task
 import com.google.android.gms.wearable.PutDataMapRequest
 import com.google.android.gms.wearable.Wearable
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executor
 
 /** Samples locally, then sends an update via the Wear OS Data Layer. No phone polling. */
 object WatchReporter {
@@ -44,9 +47,13 @@ object WatchReporter {
     }
 
     fun send(context: Context, onFinished: (Boolean) -> Unit) {
+        val completion = JobFinishGate()
+        fun finish(success: Boolean) {
+            completion.finish { onFinished(success) }
+        }
         val percent = batteryPercent(context)
         if (percent == null) {
-            onFinished(false)
+            finish(false)
             return
         }
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -63,16 +70,34 @@ object WatchReporter {
             dataMap.putBoolean("charging", charging)
             dataMap.putString("model", Build.MODEL)
         }.asPutDataRequest()
-        Wearable.getDataClient(context).putDataItem(request)
-            .addOnSuccessListener { onFinished(true) }
-            .addOnFailureListener { onFinished(false) }
+        finishWhenDone(Wearable.getDataClient(context).putDataItem(request), context.mainExecutor, ::finish)
+    }
+
+    /** Reports the send's outcome once: success is true, a failure or a cancel is false. */
+    internal fun finishWhenDone(task: Task<*>, executor: Executor, finish: (Boolean) -> Unit) {
+        task.addOnSuccessListener(executor) { finish(true) }
+            .addOnFailureListener(executor) { finish(false) }
+            .addOnCanceledListener(executor) { finish(false) }
     }
 }
 
 class WatchBatteryJob : JobService() {
+    private val jobs = ConcurrentHashMap<Int, JobFinishGate>()
+
     override fun onStartJob(params: JobParameters): Boolean {
-        WatchReporter.send(this) { jobFinished(params, false) }
+        val gate = JobFinishGate()
+        jobs.put(params.jobId, gate)?.stop()
+        WatchReporter.send(this) {
+            try {
+                gate.finish { jobFinished(params, false) }
+            } finally {
+                jobs.remove(params.jobId, gate)
+            }
+        }
         return true
     }
-    override fun onStopJob(params: JobParameters): Boolean = false
+    override fun onStopJob(params: JobParameters): Boolean {
+        jobs.remove(params.jobId)?.stop()
+        return false
+    }
 }

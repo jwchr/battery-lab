@@ -14,8 +14,6 @@ import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
-import java.text.DateFormat
-import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -41,40 +39,16 @@ class StatsActivity : StyledActivity() {
     }
 
     override fun onDestroy() {
-        store.close()
+        ++renderGeneration
+        journalDialog?.dismiss() // a Save or Delete still in flight must not leak its dialog window
+        journalDialog = null
         super.onDestroy()
     }
 
-    /** Everything the page needs from the database and the heavy math, computed off the main thread. */
-    private class Loaded(
-        val devices: List<Triple<String, String, Int>>,
-        val data: List<List<Reading>>,
-        val gaps: GapLimits,
-        val stats: List<DeviceStats>,
-        val capacity: CapacityEstimate,
-        val usage: UsageWindow?,
-        val idle: List<IdleStretch>,
-        val phoneWidget: List<Reading>,
-        val drain: DrainPrep?,
-        val forecasts: List<Forecast>,
-        /** Watch-app readings, compared against the widget's in the audit. */
-        val watchCompanion: List<Reading>,
-        /** Per device (same order as [devices]): each window's label and coverage, worked out off the main thread. */
-        val coverage: List<List<Pair<String, Coverage>>>,
-        /** Per device: drain spread over the last 30 days, or null with too few stretches. */
-        val spread: List<DrainSpread?>,
-        /** Per device: weekday and weekend drain over the last 30 days, or null with too little data. */
-        val week: List<WeekSplit?>,
-        /** Per device: its observed discharge stretches, found off the main thread. */
-        val stretches: List<List<DischargeStretch>>,
-        val comparison: MatchedStats?,
-        val phoneCapacity: CapacityProxySummary,
-    )
-
-    /** The drain breakdown and the app names it shows, prepared off the main thread. */
-    private class DrainPrep(val recent: List<Reading>, val d: DrainBreakdown, val labels: Map<String, String>, val hidden: Int?)
+    private class Loaded(val computed: StatsPrecomputer.Result, val spec: PhoneSpec?, val sticky: Intent?, val firmware: String)
 
     @Volatile private var renderGeneration = 0
+    private var journalDialog: android.app.AlertDialog? = null
 
     override fun iconFor(eyebrow: String): String? = SECTION_ICONS[eyebrow]
 
@@ -91,14 +65,14 @@ class StatsActivity : StyledActivity() {
         }
         Background.io.execute {
             // A newer render or a closed screen makes this load pointless; skip it before the work.
-            if (isDestroyed || generation != renderGeneration) return@execute
+            if (isDestroyed || isFinishing || generation != renderGeneration) return@execute
             val started = android.os.SystemClock.elapsedRealtime()
             val loaded = try { load() } catch (e: Exception) {
                 android.util.Log.w(TAG, "Stats load failed", e); null
             }
             val loadMs = android.os.SystemClock.elapsedRealtime() - started
             Background.onMain {
-                if (isDestroyed || generation != renderGeneration) return@onMain
+                if (isDestroyed || isFinishing || generation != renderGeneration) return@onMain
                 val shown = android.os.SystemClock.elapsedRealtime()
                 if (loaded == null) {
                     body.removeAllViews(); renderTitle()
@@ -106,46 +80,29 @@ class StatsActivity : StyledActivity() {
                     return@onMain
                 }
                 show(loaded)
-                android.util.Log.i(TAG, "Stats: ${loaded.data.sumOf { it.size }} readings, load ${loadMs} ms (background), " +
+                android.util.Log.i(TAG, "Stats: ${loaded.computed.readingCount} readings, load ${loadMs} ms (background), " +
                     "views ${android.os.SystemClock.elapsedRealtime() - shown} ms (main)")
             }
         }
     }
 
     private fun load(): Loaded {
+        val now = System.currentTimeMillis()
         val ringId = PollScheduler.ringDeviceId(this)
         val watchId = store.primaryWatchId()
         val devices = listOf(Triple("phone", "Phone", Palette.phone),
             Triple(watchId ?: "watch:unknown", "Galaxy Watch8", Palette.watch), Triple(ringId, "Galaxy Ring", Palette.ring))
-        val hourOf = { ms: Long -> Calendar.getInstance().apply { timeInMillis = ms }.get(Calendar.HOUR_OF_DAY) }
-        val data = devices.map { (id, _, _) -> BatteryStats.fullHoldAsCharging(store.since(id, 0L)) }
-        val gaps = PollScheduler.gapLimits(this)
-        val stats = data.map { BatteryStats.device(it, hourOf, gaps) }
-        val phone = data[0]
-        val capacity = HonestyAuditor.estimatePhoneCapacity(phone, gaps)
-        val now = System.currentTimeMillis()
-        val stretches = data.map { readings ->
-            BatteryMath.dischargeStretches(readings.map { BatteryPoint(it.timeMs, it.percent, it.charging) }, gaps = gaps) }
-        val isWeekend = { ms: Long -> Calendar.getInstance().apply { timeInMillis = ms }.get(Calendar.DAY_OF_WEEK)
-            .let { it == Calendar.SATURDAY || it == Calendar.SUNDAY } }
-        val usage = if (UsageSource.granted(this)) UsageSource.load(this, now - 7 * 86_400_000L, now) else null
-        val idle = IdleAnalysis.stretches(phone, usage?.screenOn, gaps = gaps, screenCoverageStartMs = usage?.coverageStartMs)
-        // The drain analysis and package-manager label lookups took ~116 ms on the main thread.
-        val drain = usage?.let { u ->
-            val start = u.coverageStartMs
-            val recent = if (start == null) emptyList() else phone.filter { it.timeMs >= start }
-            val d = DrainAnalysis.analyze(recent.map(BatteryPoint::of), u.screenOn, u.apps, gaps.stepMs,
-                capacity.combinedMah, u.services)
-            DrainPrep(recent, d, d.apps.take(8).associate { it.app to UsageSource.label(this, it.app) },
-                UsageSource.hiddenCount(this))
-        }
-        return Loaded(devices, data, gaps, stats, capacity, usage, idle,
-            store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L), drain, store.forecasts(),
-            if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList(),
-            data.map { readings -> coverageRows(readings.map { it.timeMs }, now, gaps) },
-            stretches.map { DrainSpreadMath.of(it, now - 30 * 86_400_000L) },
-            stretches.map { WeekSplitMath.of(it, now - 30 * 86_400_000L, isWeekend) }, stretches,
-            StatsComparison.matched(data, gaps), CapacityProxy.summarize(phone, now))
+        val raw = StatsPrecomputer.Raw(devices, devices.map { store.since(it.first, 0L) }, PollScheduler.gapLimits(this),
+            SectionResult.capture { if (UsageSource.granted(this)) UsageSource.load(this, now - 7 * 86_400_000L, now) else null },
+            SectionResult.capture { store.since(SamsungWidgetSource.PHONE_WIDGET_DEVICE, 0L) },
+            SectionResult.capture { if (watchId == SamsungWidgetSource.WATCH_DEVICE) store.companionWatchReadings(0L) else emptyList() },
+            SectionResult.capture { store.forecasts() }, SectionResult.capture { store.journal(40) },
+            SectionResult.capture { store.probeEvents(Overhead.DEVICE, now - 86_400_000L) },
+            SectionResult.capture { store.capabilities() }, SectionResult.capture { UsageSource.hiddenCount(this) },
+            PollScheduler.prefs(this).getFloat(KEY_CENTS_PER_KWH, DEFAULT_CENTS_PER_KWH.toFloat()).toDouble(),
+            PollScheduler.prefs(this).contains(KEY_CENTS_PER_KWH), { UsageSource.label(this, it) })
+        return Loaded(StatsPrecomputer.compute(raw, now), PhoneSpecs.forModel(Build.MODEL),
+            registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED)), CapabilityProbe.firmware())
     }
 
     private fun renderTitle() {
@@ -170,43 +127,40 @@ class StatsActivity : StyledActivity() {
         val oldScroll = scroll.scrollY
         body.removeAllViews()
         renderTitle()
-        val devices = l.devices; val data = l.data; val gaps = l.gaps; val stats = l.stats
-        val capacity = l.capacity; val usage = l.usage; val idle = l.idle; val phone = data[0]
-        val leftOut = l.comparison?.let { comparison ->
-            devices.indices.filter { data[it].isNotEmpty() && it !in comparison.deviceIndexes }
-                .joinToString(", ") { devices[it].second }
-        }.orEmpty()
-        val leftOutCaption = if (leftOut.isEmpty()) "" else " Left out: $leftOut, not enough shared history yet."
-
+        val r = l.computed
+        val devices = r.devices
         val sectionMs = mutableListOf<Pair<String, Long>>()
         fun timed(name: String, block: () -> Unit) {
             val t0 = android.os.SystemClock.elapsedRealtime(); block()
             sectionMs += name to android.os.SystemClock.elapsedRealtime() - t0
         }
-        timed("health") { renderPhoneHealth(l.phoneCapacity, capacity) }
-        timed("planner") { renderPlanner(devices, data, gaps) }
-        timed("drain") { renderDrain(l.drain) }
-        timed("nights") { renderNights(idle) }
-        timed("charge times") { renderChargeTimes(devices, data, gaps) }
-        timed("charging") { renderCharging(phone, gaps) }
-        timed("audit") { renderAudit(phone, l.phoneWidget, (data[1] + l.watchCompanion).sortedBy { it.timeMs }, data[2], capacity, gaps) }
-        timed("forecasts") { renderForecasts(l.forecasts, l.devices) }
-        timed("journal") { renderJournal(idle) }
-        timed("heat") { renderHeat(phone, gaps) }
-        timed("numbers") { renderNumbers(devices, stats) }
-        timed("habits") { renderHabits(stats[0]) }
-        timed("hours") { renderHours(devices, stats) }
-        timed("showdown") { renderShowdown(devices, l.comparison, leftOutCaption) }
-        timed("headtohead") { renderHeadToHead(devices, l.comparison, leftOutCaption) }
-        timed("rolling") { renderRolling(devices, data, l.stretches) }
-        timed("spread") { renderSpread(devices, l.spread) }
-        timed("week") { renderWeek(devices, l.week) }
-        timed("temperature") { BatteryStats.temperature(phone)?.let(::renderTemperature) }
-        // The same capacity figure as the Phone battery capacity headline.
-        timed("fun") { renderFun(stats[0], l.phoneCapacity.estimateMah ?: capacity.combinedMah, phone) }
-        timed("coverage") { renderCoverage(devices, l.coverage, gaps) }
-        timed("overhead") { renderOverhead() }
-        timed("capabilities") { renderCapabilities() }
+        timed("health") { sectionValue("Phone battery capacity", r.health) { renderPhoneHealth(it.phoneCapacity, it.capacity, l.spec, l.sticky) } }
+        timed("planner") { sectionValue("Will it last?", r.planner, ::renderPlanner) }
+        timed("drain") { sectionValue("What's draining it", r.drain) { renderDrain(it, r.now) } }
+        timed("nights") { sectionValue("Asleep and idle", r.nights) { renderNights(it, r.now) } }
+        timed("charge times") { sectionValue("How long to charge", r.chargeTimes) { renderChargeTimes(devices, it) } }
+        timed("charging") { sectionValue("Charging speed", r.charging, ::renderCharging) }
+        timed("audit") { sectionValue("Honesty audit", r.audit, ::renderAudit) }
+        timed("forecasts") { sectionValue("Prediction report card", r.forecasts, ::renderForecasts) }
+        timed("journal") { sectionValue("Change journal", r.journal) { renderJournal(it, r.now) } }
+        timed("heat") { sectionValue("Heat and charge level", r.heat, ::renderHeat) }
+        timed("numbers") { sectionValue("By the numbers", r.stats) { renderNumbers(devices, it, r.now) } }
+        timed("habits") { sectionValue("Charging habits", r.stats) { renderHabits(it[0], r.now) } }
+        timed("hours") { sectionValue("Around the clock", r.stats) { renderHours(devices, it) } }
+        timed("showdown") { sectionValue("Showdown", r.comparison) { c ->
+            sectionValue("Showdown", r.leftOutCaption) { renderShowdown(devices, c, it, r.now) }
+        } }
+        timed("headtohead") { sectionValue("Head to head", r.comparison) { c ->
+            sectionValue("Head to head", r.leftOutCaption) { renderHeadToHead(devices, c, it, r.now) }
+        } }
+        timed("rolling") { sectionValue("Over time", r.rolling) { renderRolling(devices, it) } }
+        timed("spread") { sectionValue("Drain spread", r.spread) { renderSpread(devices, it, r.now) } }
+        timed("week") { sectionValue("Weekdays vs weekends", r.week) { renderWeek(devices, it) } }
+        timed("temperature") { sectionValue("Temperature", r.temperature) { it?.let { t -> renderTemperature(t, r.now) } } }
+        timed("fun") { sectionValue("Just for fun", r.funFacts) { it?.let(::renderFun) } }
+        timed("coverage") { sectionValue("Data coverage", r.coverage) { renderCoverage(devices, it, r.gaps) } }
+        timed("overhead") { sectionValue("What Battery Lab costs", r.overhead, ::renderOverhead) }
+        timed("capabilities") { sectionValue("What each device can report", r.capabilities) { renderCapabilities(it, l.firmware) } }
         // Which sections still cost main-thread time (audit #4 A6); only the slow ones are listed.
         android.util.Log.i(TAG, "Stats sections (main, >=5 ms): " +
             sectionMs.filter { it.second >= 5 }.sortedByDescending { it.second }.joinToString { "${it.first} ${it.second}" }.ifEmpty { "none" })
@@ -215,11 +169,18 @@ class StatsActivity : StyledActivity() {
         scroll.post { scroll.scrollTo(0, oldScroll) }
     }
 
-    private fun renderPhoneHealth(estimate: CapacityProxySummary, lab: CapacityEstimate) {
-        // The recent (30-day) estimate first, so the headline and its caption describe one figure.
+    private fun <T> sectionValue(name: String, result: SectionResult<T>, render: (T) -> Unit) {
+        when (result) {
+            is SectionResult.Ok -> render(result.value)
+            is SectionResult.Failed -> {
+                android.util.Log.w(TAG, "Stats section $name failed: ${result.cause.javaClass.simpleName}")
+                section(name, "Couldn't load this section. Try again in a moment.")
+            }
+        }
+    }
+
+    private fun renderPhoneHealth(estimate: CapacityProxySummary, lab: CapacityEstimate, spec: PhoneSpec?, sticky: Intent?) {
         val capacity = estimate.estimateMah ?: lab.combinedMah
-        val spec = PhoneSpecs.forModel(Build.MODEL)
-        val sticky = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
         val cycles = if (Build.VERSION.SDK_INT >= 34) sticky?.getIntExtra(BatteryManager.EXTRA_CYCLE_COUNT, -1)?.takeIf { it > 0 } else null
         val health = when (sticky?.getIntExtra(BatteryManager.EXTRA_HEALTH, -1)) {
             BatteryManager.BATTERY_HEALTH_GOOD -> "Good"
@@ -276,9 +237,9 @@ class StatsActivity : StyledActivity() {
         }
     }
 
-    private fun renderNumbers(devices: List<Triple<String, String, Int>>, stats: List<DeviceStats>) {
+    private fun renderNumbers(devices: List<Triple<String, String, Int>>, stats: List<DeviceStats>, now: Long) {
         val first = stats.mapNotNull { it.firstMs }.minOrNull()
-        val days = first?.let { (System.currentTimeMillis() - it) / 86_400_000.0 } ?: 0.0
+        val days = first?.let { (now - it) / 86_400_000.0 } ?: 0.0
         section("By the numbers", "Since Battery Lab started watching.").apply {
             addTileList(listOf(
                 Tile(if (days < 2) "${(days * 24).roundToInt()} h" else "${f1(days)} days", "tracked", null, "\uD83D\uDCC5"),
@@ -292,21 +253,21 @@ class StatsActivity : StyledActivity() {
                 addTileList(listOfNotNull(
                     Tile(f1(s.fullBatteriesUsed), "full batteries used", "${s.percentUsed} points in all", "\uD83D\uDD0B"),
                     Tile("${s.charges.size}", if (s.charges.size == 1) "charge spotted" else "charges spotted", null, "\uD83D\uDD0C"),
-                    s.lowest?.let { Tile("${it.first}%", "lowest seen", "closest call · ${shortWhen(it.second)}", "\uD83E\uDEAB") },
+                    s.lowest?.let { Tile("${it.first}%", "lowest seen", "closest call · ${shortWhen(it.second, now)}", "\uD83E\uDEAB") },
                     Tile("${f1(s.longestOnBatteryHours)} h", "longest unplugged", null, "\u23F1\uFE0F"),
                 ))
             }
         }
     }
 
-    private fun renderHabits(phone: DeviceStats) {
+    private fun renderHabits(phone: DeviceStats, now: Long) {
         if (phone.charges.isEmpty() && phone.hoursAtOrAbove80 <= 0.0) return
         section("Charging habits", "How you charge your phone.").apply {
             val fast = phone.fastestCharge
             addTileList(listOfNotNull(
                 phone.averagePlugIn?.let { Tile("${it.roundToInt()}%", "average plug-in", "where you usually reach for the charger", "\uD83D\uDD0C") },
                 phone.averageUnplug?.let { Tile("${it.roundToInt()}%", "average unplug", null, "\uD83D\uDE80") },
-                fast?.let { Tile("${(60 / it.ratePerMinute!!).roundToInt()} s", "per 1% at best", "fastest charge · ${shortWhen(it.startMs)}", "\u26A1") },
+                fast?.let { Tile("${(60 / it.ratePerMinute!!).roundToInt()} s", "per 1% at best", "fastest charge · ${shortWhen(it.startMs, now)}", "\u26A1") },
                 Tile("${f1(phone.hoursAt100)} h", "parked at 100%", "time plugged in and already full", "\uD83C\uDD7F\uFE0F"),
                 Tile("${f1(phone.hoursAtOrAbove80)} h", "at 80% or more", "plugged in or not", "\uD83D\uDD1D"),
                 phone.partialChargeShare?.let { Tile("${(it * 100).roundToInt()}%", "of charges stopped short",
@@ -332,12 +293,12 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Percent-based comparisons over the same recorded calendar period, computed in [load]. */
-    private fun renderHeadToHead(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?, leftOutCaption: String) {
+    private fun renderHeadToHead(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?, leftOutCaption: String, now: Long) {
         val matched = comparison ?: return
         val rows = matched.daily
         if (rows.size < 2) return
         section("Head to head", "Phone, Watch and Ring side by side.",
-            "Same period: ${shortWhen(matched.fromMs)} to ${shortWhen(matched.toMs)}. " +
+            "Same period: ${shortWhen(matched.fromMs, now)} to ${shortWhen(matched.toMs, now)}. " +
                 "100% a day means one full battery. Coverage can differ; missing readings can undercount use. See Data coverage." +
                 leftOutCaption).apply {
             val most = rows.maxOf { it.percentPerDay }.coerceAtLeast(1.0)
@@ -358,12 +319,12 @@ class StatsActivity : StyledActivity() {
 
     private fun durationHours(h: Double) = if (h >= 48) "${f1(h / 24)} days" else "${h.roundToInt()} h"
 
-    private fun renderShowdown(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?, leftOutCaption: String) {
+    private fun renderShowdown(devices: List<Triple<String, String, Int>>, comparison: MatchedStats?, leftOutCaption: String, now: Long) {
         val matched = comparison ?: return
         val lasting = matched.runtime.sortedByDescending { it.fullChargeHours }
         if (lasting.size < 2) return
         section("Showdown", "Projected full-charge hours from observed percent loss.",
-            "Same period: ${shortWhen(matched.fromMs)} to ${shortWhen(matched.toMs)}. " +
+            "Same period: ${shortWhen(matched.fromMs, now)} to ${shortWhen(matched.toMs, now)}. " +
                 "100 × observed discharge hours ÷ points lost, not a measured full-to-empty run. " +
                 "Coverage and time on the charger can differ. See Data coverage." + leftOutCaption).apply {
             val top = lasting.first().fullChargeHours
@@ -376,35 +337,27 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Full-charge runtime averaged over rolling windows, so recent use can be compared with the long run. */
-    private fun renderRolling(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>,
-                              allStretches: List<List<DischargeStretch>>) {
-        val now = System.currentTimeMillis()
-        val day = 86_400_000L
-        val windows = listOf("24 HOURS" to day, "7 DAYS" to 7 * day, "30 DAYS" to 30 * day, "90 DAYS" to 90 * day, "6 MONTHS" to 182 * day, "1 YEAR" to 365 * day, "ALL TIME" to Long.MAX_VALUE / 2)
+    private fun renderRolling(devices: List<Triple<String, String, Int>>, allRows: List<List<StatsPrecomputer.RollingRow>>) {
         section("Over time", "How long a full charge would last at the drain rate seen.", "Projected 100% → 0% from " +
             "the observed stretches of discharge in each window (each at least an hour long, not full cycles), weighted by " +
             "how much battery each used. Longer windows fill in as history grows.").apply {
             devices.forEachIndexed { i, (_, name, color) ->
-                val stretches = allStretches[i]
-                if (stretches.isEmpty()) return@forEachIndexed
-                val first = data[i].first().timeMs
-                val rows = windows.mapNotNull { (labelText, span) ->
-                    val inWindow = BatteryMath.overlapping(stretches, now - span)
-                    val (winHours, winDrop) = BatteryMath.windowTotals(stretches, now - span)
-                    if (inWindow.isEmpty() || winDrop <= 0) null else Triple(labelText, 100.0 * winHours / winDrop,
-                        if (now - first < span && span < Long.MAX_VALUE / 2) "only ${f1((now - first) / day.toDouble())} days so far" else "${inWindow.size} observed stretch${if (inWindow.size == 1) "" else "es"}")
-                }
+                val rows = allRows[i]
                 if (rows.isEmpty()) return@forEachIndexed
                 addView(deviceBanner(name, color))
-                val top = rows.maxOf { it.second }
-                rows.forEach { (w, hours, cap) -> addView(barRow(w, hours / top, "${hours.roundToInt()} h", color, cap)) }
+                val top = rows.maxOf { it.hours }
+                rows.forEach { r ->
+                    val caption = r.daysSoFar?.let { "only ${f1(it)} days so far" }
+                        ?: "${r.count} observed stretch${if (r.count == 1) "" else "es"}"
+                    addView(barRow(r.label, r.hours / top, "${r.hours.roundToInt()} h", color, caption))
+                }
             }
         }
     }
 
     /** Audit #4 P0: how much of each recent window every device was actually read. */
     /** Audit #4 roadmap: how much the drain rate swings between stretches, worked out in [load]. */
-    private fun renderSpread(devices: List<Triple<String, String, Int>>, spread: List<DrainSpread?>) {
+    private fun renderSpread(devices: List<Triple<String, String, Int>>, spread: List<DrainSpread?>, now: Long) {
         if (spread.all { it == null }) return
         section("Drain spread", "How much your drain rate swings from one stretch to the next.", "Each observed " +
             "stretch of discharge from the last 30 days (at least an hour and 4 points, the same stretches as Over time) " +
@@ -415,8 +368,8 @@ class StatsActivity : StyledActivity() {
                 val d = spread[i] ?: return@forEachIndexed
                 addView(deviceBanner(name, color))
                 addView(label("Typical ${f1(d.median)}% per hour; most stretches ${f1(d.p10)} to ${f1(d.p90)}. " +
-                    "Calmest ${f1(d.calmest.percentPerHour)}% per hour (${shortWhen(d.calmest.startMs)}, ${f1(d.calmest.hours)} h); " +
-                    "hungriest ${f1(d.hungriest.percentPerHour)}% per hour (${shortWhen(d.hungriest.startMs)}, ${f1(d.hungriest.hours)} h).",
+                    "Calmest ${f1(d.calmest.percentPerHour)}% per hour (${shortWhen(d.calmest.startMs, now)}, ${f1(d.calmest.hours)} h); " +
+                    "hungriest ${f1(d.hungriest.percentPerHour)}% per hour (${shortWhen(d.hungriest.startMs, now)}, ${f1(d.hungriest.hours)} h).",
                     13f, Palette.body).apply { setPadding(0, dp(4), 0, dp(4)) })
                 val top = d.bands.max().coerceAtLeast(1)
                 d.bands.forEachIndexed { b, n ->
@@ -454,12 +407,6 @@ class StatsActivity : StyledActivity() {
         }
     }
 
-    private fun coverageRows(times: List<Long>, now: Long, gaps: GapLimits): List<Pair<String, Coverage>> {
-        val day = 86_400_000L
-        return listOf("24 HOURS" to day, "7 DAYS" to 7 * day, "30 DAYS" to 30 * day)
-            .mapNotNull { (w, span) -> CoverageMath.of(times, now - span, now, gaps.stepMs)?.let { w to it } }
-    }
-
     private fun renderCoverage(devices: List<Triple<String, String, Int>>, coverage: List<List<Pair<String, Coverage>>>, gaps: GapLimits) {
         val limit = gapText(gaps.stepMs)
         val cards = devices.mapIndexedNotNull { i, (_, name, color) ->
@@ -489,11 +436,11 @@ class StatsActivity : StyledActivity() {
         return when { min < 90 -> "${min.roundToInt()} min"; min < 48 * 60 -> "${f1(min / 60)} h"; else -> "${f1(min / 1440)} days" }
     }
 
-    private fun renderTemperature(t: TempStats) {
+    private fun renderTemperature(t: TempStats, now: Long) {
         section("Temperature", "How warm your phone runs.").apply {
             addTiles(listOfNotNull(
                 Triple("${f1(t.avgC)}°C", "average", "${f1(t.avgC * 9 / 5 + 32)}°F"),
-                Triple("${f1(t.maxC)}°C", "hottest", shortWhen(t.maxAtMs)),
+                Triple("${f1(t.maxC)}°C", "hottest", shortWhen(t.maxAtMs, now)),
                 Triple("${f1(t.minC)}°C", "coolest", null),
                 t.avgChargingC?.let { c -> Triple("${f1(c)}°C", "while charging",
                     t.avgOnBatteryC?.let { u -> "${f1(kotlin.math.abs(c - u))}° ${if (c >= u) "warmer" else "cooler"} than unplugged" }) },
@@ -501,16 +448,15 @@ class StatsActivity : StyledActivity() {
         }
     }
 
-    private fun renderFun(phone: DeviceStats, capacityMah: Double?, readings: List<Reading>) {
-        val cap = capacityMah ?: return
-        val wh = BatteryStats.wattHours(phone.percentUsed, cap)
+    private fun renderFun(prep: StatsPrecomputer.Fun) {
+        val wh = prep.wh
         if (wh <= 0.0) return
-        val days = readings.firstOrNull()?.let { (System.currentTimeMillis() - it.timeMs) / 86_400_000.0 } ?: 0.0
-        val rate = centsPerKwh()
+        val days = prep.days
+        val rate = prep.rate
         val cents = wh / 1000 * rate
-        val fullCharge = BatteryStats.wattHours(100, cap)
+        val fullCharge = prep.fullCharge
         section("What it costs", "${money(cents)} of electricity so far.",
-            if (rateIsSet()) "At ${f1(rate)}\u00a2 per kWh, the rate you set." else
+            if (prep.rateIsSet) "At ${f1(rate)}\u00a2 per kWh, the rate you set." else
                 "At ${f1(rate)}\u00a2 per kWh, a rough US average. Set your own rate from your bill." +
                     " Battery side only; charger losses add roughly 15\u201320% at the wall.").apply {
             addTileList(listOfNotNull(
@@ -519,7 +465,7 @@ class StatsActivity : StyledActivity() {
                 Tile(hoursOrMinutes(wh / 1000 / FRIDGE_KWH_PER_DAY * 24), "of a fridge", "a typical fridge uses about 1.5 kWh a day", "\uD83E\uDDCA"),
                 Tile(distance(wh / EV_WH_PER_METER), "in an electric car", "at about 300 Wh per mile", "\uD83D\uDE97"),
             ))
-            addView(makeButton(if (rateIsSet()) "Change your rate" else "Set your rate") { askRate() },
+            addView(makeButton(if (prep.rateIsSet) "Change your rate" else "Set your rate") { askRate(prep.rate, prep.rateIsSet) },
                 LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
         }
         section("Where it comes from", "What it takes to make ${f1(wh)} Wh.",
@@ -563,7 +509,7 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Where the phone's battery went: idle vs screen-on, and which apps were on screen while it dropped. */
-    private fun renderDrain(prep: DrainPrep?) {
+    private fun renderDrain(prep: StatsPrecomputer.Drain?, now: Long) {
         if (prep == null) {
             section("What's draining it", "See which apps cost the most.",
                 "Give Battery Lab Usage access and it will line up which apps were on screen with how fast the " +
@@ -574,7 +520,6 @@ class StatsActivity : StyledActivity() {
             }
             return
         }
-        val now = System.currentTimeMillis()
         val recent = prep.recent
         val d = prep.d
         if (d.totalDrop < 5 || !d.baselineKnown) {
@@ -607,9 +552,9 @@ class StatsActivity : StyledActivity() {
                     a.backgroundServiceHours.takeIf { it >= 0.1 }?.let { "+${f1(it)} h bg" }).joinToString(" \u00b7 "))) }
             if (top.isNotEmpty()) addView(label("Share of all battery lost, beyond idle drain, while the app was on screen; then its screen time.",
                 11.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
-            val candidates = d.apps.map { it.app }.filter { it != DrainAnalysis.UNATTRIBUTED }.take(15)
+            val candidates = prep.candidates
             if (candidates.isNotEmpty() || (prep.hidden ?: 0) > 0)
-                addView(makeButton("Hide apps from this list") { askHide(candidates) },
+                addView(makeButton("Hide apps from this list") { askHide(candidates, prep.labels, prep.hidden) },
                     LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
             evidence("Phone readings plus Android's app history: which app was on screen, and foreground services.",
                 "Drop beyond the idle rate while each app was on screen. " +
@@ -632,9 +577,8 @@ class StatsActivity : StyledActivity() {
         addView(label(lines.joinToString("\n"), 12.5f, Palette.body))
     }
 
-    private fun renderAudit(phone: List<Reading>, phoneWidget: List<Reading>, watch: List<Reading>, ring: List<Reading>,
-                            cap: CapacityEstimate, gaps: GapLimits) {
-        val a = HonestyAuditor.audit(phone, phoneWidget, watch, ring, cap.combinedMah, gaps)
+    private fun renderAudit(prep: StatsPrecomputer.Audit) {
+        val a = prep.report
         section("Honesty audit", "Do the percentages match the hardware?",
             "A–E check only the phone against its own battery data. F compares each device's widget and direct percent reports. " +
                 "“unknown” means there isn't enough data yet, not that something is wrong.").apply {
@@ -668,22 +612,15 @@ class StatsActivity : StyledActivity() {
                     "C: %/h in each band, counting steps where the percent held as well as fell. D: median voltage at rest " +
                     "(screen off, under 250 mA, 20–30 °C); resistance = ΔV / ΔI. E: counter throughput ÷ capacity. " +
                     "F: widget vs direct readings within 2 min (phone) or 5 min (Watch, Ring).",
-                "${phone.size} phone readings, ${phoneWidget.size} widget readings. Gaps longer than the polling " +
+                "${prep.phoneCount} phone readings, ${prep.widgetCount} widget readings. Gaps longer than the polling " +
                     "allowance are skipped, and readings flagged as repeats or jumps are left out.")
         }
     }
 
-    private fun renderForecasts(all: List<Forecast>, devices: List<Triple<String, String, Int>>) {
-        val pending = all.count { it.status == "PENDING" }
-        // Graded per device: a slow-draining Ring is easy to predict and would flatter the phone's
-        // numbers, and Android only predicts the phone.
-        val byDevice = all.groupBy { it.device }.map { (id, list) ->
-            val name = devices.firstOrNull { it.first == id }?.second ?: when {
-                id.startsWith("watch") -> "Watch"; id.startsWith("ring") -> "Ring"; else -> "Phone"
-            }
-            Triple(id, name, ForecastScoring.reportCard(list))
-        }.sortedBy { if (it.first == "phone") 0 else 1 }
-        val scored = byDevice.sumOf { (_, _, card) -> card.sumOf { it.n } }
+    private fun renderForecasts(prep: StatsPrecomputer.Forecasts) {
+        val pending = prep.pending
+        val byDevice = prep.cards
+        val scored = prep.scored
         section("Prediction report card", if (scored == 0) "Grading predictions…" else "How close each estimate came.",
             if (scored == 0) "Every hour Battery Lab freezes its own time-left estimate and Android's, then checks them 2, 4 and 8 hours later. " +
                 "$pending waiting to be graded." else null).apply {
@@ -698,10 +635,10 @@ class StatsActivity : StyledActivity() {
                         12.5f, Palette.body))
                 }
             }
-            evidence("Forecasts stored on this phone, frozen when made, model ${ForecastScoring.MODEL_VERSION}.",
+            evidence("Forecasts stored on this phone, frozen when made, model ${prep.model}.",
                 "Error = predicted % − actual % at each horizon, interpolated between the readings around it. " +
                     "Shown as the mean absolute error and the average signed bias (positive = too optimistic).",
-                "${all.size} forecasts; $pending still pending. A charge or a gap before a horizon removes that horizon from grading.")
+                "${prep.count} forecasts; $pending still pending. A charge or a gap before a horizon removes that horizon from grading.")
         }
     }
 
@@ -719,8 +656,8 @@ class StatsActivity : StyledActivity() {
         }, icon)
     }
 
-    private fun renderChargeTimes(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>, gaps: GapLimits) {
-        val times = data.map { ChargeTimes.analyze(it, gaps) }
+    private fun renderChargeTimes(devices: List<Triple<String, String, Int>>, prep: StatsPrecomputer.ChargeTiming) {
+        val times = prep.times
         if (times.all { it == null }) {
             section("How long to charge", "Collecting…", "Needs a charge watched while the device is on its charger.")
             return
@@ -754,51 +691,50 @@ class StatsActivity : StyledActivity() {
                 "Each crossing time is interpolated between the readings either side, then the median per 10% step is taken. " +
                     "Spans like 0 → 100% are measured directly when a charge covered them, otherwise added up from the steps; " +
                     "steps below the lowest one seen borrow its time.",
-                "${times.filterNotNull().sumOf { it.charges }} charges in all. Readings come every 15 minutes, so a " +
+                "${prep.count} charges in all. Readings come every 15 minutes, so a " +
                     "fast-charging Ring may cross several steps between two readings; those steps share the time evenly.")
         }
     }
 
-    private fun renderCharging(phone: List<Reading>, gaps: GapLimits) {
-        val charges = ChargeCurves.observedCharges(phone, gaps)
-        if (charges.isEmpty()) {
+    private fun renderCharging(prep: StatsPrecomputer.Charging) {
+        if (prep.count == 0) {
             section("Charging speed", "Collecting…", "Needs a charge watched from 20% or so upward.")
             return
         }
         section("Charging speed", "Minutes for each stretch of a charge.").apply {
-            val byType = charges.groupBy { it.pluggedType }
-            val longest = byType.values.flatMap { ChargeCurves.bandMedians(it).values }.maxOrNull() ?: 1.0
-            for ((type, list) in byType.entries.sortedByDescending { it.value.size }) {
-                val med = ChargeCurves.bandMedians(list)
+            val longest = prep.longest
+            for (bandGroup in prep.bands) {
+                val med = bandGroup.medians
                 if (med.isEmpty()) continue
-                addView(label("${if (type == null) "Charger type not recorded" else ChargeCurves.plugName(type)} · ${list.size} charge${if (list.size == 1) "" else "s"}",
+                addView(label("${bandGroup.name} · ${bandGroup.count} charge${if (bandGroup.count == 1) "" else "s"}",
                     12.5f, Palette.body).apply { setPadding(0, dp(10), 0, 0) })
                 for (band in ChargeCurves.BANDS) med[band]?.let {
                     addView(barRow("${band.first}→${band.second}%", it / longest, "${fmt(it)} min", Palette.phone))
                 }
             }
-            ChargeCurves.topUpPercent(charges)?.let {
+            prep.topUp?.let {
                 addTiles(listOf(Triple("+${fmt(it)}%", "from a 15-minute top-up", "starting near 20%")))
             }
             evidence("Phone readings while Android said it was charging, with the plug type it reported.",
                 "For each charge: time between first reaching each band's start and end. Median per band and plug type. " +
                     "Top-up walks the median 20→50, 50→80 and 80→100% band times in order for 15 minutes.",
-                "${charges.size} observed charges. Charges with gaps over the polling allowance are skipped.")
+                "${prep.count} observed charges. Charges with gaps over the polling allowance are skipped.")
         }
     }
 
-    private fun renderNights(stretches: List<IdleStretch>) {
-        val rep = IdleAnalysis.report(stretches)
+    private fun renderNights(prep: StatsPrecomputer.Nights, now: Long) {
+        val rep = prep.report
+        val stretches = rep.stretches
         if (stretches.isEmpty()) {
             section("Asleep and idle", "Collecting…", "Needs at least 4 hours with the screen off and the phone unplugged.")
             return
         }
         section("Asleep and idle", rep.medianRate?.let { "Typically ${f1(it)}% an hour with the screen off, across every quiet stretch so far." } ?: "Idle drain").apply {
-            val best = stretches.minByOrNull { it.rate }!!
-            val worst = stretches.maxByOrNull { it.rate }!!
+            val best = prep.best!!
+            val worst = prep.worst!!
             addTiles(listOf(
-                Triple("${f1(best.rate)}%/h", "best idle stretch", "${shortWhen(best.startMs)}, ${f1(best.hours)} h"),
-                Triple("${f1(worst.rate)}%/h", "worst idle stretch", "${shortWhen(worst.startMs)}, ${f1(worst.hours)} h"),
+                Triple("${f1(best.rate)}%/h", "best idle stretch", "${shortWhen(best.startMs, now)}, ${f1(best.hours)} h"),
+                Triple("${f1(worst.rate)}%/h", "worst idle stretch", "${shortWhen(worst.startMs, now)}, ${f1(worst.hours)} h"),
             ))
             if (rep.unusual.isNotEmpty()) {
                 addView(label("Unusual", 12.5f, Palette.body).apply { setPadding(0, dp(12), 0, 0) })
@@ -807,7 +743,7 @@ class StatsActivity : StyledActivity() {
                         s.cellularShare?.takeIf { it >= 0.5 }?.let { "mostly on cellular" },
                         s.aodShare?.takeIf { it >= 0.5 }?.let { "Always-On Display" },
                         s.avgTempC?.takeIf { it >= 35 }?.let { "warm (${f1(it)}°C)" })
-                    addView(label("${shortWhen(s.startMs)} · ${f1(s.hours)} h · ${f1(s.rate)}%/h" +
+                    addView(label("${shortWhen(s.startMs, now)} · ${f1(s.hours)} h · ${f1(s.rate)}%/h" +
                         (if (why.isEmpty()) "" else " — ${why.joinToString(", ")}"), 12.5f, ink))
                 }
             } else if (stretches.size < 5) addView(label("Spotting unusual nights needs 5 stretches; ${stretches.size} so far.",
@@ -820,22 +756,10 @@ class StatsActivity : StyledActivity() {
     }
 
     private var targetHours = 12
-    private val reservePct = 15
 
-    private fun renderPlanner(devices: List<Triple<String, String, Int>>, data: List<List<Reading>>, gaps: GapLimits) {
-        val card = section("Will it last?", null, "Keeps a $reservePct% reserve. Each device is judged on its own history.")
+    private fun renderPlanner(prep: StatsPrecomputer.Plan) {
+        val card = section("Will it last?", null, "Keeps a ${StatsPrecomputer.RESERVE_PCT}% reserve. Each device is judged on its own history.")
         val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        // Rates don't depend on the chosen window, so work them out once, not on every chip tap.
-        class PlanInput(val name: String, val percent: Int, val rates: List<Double>, val chargeRate: Double?)
-        val now = System.currentTimeMillis()
-        val inputs = devices.zip(data).mapNotNull { (d, readings) ->
-            val last = readings.lastOrNull()?.takeIf { now - it.timeMs < 6 * 3_600_000L } ?: return@mapNotNull null
-            val rates = BatteryMath.dischargeStretches(readings.map(BatteryPoint::of), gaps = gaps).map { it.drop / it.hours }
-            val chargeRate = BatteryMath.median(ChargeCurves.observedCharges(readings, gaps)
-                .filter { it.peakMs - it.startMs >= 10 * 60_000L }
-                .map { (it.toPct - it.fromPct) / ((it.peakMs - it.startMs) / 60_000.0) })
-            PlanInput(d.second, last.percent, rates, chargeRate)
-        }
         fun fill() {
             holder.removeAllViews()
             holder.addView(chipRow(*listOf(8, 12, 18, 24).map { h ->
@@ -843,9 +767,7 @@ class StatsActivity : StyledActivity() {
                     setOnClickListener { targetHours = h; fill() }
                 }
             }.toTypedArray()))
-            val assessed = inputs.map {
-                ReadinessPlanner.assess(it.name, it.percent, it.rates, it.chargeRate, targetHours.toDouble(), reservePct)
-            }
+            val assessed = prep.assessed.getValue(targetHours)
             if (assessed.isEmpty()) holder.addView(label("No recent readings to plan with.", 12.5f, Palette.quiet))
             for (r in assessed) {
                 val verdict = when (r.meetsTarget) {
@@ -861,7 +783,7 @@ class StatsActivity : StyledActivity() {
                 }
                 holder.addView(label("${r.name} at ${r.percent}% — $verdict", 13f, ink).apply { setPadding(0, dp(8), 0, 0) })
             }
-            val order = ReadinessPlanner.order(assessed)
+            val order = prep.order.getValue(targetHours)
             if (order.size > 1) holder.addView(label("One charger? Charge ${order.joinToString(", then ") { it.name }}.",
                 12.5f, Palette.tintInk).apply { setPadding(0, dp(10), 0, 0) })
         }
@@ -873,11 +795,11 @@ class StatsActivity : StyledActivity() {
             "Discharge stretches of at least 1 h and a 4-point drop. Devices are never averaged together.")
     }
 
-    private fun renderHeat(phone: List<Reading>, gaps: GapLimits) {
-        val m = HeatExposure.matrix(phone, gaps)
-        val total = m.sumOf { it.sum() }
+    private fun renderHeat(prep: StatsPrecomputer.Heat) {
+        val m = prep.matrix
+        val total = prep.total
         if (total < 1) return
-        val most = m.maxOf { it.maxOrNull() ?: 0.0 }.coerceAtLeast(0.01)
+        val most = prep.most
         section("Heat and charge level", "Hours spent at each temperature and charge.",
             "Heat while nearly full ages a battery fastest, so the bottom-right box is the one to keep small.").apply {
             fun cell(text: String, alpha: Int?, bold: Boolean = false) = TextView(this@StatsActivity).apply {
@@ -889,8 +811,8 @@ class StatsActivity : StyledActivity() {
             fun row(vararg views: View) = LinearLayout(this@StatsActivity).apply {
                 views.forEach { addView(it, LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(dp(2), dp(2), dp(2), dp(2)) }) }
             }
-            addView(row(cell("", null), *HeatExposure.CHARGE_BANDS.map { cell(it, null, true) }.toTypedArray()))
-            HeatExposure.TEMP_BANDS.forEachIndexed { t, name ->
+            addView(row(cell("", null), *prep.chargeBands.map { cell(it, null, true) }.toTypedArray()))
+            prep.tempBands.forEachIndexed { t, name ->
                 addView(row(cell(name, null, true), *m[t].map { h ->
                     cell(if (h <= 0) "–" else if (h < 0.1) "<0.1 h" else "${f1(h)} h", (25 + 200 * h / most).toInt())
                 }.toTypedArray()))
@@ -905,15 +827,16 @@ class StatsActivity : StyledActivity() {
         "charger" to "New charger or cable", "aod" to "Always-On Display changed", "watch_face" to "Watch face changed",
         "battery_saver" to "Battery saver changed", "ring_firmware" to "Ring update", "note" to "Just a note")
 
-    private fun renderJournal(stretches: List<IdleStretch>) {
-        val entries = store.journal(40)
+    private fun renderJournal(prep: StatsPrecomputer.Journal, now: Long) {
+        val entries = prep.rows
         section("Change journal", "What changed, and did it matter?",
             "Battery Lab notes software updates by itself. Add your own changes so their effect on idle drain can be checked.").apply {
             if (entries.isEmpty()) addView(label("Nothing yet.", 12.5f, Palette.quiet).apply { setPadding(0, dp(8), 0, 0) })
-            entries.take(12).forEach { e ->
+            entries.forEach { row ->
+                val e = row.entry
                 val verdict = if (e.category == "note") null
-                else if (!UpdateImpactAnalysis.measures(e)) "Effect not measured: only the phone's idle drain is analysed so far."
-                else UpdateImpactAnalysis.assess(e, stretches).let { im ->
+                else if (!row.measured) "Effect not measured: only the phone's idle drain is analysed so far."
+                else row.impact!!.let { im ->
                     val d = im.delta
                     when {
                         im.strength == null || d == null -> "Needs 3 idle stretches before and after (${im.before.size} / ${im.after.size})."
@@ -921,12 +844,14 @@ class StatsActivity : StyledActivity() {
                             "(${f1(d.low)} to ${f1(d.high)})" + (im.confounder?.let { ". $it" } ?: "")
                     }
                 }
-                addView(label("${shortWhen(e.timeMs)} · ${e.title}", 13f, ink).apply {
+                addView(label("${shortWhen(e.timeMs, now)} · ${e.title}", 13f, ink).apply {
                     setPadding(0, dp(10), 0, 0)
                     setOnLongClickListener {
-                        android.app.AlertDialog.Builder(this@StatsActivity).setMessage("Delete this entry?")
-                            .setPositiveButton("Delete") { _, _ -> store.deleteJournal(e.id); render() }
-                            .setNegativeButton("Cancel", null).show()
+                        val dialog = android.app.AlertDialog.Builder(this@StatsActivity).setMessage("Delete this entry?")
+                            .setPositiveButton("Delete", null).setNegativeButton("Cancel", null).show()
+                        dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                            writeJournal(dialog, "delete") { db -> db.deleteJournal(e.id) }
+                        }
                         true
                     }
                 })
@@ -936,7 +861,7 @@ class StatsActivity : StyledActivity() {
                 LinearLayout.LayoutParams(-1, dp(44)).apply { topMargin = dp(12) })
             evidence("Entries saved on this phone: detected OS and app updates, and the ones you add.",
                 "Idle drain in screen-off stretches before vs after the change (Welch interval). OS updates skip the first " +
-                    "${UpdateImpactAnalysis.SETTLE_HOURS} h while the phone re-indexes. Cellular or Always-On Display shifts are flagged.",
+                    "${prep.settleHours} h while the phone re-indexes. Cellular or Always-On Display shifts are flagged.",
                 "Up to 14 stretches each side. 3+ per side is preliminary, 7+ established. Long-press an entry to delete it.")
         }
     }
@@ -946,17 +871,49 @@ class StatsActivity : StyledActivity() {
             .setItems(journalCategories.map { it.second }.toTypedArray()) { _, which ->
                 val (category, name) = journalCategories[which]
                 val input = android.widget.EditText(this).apply { setText(name); setSelection(name.length) }
-                android.app.AlertDialog.Builder(this).setTitle("Describe it").setView(input)
-                    .setPositiveButton("Save") { _, _ ->
-                        val device = when (category) { "ring_firmware" -> BatteryStore.RING_ID; "watch_face" -> "watch"; else -> "phone" }
-                        store.addJournal(device, category, input.text.toString().ifBlank { name })
-                        render()
-                    }.setNegativeButton("Cancel", null).show()
+                val dialog = android.app.AlertDialog.Builder(this).setTitle("Describe it").setView(input)
+                    .setPositiveButton("Save", null).setNegativeButton("Cancel", null).show()
+                dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    val device = when (category) { "ring_firmware" -> BatteryStore.RING_ID; "watch_face" -> "watch"; else -> "phone" }
+                    val title = input.text.toString().ifBlank { name }
+                    val tappedAtMs = System.currentTimeMillis() // the entry's time is the tap, not when the queued write runs
+                    writeJournal(dialog, "save") { db -> db.addJournal(device, category, title, timeMs = tappedAtMs) }
+                }
             }.show()
     }
 
-    private fun renderOverhead() {
-        val s = Overhead.summarize(store.probeEvents(Overhead.DEVICE, System.currentTimeMillis() - 86_400_000L))
+    private fun writeJournal(dialog: android.app.AlertDialog, operation: String, write: (BatteryStore) -> Unit) {
+        val button = dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE)
+        if (!button.isEnabled) return
+        button.isEnabled = false
+        dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).isEnabled = false
+        dialog.setCancelable(false)
+        journalDialog = dialog
+        ++renderGeneration
+        val context = applicationContext
+        Background.io.execute {
+            val result = SectionResult.capture { write(BatteryStore.get(context)) }
+            Background.onMain {
+                if (isDestroyed || isFinishing) return@onMain
+                when (result) {
+                    is SectionResult.Ok -> {
+                        // Forget it only once it closes: a failed write leaves it open, and onDestroy must still dismiss it.
+                        if (journalDialog === dialog) journalDialog = null
+                        dialog.dismiss(); render()
+                    }
+                    is SectionResult.Failed -> {
+                        android.util.Log.w(TAG, "Stats journal $operation failed: ${result.cause.javaClass.simpleName}")
+                        button.isEnabled = true
+                        dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).isEnabled = true
+                        dialog.setCancelable(true)
+                        android.widget.Toast.makeText(this, "Couldn't $operation this entry. Try again.", android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun renderOverhead(s: Overhead.Summary) {
         if (s.polls == 0) return
         section("What Battery Lab costs", "Its own footprint over the last day.").apply {
             addTiles(listOfNotNull(
@@ -971,10 +928,10 @@ class StatsActivity : StyledActivity() {
         }
     }
 
-    private fun renderCapabilities() {
-        val rows = StatsCapabilities.batteryOnly(store.capabilities())
+    private fun renderCapabilities(prep: StatsPrecomputer.Capabilities, firmware: String) {
+        val rows = prep.rows
         if (rows.isEmpty()) return
-        val verified = rows.count { it.status == CapabilityProbe.VERIFIED }
+        val verified = prep.verified
         section("What each device can report", "$verified of ${rows.size} fields recorded.").apply {
             for ((kind, list) in rows.groupBy { it.deviceKind }) {
                 addView(label(kind.replaceFirstChar { it.uppercase() }, 12.5f, Palette.body, bold = true).apply { setPadding(0, dp(10), 0, dp(2)) })
@@ -992,7 +949,7 @@ class StatsActivity : StyledActivity() {
             evidence("Checked once a day from the last 14 days of readings.",
                 "A field is “recorded” when non-empty values were actually stored; the step is the smallest change seen. " +
                     "Watch and Ring battery stats use only percent and charging state; other battery fields are not measured.",
-                "Firmware ${CapabilityProbe.firmware()}. The shared version leaves out sample values, addresses and serials.")
+                "Firmware $firmware. The shared version leaves out sample values, addresses and serials.")
         }
     }
 
@@ -1101,14 +1058,11 @@ class StatsActivity : StyledActivity() {
         else -> "${String.format(Locale.US, "%.2f", sec)} s"
     }
 
-    private fun rateIsSet() = PollScheduler.prefs(this).contains(KEY_CENTS_PER_KWH)
-    private fun centsPerKwh() = PollScheduler.prefs(this).getFloat(KEY_CENTS_PER_KWH, DEFAULT_CENTS_PER_KWH.toFloat()).toDouble()
-
     /** Asks for the all-in price per kWh (total bill \u00f7 kWh used); stored on the phone only. */
-    private fun askRate() {
+    private fun askRate(rate: Double, rateIsSet: Boolean) {
         val input = android.widget.EditText(this).apply {
             inputType = android.text.InputType.TYPE_CLASS_NUMBER or android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL
-            setText(if (rateIsSet()) f1(centsPerKwh()) else "")
+            setText(if (rateIsSet) f1(rate) else "")
             hint = "for example ${f1(DEFAULT_CENTS_PER_KWH)}"
         }
         android.app.AlertDialog.Builder(this)
@@ -1128,10 +1082,10 @@ class StatsActivity : StyledActivity() {
     }
 
     /** Pick apps to count as "Other". Already-hidden apps are never listed by name. */
-    private fun askHide(candidates: List<String>) {
-        val labels = candidates.map { UsageSource.label(this, it) }.toTypedArray()
+    private fun askHide(candidates: List<String>, names: Map<String, String>, hiddenCount: Int?) {
+        val labels = candidates.map { names.getValue(it) }.toTypedArray()
         val picked = BooleanArray(candidates.size)
-        val hidden = UsageSource.hiddenCount(this) ?: 0
+        val hidden = hiddenCount ?: 0
         android.app.AlertDialog.Builder(this)
             .setTitle("Count as \u201cOther\u201d")
             .setMultiChoiceItems(labels, picked) { _, i, on -> picked[i] = on }
@@ -1151,8 +1105,8 @@ class StatsActivity : StyledActivity() {
     private fun fmt(v: Double) = String.format(Locale.getDefault(), "%,d", v.roundToInt())
     private fun pctOf(part: Double, whole: Double) = if (whole <= 0) 0 else (part / whole * 100).roundToInt()
     /** Weekday and time for the past week; older events get their date, or "Tue 3:15 PM" could be months ago. */
-    private fun shortWhen(ms: Long) = java.text.SimpleDateFormat(
-        if (System.currentTimeMillis() - ms > 6 * 86_400_000L) "MMM d, h:mm a" else "EEE h:mm a", Locale.getDefault()).format(Date(ms))
+    private fun shortWhen(ms: Long, now: Long) = java.text.SimpleDateFormat(
+        if (now - ms > 6 * 86_400_000L) "MMM d, h:mm a" else "EEE h:mm a", Locale.getDefault()).format(Date(ms))
     private fun distance(m: Double) = if (m >= 1000) "${f1(m / 1000)} km" else "${fmt(m)} m"
     private fun hoursOrMinutes(h: Double) = if (h < 1.5) "${fmt(h * 60)} min" else durationHours(h)
     private fun hourName(h: Int) = when (h) { 0 -> "midnight"; 12 -> "noon"; in 1..11 -> "$h AM"; else -> "${h - 12} PM" }

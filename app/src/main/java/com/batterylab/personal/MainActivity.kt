@@ -994,11 +994,7 @@ class MainActivity : StyledActivity() {
             Background.io.execute {
                 val message = try {
                     val raw = contentResolver.openInputStream(uri) ?: error("the file couldn't be opened")
-                    val input = java.io.BufferedInputStream(raw).apply { mark(2) }
-                    val gz = input.read() == 0x1f && input.read() == 0x8b
-                    input.reset()
-                    val stream = if (gz) java.util.zip.GZIPInputStream(input) else input
-                    val (rows, tests) = stream.bufferedReader().use(store::importCsv)
+                    val (rows, tests) = BackupStreams.readMaybeGzip(raw, store::importCsv)
                     PollScheduler.afterImport(this, store)
                     "Restored $rows readings and $tests tests (duplicates skipped)"
                 } catch (e: Exception) { "Restore failed: ${e.message ?: e.javaClass.simpleName}" }

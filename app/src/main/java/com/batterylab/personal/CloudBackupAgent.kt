@@ -7,7 +7,6 @@ import android.app.backup.FullBackupDataOutput
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import java.io.File
-import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 /**
@@ -77,10 +76,9 @@ class CloudBackupAgent : BackupAgent() {
         private const val HELD = "restore.held"
         private const val MAX_TRIES = 3
 
-        // The file stream is closed even when a damaged header makes GZIPInputStream throw.
-        private fun lineCount(gz: File) = gz.inputStream().use { GZIPInputStream(it).bufferedReader().useLines { l -> l.count() } }
+        private fun lineCount(gz: File) = BackupStreams.readGzip(gz.inputStream()) { it.lineSequence().count() }
 
-        private fun historyRows(gz: File) = gz.inputStream().use { GZIPInputStream(it).bufferedReader().use { r -> historyRows(r) } }
+        private fun historyRows(gz: File) = BackupStreams.readGzip(gz.inputStream()) { historyRows(it) }
 
         /**
          * History rows in a held restore, or null if the archive itself is damaged (cut off, or not
@@ -129,7 +127,7 @@ class CloudBackupAgent : BackupAgent() {
             // Only a failure counts as a try: a process killed mid-import keeps its committed
             // progress and simply carries on next time.
             try {
-                val (readings, experiments) = GZIPInputStream(file.inputStream()).bufferedReader().use(store::importCsv)
+                val (readings, experiments) = BackupStreams.readGzip(file.inputStream(), store::importCsv)
                 marker.delete()
                 PollScheduler.afterImport(context, store)
                 store.logProbe("backup", "Cloud restore imported $readings readings, $experiments experiments")

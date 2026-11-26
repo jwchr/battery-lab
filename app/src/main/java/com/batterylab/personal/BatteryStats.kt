@@ -39,12 +39,13 @@ data class DeviceStats(
     val hoursAtOrAbove80: Double = 0.0,
 ) {
     val fullBatteriesUsed: Double get() = percentUsed / 100.0
-    val averagePlugIn: Double? get() = charges.filter { it.plugInKnown }.map { it.fromPct }.takeIf { it.isNotEmpty() }?.average()
-    val averageUnplug: Double? get() = charges.map { it.toPct }.takeIf { it.isNotEmpty() }?.average()
+    // The charge-habit values below are computed once when the stats are built (in the background for the Stats screen), not on each read.
+    val averagePlugIn: Double? = charges.filter { it.plugInKnown }.map { it.fromPct }.takeIf { it.isNotEmpty() }?.average()
+    val averageUnplug: Double? = charges.map { it.toPct }.takeIf { it.isNotEmpty() }?.average()
     /** Watched, ended charges unplugged before 100%, as a share of all watched, ended charges; null with none. */
-    val partialChargeShare: Double? get() = charges.filter { it.observed && it.ended }.takeIf { it.isNotEmpty() }
+    val partialChargeShare: Double? = charges.filter { it.observed && it.ended }.takeIf { it.isNotEmpty() }
         ?.let { list -> list.count { it.toPct < 100 }.toDouble() / list.size }
-    val fastestCharge: ChargeSession? get() = charges.filter { it.ratePerMinute != null }.maxByOrNull { it.ratePerMinute!! }
+    val fastestCharge: ChargeSession? = charges.filter { it.ratePerMinute != null }.maxByOrNull { it.ratePerMinute!! }
     val hungriestHour: Int? get() = drainByHour.withIndex().filter { it.value != null }.maxByOrNull { it.value!! }?.index
     val calmestHour: Int? get() = drainByHour.withIndex().filter { it.value != null }.minByOrNull { it.value!! }?.index
 }

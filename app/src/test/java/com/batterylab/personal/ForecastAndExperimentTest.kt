@@ -66,6 +66,19 @@ class ForecastAndExperimentTest {
         assertEquals("CENSORED_GAP", s.status)
     }
 
+    /** Neon review of #99 (99.1): the hole between the last reading before a horizon and the first after it. */
+    @Test fun aHoleAcrossTheHorizonIsAGap() {
+        // Neon's two cases: a lone reading 5 min past 2 h, and readings at 0, 45 and 130 min.
+        assertEquals("CENSORED_GAP", ForecastScoring.score(forecast(), listOf(r(125, 76)), t0 + 10 * h).status)
+        assertEquals("CENSORED_GAP", ForecastScoring.score(forecast(), listOf(r(0, 80), r(45, 79), r(130, 76)), t0 + 10 * h).status)
+        // With a 30-minute step, readings 25 min either side of 2 h span 50 min: more than one step.
+        val short = GapLimits(stepMs = 30 * m, stretchMs = 8 * h)
+        val across = (0..4).map { i -> r(i * 20L, 80 - i) } + listOf(r(95, 76), r(145, 74))
+        assertEquals("CENSORED_GAP", ForecastScoring.score(forecast(), across, t0 + 10 * h, short).status)
+        // The same readings with the usual one-hour step interpolate across it.
+        assertEquals(75.0, ForecastScoring.score(forecast(), across, t0 + 10 * h).actual2h!!, 1e-9)
+    }
+
     @Test fun noReadingsNearHorizonsIsAGap() {
         val s = ForecastScoring.score(forecast(), listOf(r(10, 79)), t0 + 10 * h)
         assertEquals("CENSORED_GAP", s.status)

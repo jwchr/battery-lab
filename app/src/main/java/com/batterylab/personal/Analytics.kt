@@ -455,6 +455,8 @@ object ForecastScoring {
                 if (unconfirmed(after)) return ForecastScore(actual[0], actual[1], actual[2], "PENDING")
                 charged = true; break
             }
+            // The stretch from the last reading at or before the horizon to the one after it counts too.
+            if (next != null && next.timeMs - (before.lastOrNull()?.timeMs ?: f.issuedMs) > gaps.stepMs) { gap = true; break }
             actual[i] = when {
                 prev != null && next != null && next.timeMs > prev.timeMs ->
                     prev.percent + (next.percent - prev.percent) * (target - prev.timeMs).toDouble() / (next.timeMs - prev.timeMs)

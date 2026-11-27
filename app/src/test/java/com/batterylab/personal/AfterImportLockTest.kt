@@ -11,19 +11,27 @@ class AfterImportLockTest {
         File("app/src/main/java/com/batterylab/personal/$name.kt")
     ).first { it.isFile }.readText()
 
+    /** The text inside the block that opens at [marker], up to its own matching closing brace. */
+    private fun lockedBlock(text: String, marker: String): String {
+        val open = text.indexOf(marker).also { assertTrue("missing $marker", it >= 0) } + marker.length - 1
+        var depth = 0
+        for (i in open until text.length) {
+            when (text[i]) { '{' -> depth++; '}' -> if (--depth == 0) return text.substring(open + 1, i) }
+        }
+        error("unclosed block after $marker")
+    }
+
     @Test fun afterImportReadsAndWritesTheRingSettingUnderTheTestLock() {
-        val body = source("BatteryPollService").substringAfter("fun afterImport(").substringBefore("\n    }\n")
-        val lock = body.indexOf("synchronized(experimentLock)")
-        val read = body.indexOf("ringEnabled(context)")
-        val write = body.indexOf("putBoolean(RING_ENABLED, false)")
-        assertTrue("lock=$lock read=$read write=$write", lock >= 0 && read > lock && write > read)
+        val body = source("BatteryPollService").substringAfter("fun afterImport(")
+        val locked = lockedBlock(body, "synchronized(experimentLock) {")
+        for (call in listOf("ringEnabled(context)", "activeExperiment()", "putBoolean(RING_ENABLED, false)"))
+            assertTrue("$call must sit inside the one locked block", locked.contains(call))
     }
 
     @Test fun abandonChangesTheRingSettingUnderTheSameLock() {
-        val abandon = source("MainActivity").substringAfter("private fun abandon(").substringBefore("\n    }\n")
-        assertTrue(abandon.contains("synchronized(PollScheduler.experimentLock) {"))
-        // Only the text between the lock's opening brace and its own closing brace counts.
-        val locked = abandon.substringAfter("synchronized(PollScheduler.experimentLock) {").substringBefore("\n        }\n")
-        assertTrue(locked.contains("PollScheduler.setRingEnabled("))
+        val abandon = source("MainActivity").substringAfter("private fun abandon(")
+        val locked = lockedBlock(abandon, "synchronized(PollScheduler.experimentLock) {")
+        for (call in listOf("store.abandonExperiment(", "PollScheduler.setRingEnabled("))
+            assertTrue("$call must sit inside the one locked block", locked.contains(call))
     }
 }

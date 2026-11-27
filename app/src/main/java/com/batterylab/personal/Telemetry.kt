@@ -8,6 +8,10 @@ import android.os.Build
 import android.os.PowerManager
 
 object PhoneBattery {
+    /** Level as a whole percent, in integer math: the old `level.toDouble() / scale * 100`
+     *  truncated 29, 57 and 58 (of 100) to one less (Neon deep review, Nov 26, 2026). */
+    internal fun percentOf(level: Int, scale: Int): Int = (level.toLong() * 100 / scale).toInt().coerceIn(0, 100)
+
     /** Whether a charger is connected right now, or null if Android won't say. */
     fun isPlugged(context: Context): Boolean? =
         context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -19,7 +23,7 @@ object PhoneBattery {
         val level = intent.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
         val scale = intent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
         if (level < 0 || scale <= 0) return null
-        val percent = (level.toDouble() / scale * 100).toInt().coerceIn(0, 100)
+        val percent = percentOf(level, scale)
         val state = intent.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
         // Plugged in counts as on the charger even when the status says otherwise: Samsung's
         // battery protection can hold the level (Adaptive mode pauses at 80% overnight), and that

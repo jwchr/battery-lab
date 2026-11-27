@@ -40,7 +40,7 @@ class RingConnectRetryTest {
     @Test fun theFailedLinkIsClosedBeforeTheSecondTryAndInsideTheSameRead() {
         val src = source()
         val retry = src.substringAfter("if (shouldRetryConnect(").substringBefore("return\n                }")
-        val close = retry.indexOf("g.close()")
+        val close = retry.indexOf("closeQuietly(g)")
         val later = retry.indexOf("main.postDelayed(reconnect, RETRY_DELAY_MS)")
         assertTrue("old link closed first", close in 0 until later)
         assertTrue("no second try after the read ended", retry.contains("if (!finished.get()) main.postDelayed(reconnect"))

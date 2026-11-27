@@ -129,12 +129,17 @@ class RingReader(
         main.removeCallbacks(closer)
         gatt?.let { g ->
             gatt = null
-            try { g.close() } catch (_: Exception) { }
+            closeQuietly(g)
         }
         val result = pending ?: return
         pending = null
         if (holdsLock) { holdsLock = false; inFlight.set(false) }
         completion(result.first, result.second)
+    }
+
+    /** close() can throw SecurityException if the Nearby devices permission was just revoked. */
+    private fun closeQuietly(g: BluetoothGatt) {
+        try { g.close() } catch (_: SecurityException) { } catch (_: Exception) { }
     }
 
     private val callback = object : BluetoothGattCallback() {
@@ -159,7 +164,7 @@ class RingReader(
                     Log.i(LOG_TAG, "Ring read: connect failed (status $status), trying once more")
                     main.post {
                         if (gatt === g) gatt = null
-                        try { g.close() } catch (_: Exception) { }
+                        closeQuietly(g)
                         if (!finished.get()) main.postDelayed(reconnect, RETRY_DELAY_MS)
                     }
                     return

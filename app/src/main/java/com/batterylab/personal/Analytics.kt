@@ -144,10 +144,13 @@ object ChargeCurves {
         }
         val plugged = run.mapNotNull { it.detail?.plugged }.filter { it > 0 }.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
         val temps = run.mapNotNull { it.tempTenthsC?.div(10.0) }
-        val top = run.maxOf { it.percent }
+        // Highest level reached, ignoring a one-reading glitch (60 -> 100 -> 61). The spike filter
+        // normally keeps charging readings, so the run is checked as if none were charging.
+        val clean = BatteryMath.withoutSpikes(run, { it.percent }, { null }, { it.timeMs })
+        val top = clean.maxOf { it.percent }
         return ObservedCharge(run.first().timeMs, run.last().timeMs, run.first().percent, top, bands, plugged,
             if (temps.size >= 2) temps.max() - temps.first() else null, temps.maxOrNull(),
-            peakMs = run.first { it.percent >= top }.timeMs)
+            peakMs = clean.first { it.percent >= top }.timeMs)
     }
 
     /**

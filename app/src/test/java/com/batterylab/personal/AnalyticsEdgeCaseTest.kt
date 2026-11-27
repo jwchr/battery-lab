@@ -46,6 +46,21 @@ class AnalyticsEdgeCaseTest {
         assertEquals(startMs + 30 * minuteMs, charge.endMs)
     }
 
+    @Test fun chargeTopIgnoresAOneReadingHighGlitch() {
+        val readings = listOf(
+            reading(0, 40, charging = true),
+            reading(15, 60, charging = true),
+            reading(30, 100, charging = true),
+            reading(45, 61, charging = true),
+            reading(60, 70, charging = true)
+        ).map { it.copy(detail = ReadingDetail(plugged = 1)) }
+
+        val charge = ChargeCurves.observedCharges(readings).single()
+
+        assertEquals(70, charge.toPct)
+        assertEquals(startMs + 60 * minuteMs, charge.peakMs)
+    }
+
     @Test fun heatMatrixExcludesImplausibleTemperatureButCountsValidHeat() {
         val readings = listOf(
             reading(0, 90, tempTenthsC = 750),

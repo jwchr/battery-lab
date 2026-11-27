@@ -1,7 +1,6 @@
 package com.batterylab.personal
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 
@@ -46,8 +45,10 @@ class StatsVisibleFixesTest {
     }
 
     @Test fun inventoryNotesUseEachFieldsOwnSign() {
-        val src = listOf("src/main/java/com/batterylab/personal/LabEngine.kt", "app/src/main/java/com/batterylab/personal/LabEngine.kt")
-            .map { java.io.File(it) }.first { it.exists() }.readText()
-        assertFalse("one shared sign for both rows is gone", src.contains("val sign = signConvention(phone)"))
+        val phone = List(6) { i -> onBattery(now = 300_000, avg = -300_000).copy(timeMs = t0 + i * m) }
+        val rows = CapabilityProbe.inventory(phone, emptyList(), emptyList(), ringBleEnabled = false,
+            usageGranted = false, firmware = "test", now = t0 + 10 * m).associateBy { it.fieldKey }
+        assertEquals("Positive while discharging", rows.getValue("current_now").notes)
+        assertEquals("Negative while discharging", rows.getValue("current_avg").notes)
     }
 }

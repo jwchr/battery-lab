@@ -111,6 +111,6 @@ class ReadingWriteSafetyTest {
         assertTrue(restore.contains("existing.includeCommitted("))
         assertTrue(restore.contains("existing.add(device, source, time)"))
         assertTrue(Regex("db.beginTransaction\\(\\)\\s*try\\s*\\{\\s*refreshReadings\\(\\)").containsMatchIn(restore))
-        assertTrue(Regex("db.endTransaction\\(\\);\\s*db.beginTransaction\\(\\)\\s*refreshReadings\\(\\)").containsMatchIn(restore))
+        assertTrue(Regex("db.endTransaction\\(\\)\\s*afterChunkCommit\\(\\)\\s*db.beginTransaction\\(\\)\\s*refreshReadings\\(\\)").containsMatchIn(restore))
     }
 }

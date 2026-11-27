@@ -658,7 +658,10 @@ class BatteryStore private constructor(context: Context) :
      * existing is changed or removed. Exports made before journal and forecast rows existed
      * import as before. Returns (readings added, experiments added).
      */
-    fun importCsv(input: Reader): Pair<Int, Int> {
+    fun importCsv(input: Reader): Pair<Int, Int> = importCsv(input) {}
+
+    /** [afterChunkCommit] runs between chunks, when no restore transaction is open; tests use it. */
+    internal fun importCsv(input: Reader, afterChunkCommit: () -> Unit): Pair<Int, Int> {
         val lines = input.buffered()
         val first = CsvCodec.readRecord(lines) ?: return 0 to 0
         when (RangeExport.classify(first)) {
@@ -745,7 +748,9 @@ class BatteryStore private constructor(context: Context) :
                         // Commit in chunks: a long restore doesn't lock out the 15-minute job, and if
                         // the process dies part way, what was imported stays (the import skips it next time).
                         if (added % 2000 == 0) {
-                            db.setTransactionSuccessful(); db.endTransaction(); db.beginTransaction()
+                            db.setTransactionSuccessful(); db.endTransaction()
+                            afterChunkCommit()
+                            db.beginTransaction()
                             refreshReadings()
                         }
                     }

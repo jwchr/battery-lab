@@ -306,16 +306,23 @@ class BatteryStorePersistenceTest {
         }
         // Backdated key that restore reaches only after its first 2,000-row commit.
         val late = Reading("phone", 2500 * 1000L, 50, false, "android")
-        repeat(5) { round ->
-            if (round > 0) store.writableDatabase.execSQL("DELETE FROM readings")
-            simultaneousWrites<Any> { index -> if (index == 0) store.importCsv(StringReader(csv)) else store.appendIfNew(late) }
-            val total = store.readableDatabase.rawQuery("SELECT COUNT(*) FROM readings", null).use { it.moveToFirst(); it.getInt(0) }
-            val copies = store.readableDatabase.rawQuery(
-                "SELECT COUNT(*) FROM readings WHERE device='phone' AND source='android' AND time_ms=?",
-                arrayOf(late.timeMs.toString())).use { it.moveToFirst(); it.getInt(0) }
-            assertEquals("Each CSV key stored once", 3000, total)
-            assertEquals("Concurrent backdated key stored once", 1, copies)
+        fun copies() = store.readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM readings WHERE device='phone' AND source='android' AND time_ms=?",
+            arrayOf(late.timeMs.toString())).use { it.moveToFirst(); it.getInt(0) }
+        var writes = 0
+        // Another writer saves the key exactly between the chunks, from its own thread, while
+        // no restore transaction is open; restore must then see it and skip its own copy.
+        val (added, _) = store.importCsv(StringReader(csv)) {
+            val writer = Executors.newSingleThreadExecutor()
+            try { assertTrue(writer.submit<Boolean> { store.appendIfNew(late) }.get(20, TimeUnit.SECONDS)) }
+            finally { writer.shutdownNow() }
+            writes++
         }
+        assertEquals("One chunk boundary in 3,000 rows", 1, writes)
+        assertEquals("Restore skipped the key the other writer saved", 2999, added)
+        assertEquals("Concurrent backdated key stored once", 1, copies())
+        val total = store.readableDatabase.rawQuery("SELECT COUNT(*) FROM readings", null).use { it.moveToFirst(); it.getInt(0) }
+        assertEquals("Each CSV key stored once", 3000, total)
     }
 
     @Test fun failedAppendRollsBackAndReleasesTheWriteTransaction() {

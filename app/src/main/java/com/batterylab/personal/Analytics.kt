@@ -144,7 +144,7 @@ object ChargeCurves {
         }
         val plugged = run.mapNotNull { it.detail?.plugged }.filter { it > 0 }.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
         val temps = run.mapNotNull { it.tempTenthsC?.div(10.0) }
-        val top = run.last().percent
+        val top = run.maxOf { it.percent }
         return ObservedCharge(run.first().timeMs, run.last().timeMs, run.first().percent, top, bands, plugged,
             if (temps.size >= 2) temps.max() - temps.first() else null, temps.maxOrNull(),
             peakMs = run.first { it.percent >= top }.timeMs)
@@ -298,6 +298,7 @@ object HeatExposure {
         val m = Array(3) { DoubleArray(3) }
         for ((a, b) in HonestyAuditor.steps(readings, gaps)) {
             val t = a.tempTenthsC ?: continue
+            if (t !in BatteryStats.VALID_TEMP_TENTHS_C) continue
             val ti = when { t < 300 -> 0; t <= 380 -> 1; else -> 2 }
             val ci = when { a.percent < 20 -> 0; a.percent <= 80 -> 1; else -> 2 }
             m[ti][ci] += (b.timeMs - a.timeMs) / 3_600_000.0
@@ -371,7 +372,9 @@ object ForecastScoring {
      * is censored as a gap. Stays PENDING until 8 h have passed (or everything is censored).
      */
     fun score(f: Forecast, readingsAfter: List<Reading>, nowMs: Long): ForecastScore {
-        val r = readingsAfter.filter { it.timeMs >= f.issuedMs }.sortedBy { it.timeMs }
+        val r = BatteryMath.withoutSpikes(
+            readingsAfter.filter { it.timeMs >= f.issuedMs }.sortedBy { it.timeMs },
+            { it.percent }, { it.charging }, { it.timeMs })
         val actual = arrayOfNulls<Double>(3)
         var charged = false; var gap = false
         for ((i, h) in HORIZONS.withIndex()) {

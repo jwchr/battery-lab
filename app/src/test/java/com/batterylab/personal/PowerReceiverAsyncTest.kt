@@ -123,12 +123,14 @@ class PowerReceiverAsyncTest {
         assertEquals(1, h.finishes)
     }
 
-    @Test fun settledReadMayStartJustBeforeDeadlineAndRetainsBroadcastUntilSaved() {
+    @Test fun settledReadStillSavingIsReleasedAtDeadlineAndFinishesOnce() {
         val h = Harness()
         h.onRead = { trigger ->
             if (trigger == "plug_settled") {
+                h.advanceTo(7_999)
+                assertEquals("Broadcast is held while the read is under the deadline", 0, h.finishes)
                 h.advanceTo(8_000)
-                assertEquals("Timeout cannot finish a read already saving", 0, h.finishes)
+                assertEquals("Deadline releases a read still saving", 1, h.finishes)
             }
         }
         h.start()
@@ -136,7 +138,7 @@ class PowerReceiverAsyncTest {
         h.advanceTo(3_500)
         h.clock = 105_999
         h.runIo()
-        assertEquals(listOf("plug", "plug_settled", "finish"), h.events)
+        assertEquals("The read still completes after the release", listOf("plug", "finish", "plug_settled"), h.events)
         assertEquals(1, h.finishes)
     }
 

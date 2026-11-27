@@ -78,6 +78,10 @@ internal object PowerReceiverAsync {
     private const val WAITING = 0
     private const val SETTLED_STARTED = 1
     private const val FINISHED = 2
+    /** The broadcast is finished by then at the latest, under Android's 10 s receiver limit. */
+    internal const val DEADLINE_MS = 8_000L
+    /** A settled read that hasn't started by then is skipped, leaving its save time before the limit. */
+    internal const val SETTLED_START_CUTOFF_MS = 6_000L
 
     fun run(
         connected: Boolean,
@@ -102,16 +106,15 @@ internal object PowerReceiverAsync {
 
         guarded {
             val startedAt = now()
+            // Every path gets the cap, so a stuck I/O thread can't hold the broadcast past
+            // Android's limit. This callback runs on main, not behind a possibly busy I/O queue.
+            // Once the settled read starts, its finally owns finishing after the save instead.
+            postDelayed((DEADLINE_MS - (now() - startedAt)).coerceAtLeast(0)) {
+                if (state.compareAndSet(WAITING, FINISHED)) finish()
+            }
             if (!isCurrent()) {
                 postToIo { try { logLate() } finally { finishOnce() } }
                 return@guarded
-            }
-            if (connected) {
-                // This callback runs on main, not behind a possibly busy I/O queue. Once the
-                // settled read starts, its finally owns finishing after the save instead.
-                postDelayed((8_000 - (now() - startedAt)).coerceAtLeast(0)) {
-                    if (state.compareAndSet(WAITING, FINISHED)) finish()
-                }
             }
             postToIo {
                 guarded {
@@ -126,7 +129,7 @@ internal object PowerReceiverAsync {
                             try {
                                 // Check on the worker too: the delayed callback may have queued
                                 // this read on time, but the single I/O thread can still be busy.
-                                if (now() - startedAt < 8_000 && state.compareAndSet(WAITING, SETTLED_STARTED)) {
+                                if (now() - startedAt < SETTLED_START_CUTOFF_MS && state.compareAndSet(WAITING, SETTLED_STARTED)) {
                                     read("plug_settled")
                                 }
                             } finally { finishOnce() }

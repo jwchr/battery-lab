@@ -111,12 +111,12 @@ class PowerReceiverAsyncTest {
         assertEquals(1, h.finishes)
     }
 
-    @Test fun settledReadIsSkippedAtExactlyEightSeconds() {
+    @Test fun settledReadIsSkippedAtExactlySixSeconds() {
         val h = Harness()
         h.start()
         h.runIo()
         h.advanceTo(3_500)
-        h.clock = 108_000
+        h.clock = 106_000
         h.runIo()
         assertEquals(listOf("plug", "finish"), h.events)
         h.advanceTo(8_000)
@@ -134,7 +134,7 @@ class PowerReceiverAsyncTest {
         h.start()
         h.runIo()
         h.advanceTo(3_500)
-        h.clock = 107_999
+        h.clock = 105_999
         h.runIo()
         assertEquals(listOf("plug", "plug_settled", "finish"), h.events)
         assertEquals(1, h.finishes)
@@ -170,12 +170,26 @@ class PowerReceiverAsyncTest {
         assertEquals(1, h.finishes)
     }
 
+    @Test fun stuckIoStillFinishesUnplugAndLateEventsAtDeadline() {
+        for (current in listOf(true, false)) {
+            val h = Harness()
+            h.start(connected = false, current = { current })
+            h.advanceTo(7_999)
+            assertEquals(0, h.finishes)
+            h.advanceTo(8_000)
+            assertEquals("I/O never ran, the deadline finished it", 1, h.finishes)
+            h.clock++
+            h.runIo()
+            assertEquals(1, h.finishes)
+        }
+    }
+
     @Test fun unplugFinishesAfterSingleReadWithoutSettledWork() {
         val h = Harness()
         h.onRead = { assertEquals(0, h.finishes) }
         h.start(connected = false)
         assertEquals(0, h.finishes)
-        assertTrue(h.delayed.isEmpty())
+        assertEquals("Only the deadline is scheduled", listOf(108_000L), h.delayed.map { it.first })
         h.runIo()
         h.advanceTo(8_000)
         assertTrue(h.io.isEmpty())
@@ -189,7 +203,7 @@ class PowerReceiverAsyncTest {
             h.onLog = { assertEquals(0, h.finishes) }
             h.start(connected = connected, current = { false })
             assertEquals(0, h.finishes)
-            assertTrue(h.delayed.isEmpty())
+            assertEquals("Only the deadline is scheduled", listOf(108_000L), h.delayed.map { it.first })
             h.runIo()
             h.advanceTo(8_000)
             assertEquals(listOf("late", "finish"), h.events)
@@ -217,7 +231,8 @@ class PowerReceiverAsyncTest {
         h.start(current = { false })
         assertThrows(IllegalStateException::class.java) { h.runIo() }
         assertEquals(1, h.finishes)
-        assertTrue(h.delayed.isEmpty())
+        h.advanceTo(8_000)
+        assertEquals(1, h.finishes)
     }
 
     @Test fun throwingStateCheckFinishesBeforePropagatingFailure() {
@@ -227,7 +242,8 @@ class PowerReceiverAsyncTest {
         }
         assertEquals(1, h.finishes)
         assertTrue(h.io.isEmpty())
-        assertTrue(h.delayed.isEmpty())
+        h.advanceTo(8_000)
+        assertEquals(1, h.finishes)
     }
 
     @Test fun rejectedInitialPostFinishesExactlyOnce() {

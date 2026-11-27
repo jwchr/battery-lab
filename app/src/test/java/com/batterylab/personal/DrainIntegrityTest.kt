@@ -37,6 +37,15 @@ class DrainIntegrityTest {
         assertFalse(mixed.usedCounter)
     }
 
+    @Test fun negativeCounterErrorValueFallsBackToPercent() {
+        // Int.MIN_VALUE is Android's error value; a restored row could carry it.
+        val bad = DrainAnalysis.analyze(
+            listOf(BatteryPoint(t0, 80, false, 3_200_000), BatteryPoint(t0 + 15 * minute, 79, false, Int.MIN_VALUE)),
+            emptyList(), emptyMap(), hour, capacityMah = capacityMah)
+        assertEquals(1.0, bad.totalDrop, 1e-9)
+        assertFalse(bad.usedCounter)
+    }
+
     @Test fun counterToleranceIncludesExactlyThreeExtraPoints() {
         val boundary = counterStep(160_000) // 4 points versus a 1-point percent drop.
         assertEquals(4.0, boundary.totalDrop, 1e-9)

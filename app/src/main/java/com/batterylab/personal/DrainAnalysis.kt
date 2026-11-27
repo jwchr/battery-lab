@@ -114,8 +114,11 @@ object DrainAnalysis {
             val ra = a.remainingUah; val rb = b.remainingUah
             val percentDrop = (a.percent - b.percent).toDouble()
             // Allow percent quantization, but reject counter resets or implausible jumps.
-            val counterDrop = if (capacityMah != null && capacityMah > 0 && ra != null && rb != null && rb <= ra + 1000)
-                max(0.0, (ra - rb) / (capacityMah * 10.0)).takeIf { it <= percentDrop + 3.0 } else null
+            // Long math and a sign check: a negative error value (Int.MIN_VALUE) in a restored row
+            // would otherwise overflow ra - rb and count as a 0% step.
+            val counterDrop = if (capacityMah != null && capacityMah > 0 && ra != null && rb != null &&
+                ra >= 0 && rb >= 0 && rb.toLong() <= ra.toLong() + 1000)
+                max(0.0, (ra.toLong() - rb.toLong()) / (capacityMah * 10.0)).takeIf { it <= percentDrop + 3.0 } else null
             if (counterDrop != null) counterSteps++
             val mv = listOfNotNull(a.voltageMv, b.voltageMv).takeIf { it.isNotEmpty() }?.average()
             Step(a.timeMs, b.timeMs, counterDrop ?: percentDrop, screen.overlap(a.timeMs, b.timeMs).coerceAtMost(dt), mv)

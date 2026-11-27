@@ -118,7 +118,7 @@ object WatchReporter {
      * still land, and a job the system stopped is left alone ([WatchBatteryJob.onStopJob]), since its
      * item may still be written too (Neon deep review, Nov 26, 2026).
      */
-    internal fun needsRetry(outcome: SendOutcome): Boolean = outcome != SendOutcome.SENT
+    internal fun needsRetry(outcome: SendOutcome): Boolean = outcome == SendOutcome.FAILED
 }
 
 class WatchBatteryJob : JobService() {

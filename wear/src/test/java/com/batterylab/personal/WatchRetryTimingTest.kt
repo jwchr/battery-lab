@@ -53,7 +53,8 @@ class WatchRetryTimingTest {
         assertTrue(WatchReporter.isCurrent(i, WatchReporter.FLEX_MS, WatchReporter.BACKOFF_MS, exp))
         // Old job: one-argument setPeriodic (flex = interval) and the default 30-second backoff.
         assertFalse(WatchReporter.isCurrent(i, i, 30_000L, exp))
-        assertFalse(WatchReporter.isCurrent(i, WatchReporter.FLEX_MS, 30_000L, exp))
+        assertFalse("flex alone differs", WatchReporter.isCurrent(i, i, WatchReporter.BACKOFF_MS, exp))
+        assertFalse("backoff alone differs", WatchReporter.isCurrent(i, WatchReporter.FLEX_MS, 30_000L, exp))
         assertFalse(WatchReporter.isCurrent(i, WatchReporter.FLEX_MS, WatchReporter.BACKOFF_MS, JobInfo.BACKOFF_POLICY_LINEAR))
         assertFalse(WatchReporter.isCurrent(30 * 60L * 1000L, WatchReporter.FLEX_MS, WatchReporter.BACKOFF_MS, exp))
     }

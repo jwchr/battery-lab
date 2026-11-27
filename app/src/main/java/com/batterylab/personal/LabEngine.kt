@@ -45,9 +45,10 @@ object CapabilityProbe {
         phoneField("remaining_uah", "BATTERY_PROPERTY_CHARGE_COUNTER", "µAh") { it.remainingUah }
         val units = HonestyAuditor.currentUnitsPerMa(phone, gaps)
         val unitText = when (units) { 1000.0 -> "µA (verified against counter)"; 1.0 -> "mA (verified against counter)"; else -> "unverified (nominally µA)" }
-        val sign = signConvention(phone)
-        phoneField("current_now", "BATTERY_PROPERTY_CURRENT_NOW", unitText, sign) { it.detail?.currentNowRaw }
-        phoneField("current_avg", "BATTERY_PROPERTY_CURRENT_AVERAGE", unitText, sign) { it.detail?.currentAvgRaw }
+        // Each field's sign is checked on its own: a phone can fill one with the opposite sign or
+        // not at all (Neon deep review, Nov 26, 2026, 1.P2o-i).
+        phoneField("current_now", "BATTERY_PROPERTY_CURRENT_NOW", unitText, signConvention(phone) { it.detail?.currentNowRaw }) { it.detail?.currentNowRaw }
+        phoneField("current_avg", "BATTERY_PROPERTY_CURRENT_AVERAGE", unitText, signConvention(phone) { it.detail?.currentAvgRaw }) { it.detail?.currentAvgRaw }
         phoneField("energy_nwh", "BATTERY_PROPERTY_ENERGY_COUNTER", "nWh") { it.detail?.energyRaw }
         phoneField("cycle_count", "EXTRA_CYCLE_COUNT", "cycles",
             if (recent.mapNotNull { it.detail?.cycleCount }.let { v -> v.isNotEmpty() && v.all { it == 0 } }) "Always 0 so far: probably not filled in by this phone" else null) { it.detail?.cycleCount }
@@ -97,9 +98,9 @@ object CapabilityProbe {
     fun minStep(values: List<Long>): String? =
         values.zipWithNext().map { (a, b) -> kotlin.math.abs(b - a) }.filter { it > 0 }.minOrNull()?.toString()
 
-    /** Which sign the phone uses for discharge current, from readings on battery. */
-    fun signConvention(phone: List<Reading>): String? {
-        val onBattery = phone.filter { it.detail?.plugged == 0 }.mapNotNull { it.detail?.currentAvgRaw ?: it.detail?.currentNowRaw }.filter { it != 0 }
+    /** Which sign the phone uses for discharge current in the field [current] reads, from readings on battery. */
+    fun signConvention(phone: List<Reading>, current: (Reading) -> Int?): String? {
+        val onBattery = phone.filter { it.detail?.plugged == 0 }.mapNotNull(current).filter { it != 0 }
         if (onBattery.size < 5) return null
         val negative = onBattery.count { it < 0 }.toDouble() / onBattery.size
         return when {

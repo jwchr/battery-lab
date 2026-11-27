@@ -36,7 +36,8 @@ class PowerConnectionReceiver : BroadcastReceiver() {
             finish = { pending.finish() },
             postToIo = { Background.io.execute(it) },
             postDelayed = { delayMs, block -> Background.onMainDelayed(delayMs, block) },
-            now = { SystemClock.elapsedRealtime() },
+            // Same clock as Handler.postDelayed, so the 3.5 s and 6 s checks agree with the timers.
+            now = { SystemClock.uptimeMillis() },
         )
     }
 

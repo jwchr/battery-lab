@@ -96,8 +96,10 @@ object PollScheduler {
     /**
      * After a restore: if it brought in a running test other than the monitoring arm, periodic
      * Ring reads go off, as starting that test would have done. Call off the main thread.
+     * Holds [experimentLock] so abandoning the restored test can't fall between the read and
+     * the write and have its monitoring setting undone (Neon deep review, Nov 26, 2026, 2.P2c-1).
      */
-    fun afterImport(context: Context, store: BatteryStore) {
+    fun afterImport(context: Context, store: BatteryStore) = synchronized(experimentLock) {
         val on = ringEnabled(context)
         if (on && !ExperimentEndpoint.monitoringAfterImport(on, store.activeExperiment()?.mode))
             prefs(context).edit().putBoolean(RING_ENABLED, false).apply()

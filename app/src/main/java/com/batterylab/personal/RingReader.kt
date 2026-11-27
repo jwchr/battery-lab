@@ -38,11 +38,13 @@ class RingReader(
     @Volatile private var rssi: Int? = null
     @Volatile private var holdsLock = false
     /** Set once the one reconnect inside this read is used (Neon deep review, Nov 26, 2026, 3.P3c). */
-    @Volatile private var retried = false
+    private val retried = AtomicBoolean(false)
     /** True from a failed first connect until the reconnect starts: the old link's late events are ignored. */
     @Volatile private var reconnecting = false
-    private var device: BluetoothDevice? = null
-    private var startedAt = 0L
+    /** The failed first link: any event it still sends after the second try starts is ignored too. */
+    @Volatile private var retired: BluetoothGatt? = null
+    @Volatile private var device: BluetoothDevice? = null
+    @Volatile private var startedAt = 0L
     private val reconnect = Runnable { connectAgain() }
 
     fun start() {
@@ -80,7 +82,11 @@ class RingReader(
      */
     private fun connect(device: BluetoothDevice) {
         val g = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
-        if (g == null) complete(null, "Bluetooth is turning off") else gatt = g
+        if (g == null) { complete(null, "Bluetooth is turning off"); return }
+        gatt = g
+        // If the read ended while connectGatt() was running, its close may already have passed
+        // over this link, so close it here (Neon review of #95, Nov 27, 2026, 95.2).
+        if (finished.get()) main.post { if (gatt === g) { gatt = null; closeQuietly(g) } }
     }
 
     /**
@@ -153,18 +159,19 @@ class RingReader(
         }
 
         private fun handleState(g: BluetoothGatt, status: Int, newState: Int, down: Boolean) {
-            if (finished.get() || reconnecting) return
+            if (finished.get() || reconnecting || g === retired) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 val left = DEADLINE_MS - (SystemClock.elapsedRealtime() - startedAt)
-                if (shouldRetryConnect(status, stage, retried, left)) {
+                if (shouldRetryConnect(status, stage, retried.get(), left) && retried.compareAndSet(false, true)) {
                     // One more try for a common passing failure while connecting. The old link is
                     // closed first so the two never overlap.
-                    retried = true
+                    retired = g
                     reconnecting = true
                     Log.i(LOG_TAG, "Ring read: connect failed (status $status), trying once more")
                     main.post {
                         if (gatt === g) gatt = null
                         closeQuietly(g)
+                        main.removeCallbacks(reconnect)
                         if (!finished.get()) main.postDelayed(reconnect, RETRY_DELAY_MS)
                     }
                     return

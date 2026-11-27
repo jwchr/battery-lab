@@ -34,7 +34,9 @@ class RingConnectRetryTest {
 
     @Test fun aNullConnectFailsAtOnce() {
         val connect = source().substringAfter("private fun connect(device: BluetoothDevice)").substringBefore("\n    }")
-        assertTrue(connect.contains("""if (g == null) complete(null, "Bluetooth is turning off") else gatt = g"""))
+        assertTrue(connect.contains("""if (g == null) { complete(null, "Bluetooth is turning off"); return }"""))
+        // A link that comes back after the read ended is closed, not left open (95.2).
+        assertTrue(connect.contains("if (finished.get()) main.post { if (gatt === g) { gatt = null; closeQuietly(g) } }"))
     }
 
     @Test fun theFailedLinkIsClosedBeforeTheSecondTryAndInsideTheSameRead() {
@@ -54,6 +56,10 @@ class RingConnectRetryTest {
 
     @Test fun lateEventsFromTheFailedLinkAreIgnored() {
         val state = source().substringAfter("private fun handleState(").substringBefore("\n            if (status")
-        assertTrue(state.contains("if (finished.get() || reconnecting) return"))
+        assertTrue(state.contains("if (finished.get() || reconnecting || g === retired) return"))
+        // The failed link is marked before the pause, and the one retry is claimed atomically (95.1, 95.3).
+        val retry = source().substringAfter("if (shouldRetryConnect(").substringBefore("return\n                }")
+        assertTrue(retry.contains("retried.compareAndSet(false, true)"))
+        assertTrue(retry.indexOf("retired = g") in 0 until retry.indexOf("main.post {"))
     }
 }

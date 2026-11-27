@@ -41,10 +41,10 @@ class WatchActivity : Activity() {
             text = "Send reading"
             setOnClickListener {
                 showPercent()
-                WatchReporter.send(this@WatchActivity, urgent = true) { ok ->
+                WatchReporter.send(this@WatchActivity, urgent = true) { outcome ->
                     runOnUiThread {
                         Toast.makeText(this@WatchActivity,
-                            if (ok) "Reading queued for phone" else "Could not send reading",
+                            if (outcome == SendOutcome.SENT) "Reading queued for phone" else "Could not send reading",
                             Toast.LENGTH_SHORT).show()
                     }
                 }

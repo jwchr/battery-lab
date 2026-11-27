@@ -66,24 +66,24 @@ class JobFinishGateTest {
     }
 
     /** Runs the real listener wiring on [task] and returns every outcome it reported. */
-    private fun outcomes(task: Task<Unit>): List<Boolean> {
-        val seen = mutableListOf<Boolean>()
+    private fun outcomes(task: Task<Unit>): List<SendOutcome> {
+        val seen = mutableListOf<SendOutcome>()
         WatchReporter.finishWhenDone(task, Runnable::run) { seen += it }
         return seen
     }
 
     @Test fun reporterFinishesSucceededFailedAndCancelledSends() {
-        assertEquals(listOf(true), outcomes(Tasks.forResult(Unit)))
-        assertEquals(listOf(false), outcomes(Tasks.forException(RuntimeException("no phone"))))
-        assertEquals("A cancelled send must still finish the job", listOf(false), outcomes(Tasks.forCanceled()))
+        assertEquals(listOf(SendOutcome.SENT), outcomes(Tasks.forResult(Unit)))
+        assertEquals(listOf(SendOutcome.FAILED), outcomes(Tasks.forException(RuntimeException("no phone"))))
+        assertEquals("A cancelled send must still finish the job", listOf(SendOutcome.CANCELLED), outcomes(Tasks.forCanceled()))
     }
 
     @Test fun reporterReportsASendThatSettlesLater() {
         val pending = TaskCompletionSource<Unit>()
-        val seen = mutableListOf<Boolean>()
+        val seen = mutableListOf<SendOutcome>()
         WatchReporter.finishWhenDone(pending.task, Runnable::run) { seen += it }
-        assertEquals(emptyList<Boolean>(), seen)
+        assertEquals(emptyList<SendOutcome>(), seen)
         pending.setResult(Unit)
-        assertEquals(listOf(true), seen)
+        assertEquals(listOf(SendOutcome.SENT), seen)
     }
 }

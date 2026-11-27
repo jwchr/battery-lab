@@ -16,6 +16,15 @@ import com.google.android.gms.wearable.Wearable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 
+/** How a send ended. Only [FAILED] is sure that nothing reached the Data Layer. */
+enum class SendOutcome {
+    SENT,
+    /** No reading was taken, or the Data Layer refused the item: nothing was stored, so a retry adds no copy. */
+    FAILED,
+    /** The send was cancelled: the item may still be stored, so it is not retried (a retry could add a second sample). */
+    CANCELLED,
+}
+
 /** Samples locally, then sends an update via the Wear OS Data Layer. No phone polling. */
 object WatchReporter {
     private const val JOB_ID = 44008
@@ -24,14 +33,36 @@ object WatchReporter {
      * (roughly 8 that land within 5 minutes of a widget read) is plenty for that; every 30 minutes
      * cost the watch four times the wakeups and Bluetooth syncs for no better answer.
      */
-    private const val INTERVAL_MS = 2 * 60L * 60L * 1000L
+    internal const val INTERVAL_MS = 2 * 60L * 60L * 1000L
+    /**
+     * The job runs in the last 15 minutes of each 2-hour period, so samples land about 1 h 45 min
+     * to 2 h 15 min apart. Without a flex the system may run it anywhere in the period, leaving gaps
+     * from almost nothing to almost 4 hours (Neon deep review, Nov 26, 2026). 15 minutes is above
+     * the system minimum (5 percent of the period, 6 minutes here).
+     */
+    internal const val FLEX_MS = 15 * 60L * 1000L
+    /**
+     * A failed sample is retried after 15, 30, then 60 minutes (exponential), so at most about three
+     * extra wakeups fit before the next regular run even if the Data Layer keeps failing.
+     */
+    internal const val BACKOFF_MS = 15 * 60L * 1000L
+
+    /** True when the pending job already has this timing; rescheduling would restart its clock. */
+    internal fun isCurrent(intervalMs: Long, flexMs: Long, backoffMs: Long, backoffPolicy: Int): Boolean =
+        intervalMs == INTERVAL_MS && flexMs == FLEX_MS && backoffMs == BACKOFF_MS &&
+            backoffPolicy == JobInfo.BACKOFF_POLICY_EXPONENTIAL
+
     fun schedule(context: Context) {
         val scheduler = context.getSystemService(Context.JOB_SCHEDULER_SERVICE) as JobScheduler
         // Rescheduling restarts the 2-hour clock, so opening the app often would delay every read.
-        if (scheduler.getPendingJob(JOB_ID)?.intervalMillis == INTERVAL_MS) return
+        // A job saved by an older version (no flex, default backoff) is replaced once.
+        val pending = scheduler.getPendingJob(JOB_ID)
+        if (pending != null &&
+            isCurrent(pending.intervalMillis, pending.flexMillis, pending.initialBackoffMillis, pending.backoffPolicy)) return
         scheduler.schedule(
             JobInfo.Builder(JOB_ID, ComponentName(context, WatchBatteryJob::class.java))
-                .setPeriodic(INTERVAL_MS)
+                .setPeriodic(INTERVAL_MS, FLEX_MS)
+                .setBackoffCriteria(BACKOFF_MS, JobInfo.BACKOFF_POLICY_EXPONENTIAL)
                 .setPersisted(true)
                 .build())
     }
@@ -48,14 +79,14 @@ object WatchReporter {
 
     /** [urgent] is for a sample the user asked for: Wear OS may hold a normal item up to 30 minutes
      *  before syncing it (Neon deep review, Nov 26, 2026). The 2-hour job stays non-urgent to save battery. */
-    fun send(context: Context, urgent: Boolean = false, onFinished: (Boolean) -> Unit) {
+    fun send(context: Context, urgent: Boolean = false, onFinished: (SendOutcome) -> Unit) {
         val completion = JobFinishGate()
-        fun finish(success: Boolean) {
-            completion.finish { onFinished(success) }
+        fun finish(outcome: SendOutcome) {
+            completion.finish { onFinished(outcome) }
         }
         val percent = batteryPercent(context)
         if (percent == null) {
-            finish(false)
+            finish(SendOutcome.FAILED)
             return
         }
         val intent = context.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
@@ -75,12 +106,19 @@ object WatchReporter {
         finishWhenDone(Wearable.getDataClient(context).putDataItem(request), context.mainExecutor, ::finish)
     }
 
-    /** Reports the send's outcome once: success is true, a failure or a cancel is false. */
-    internal fun finishWhenDone(task: Task<*>, executor: Executor, finish: (Boolean) -> Unit) {
-        task.addOnSuccessListener(executor) { finish(true) }
-            .addOnFailureListener(executor) { finish(false) }
-            .addOnCanceledListener(executor) { finish(false) }
+    /** Reports the send's outcome once. */
+    internal fun finishWhenDone(task: Task<*>, executor: Executor, finish: (SendOutcome) -> Unit) {
+        task.addOnSuccessListener(executor) { finish(SendOutcome.SENT) }
+            .addOnFailureListener(executor) { finish(SendOutcome.FAILED) }
+            .addOnCanceledListener(executor) { finish(SendOutcome.CANCELLED) }
     }
+
+    /**
+     * Whether the job asks to run again soon. Only a sure failure is retried: a cancelled send may
+     * still land, and a job the system stopped is left alone ([WatchBatteryJob.onStopJob]), since its
+     * item may still be written too (Neon deep review, Nov 26, 2026).
+     */
+    internal fun needsRetry(outcome: SendOutcome): Boolean = outcome != SendOutcome.SENT
 }
 
 class WatchBatteryJob : JobService() {
@@ -89,15 +127,16 @@ class WatchBatteryJob : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         val gate = JobFinishGate()
         jobs.put(params.jobId, gate)?.stop()
-        WatchReporter.send(this) {
+        WatchReporter.send(this) { outcome ->
             try {
-                gate.finish { jobFinished(params, false) }
+                gate.finish { jobFinished(params, WatchReporter.needsRetry(outcome)) }
             } finally {
                 jobs.remove(params.jobId, gate)
             }
         }
         return true
     }
+    /** A stopped send is not retried: its item may still be written, and a retry would add a second sample. */
     override fun onStopJob(params: JobParameters): Boolean {
         jobs.remove(params.jobId)?.stop()
         return false

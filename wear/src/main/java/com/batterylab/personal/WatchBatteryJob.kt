@@ -42,10 +42,17 @@ object WatchReporter {
      */
     internal const val FLEX_MS = 15 * 60L * 1000L
     /**
-     * A failed sample is retried after 15, 30, then 60 minutes (exponential), so at most about three
-     * extra wakeups fit before the next regular run even if the Data Layer keeps failing.
+     * A failed sample is retried after 15, then 30 minutes (exponential, at most [MAX_RETRIES] times).
      */
     internal const val BACKOFF_MS = 15 * 60L * 1000L
+    /**
+     * Android runs a retry instead of the regular run, not as well as it (JobSchedulerService
+     * onJobCompletedLocked), so unlimited retries would push samples up to 5 hours apart. After the
+     * last retry the regular 2-hour schedule resumes in its original window. A third retry (60 more
+     * minutes) could end near the next window, and Android then skips that window too, so two is
+     * the most that always fits (CodeRabbit review of #94, Nov 27, 2026).
+     */
+    internal const val MAX_RETRIES = 2
 
     /** True when the pending job already has this timing; rescheduling would restart its clock. */
     internal fun isCurrent(intervalMs: Long, flexMs: Long, backoffMs: Long, backoffPolicy: Int): Boolean =
@@ -119,6 +126,13 @@ object WatchReporter {
      * item may still be written too (Neon deep review, Nov 26, 2026).
      */
     internal fun needsRetry(outcome: SendOutcome): Boolean = outcome == SendOutcome.FAILED
+
+    /** Whether to retry, given the retries already asked for since the last regular run. */
+    internal fun retryAgain(outcome: SendOutcome, retriesSoFar: Int): Boolean =
+        needsRetry(outcome) && retriesSoFar < MAX_RETRIES
+
+    /** The retry count to keep after this run: one more when retrying, otherwise back to 0. */
+    internal fun retriesAfter(retry: Boolean, retriesSoFar: Int): Int = if (retry) retriesSoFar + 1 else 0
 }
 
 class WatchBatteryJob : JobService() {
@@ -129,7 +143,13 @@ class WatchBatteryJob : JobService() {
         jobs.put(params.jobId, gate)?.stop()
         WatchReporter.send(this) { outcome ->
             try {
-                gate.finish { jobFinished(params, WatchReporter.needsRetry(outcome)) }
+                gate.finish {
+                    val prefs = getSharedPreferences(RETRY_PREFS, MODE_PRIVATE)
+                    val soFar = prefs.getInt(RETRIES, 0)
+                    val retry = WatchReporter.retryAgain(outcome, soFar)
+                    prefs.edit().putInt(RETRIES, WatchReporter.retriesAfter(retry, soFar)).apply()
+                    jobFinished(params, retry)
+                }
             } finally {
                 jobs.remove(params.jobId, gate)
             }
@@ -139,6 +159,13 @@ class WatchBatteryJob : JobService() {
     /** A stopped send is not retried: its item may still be written, and a retry would add a second sample. */
     override fun onStopJob(params: JobParameters): Boolean {
         jobs.remove(params.jobId)?.stop()
+        // Not retried, so the regular schedule resumes and the next failure starts a fresh count.
+        getSharedPreferences(RETRY_PREFS, MODE_PRIVATE).edit().putInt(RETRIES, 0).apply()
         return false
+    }
+
+    private companion object {
+        const val RETRY_PREFS = "watch_job"
+        const val RETRIES = "retries_in_a_row"
     }
 }

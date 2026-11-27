@@ -12,7 +12,10 @@ import org.junit.Test
  * one-argument setPeriodic let gaps run from almost nothing to almost 4 hours (4.P3c).
  */
 class WatchRetryTimingTest {
-    private val job = File("src/main/java/com/batterylab/personal/WatchBatteryJob.kt").readText()
+    private val job = listOf(
+        File("src/main/java/com/batterylab/personal/WatchBatteryJob.kt"),
+        File("wear/src/main/java/com/batterylab/personal/WatchBatteryJob.kt")
+    ).first { it.isFile }.readText()
 
     @Test fun onlyASureFailureIsRetried() {
         assertTrue(WatchReporter.needsRetry(SendOutcome.FAILED))
@@ -21,8 +24,11 @@ class WatchRetryTimingTest {
     }
 
     @Test fun theJobPassesTheRetryDecisionAndAStoppedJobIsNotRetried() {
-        assertTrue(job.contains("jobFinished(params, WatchReporter.needsRetry(outcome))"))
+        assertTrue(job.contains("val retry = WatchReporter.retryAgain(outcome, soFar)"))
+        assertTrue(job.contains("putInt(RETRIES, WatchReporter.retriesAfter(retry, soFar))"))
+        assertTrue(job.contains("jobFinished(params, retry)"))
         val stop = job.substringAfter("override fun onStopJob").substringBefore("\n    }")
+        assertTrue(stop.contains("putInt(RETRIES, 0)"))
         assertTrue(stop.contains("return false"))
         assertFalse(stop.contains("return true"))
     }
@@ -57,5 +63,29 @@ class WatchRetryTimingTest {
         assertFalse("backoff alone differs", WatchReporter.isCurrent(i, WatchReporter.FLEX_MS, 30_000L, exp))
         assertFalse(WatchReporter.isCurrent(i, WatchReporter.FLEX_MS, WatchReporter.BACKOFF_MS, JobInfo.BACKOFF_POLICY_LINEAR))
         assertFalse(WatchReporter.isCurrent(30 * 60L * 1000L, WatchReporter.FLEX_MS, WatchReporter.BACKOFF_MS, exp))
+    }
+
+    /** CodeRabbit review of #94: a retry replaces the regular run, so unlimited retries stretched gaps to 5 hours. */
+    @Test fun retriesStopAfterTheLimitAndTheCountResets() {
+        var soFar = 0
+        val asked = (1..5).map {
+            val retry = WatchReporter.retryAgain(SendOutcome.FAILED, soFar)
+            soFar = WatchReporter.retriesAfter(retry, soFar); retry
+        }
+        assertEquals(listOf(true, true, false, true, true), asked)
+        assertFalse(WatchReporter.retryAgain(SendOutcome.SENT, 0))
+        assertEquals(0, WatchReporter.retriesAfter(false, 2))
+    }
+
+    /**
+     * After the last retry Android puts the regular run back in its original window, but skips that
+     * window when the run ended within flex/6 of it (JobSchedulerService getRescheduleJobForPeriodic).
+     * All retries, plus 30 minutes for Doze and run time, must end before that point.
+     */
+    @Test fun theRetriesAlwaysEndBeforeTheNextRegularWindow() {
+        val minute = 60L * 1000L
+        val retries = (1..WatchReporter.MAX_RETRIES).sumOf { WatchReporter.BACKOFF_MS shl (it - 1) }
+        val period = WatchReporter.INTERVAL_MS; val flex = WatchReporter.FLEX_MS
+        assertTrue("retries take ${retries / minute} min", retries + 30 * minute < period - flex - flex / 6)
     }
 }

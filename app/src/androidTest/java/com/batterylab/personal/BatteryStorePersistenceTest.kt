@@ -313,6 +313,29 @@ class BatteryStorePersistenceTest {
         assertFalse(store.writableDatabase.inTransaction())
     }
 
+    /** 2.P2b-1: a test finished on this phone while a restore ran was counted as completed by the restore. */
+    @Test fun restoreDoesNotCountATestFinishedHereDuringTheRestore() {
+        seed()
+        val target = newStore()
+        assertEquals(2 to 1, target.importCsv(StringReader(backup())))
+        store.writableDatabase.execSQL("UPDATE experiments SET end_ms=200,end_pct=50 WHERE end_ms IS NULL")
+        val lines = backup().lines().filter { it.isNotEmpty() }
+        val (finished, rest) = lines.drop(1).partition { it.startsWith("experiment,") }
+        // 2,000 new readings put one chunk commit before the finished test's row.
+        val bulk = (0 until 2000).map { i -> "reading,phone,android,${RangeExport.utc(1_000_000L + i * 1000L)},50" }
+        val csv = (listOf(lines.first()) + rest + bulk + finished).joinToString("\n", postfix = "\n")
+        var boundaries = 0
+        val (added, experiments) = target.importCsv(StringReader(csv)) {
+            boundaries++
+            target.writableDatabase.execSQL("UPDATE experiments SET end_ms=300,end_pct=40 WHERE end_ms IS NULL")
+        }
+        assertEquals(1, boundaries)
+        assertEquals(2000, added)
+        assertEquals("Finished here during the restore, not by it", 0, experiments)
+        val end = target.readableDatabase.rawQuery("SELECT end_ms,end_pct FROM experiments", null).use { it.moveToFirst(); it.getLong(0) to it.getInt(1) }
+        assertEquals("The local end stays", 300L to 40, end)
+    }
+
     @Test fun restorePastTheFirstChunkWithAConcurrentWriterKeepsOneCopyOfEachKey() {
         val header = "kind,device,mode_or_source,timestamp_utc,percentage\n"
         val csv = header + (0 until 3000).joinToString("") { i ->

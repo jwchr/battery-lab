@@ -90,6 +90,13 @@ class ReadingWriteSafetyTest {
         assertTrue(receiver.contains("store.appendIfNew(Reading("))
     }
 
+    /** 2.P2b-1: the device test (BatteryStorePersistenceTest) runs only on a phone, so CI checks the guard here. */
+    @Test fun restoreCountsACompletedTestOnlyWhenItChangedARow() {
+        val branch = source("BatteryStore").substringAfter("\"experiment\" -> {").substringBefore("importEndValid(")
+        assertTrue(branch.contains("\"id = ? AND end_ms IS NULL\""))
+        assertTrue(Regex("if \\(changed > 0\\) \\{[^}]*addedExp\\+\\+").containsMatchIn(branch))
+    }
+
     @Test fun bothAppendPathsAssessAndInsertUnderOneTransaction() {
         val store = source("BatteryStore")
         assertTrue(store.contains("writeReading(r, onlyIfNew = false)"))

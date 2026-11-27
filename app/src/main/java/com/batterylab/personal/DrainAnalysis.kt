@@ -105,18 +105,20 @@ object DrainAnalysis {
                 services: Map<String, List<Span>> = emptyMap()): DrainBreakdown {
         data class Step(val from: Long, val to: Long, val drop: Double, val onMs: Long, val mvAvg: Double?)
         val screen = SpanIndex(screenOn)
-        val p = points.filter { it.percent in 0..100 }.sortedBy { it.timeMs }
+        val p = BatteryMath.withoutSpikes(points.filter { it.percent in 0..100 }.sortedBy { it.timeMs },
+            GapLimits(stepMs = maxStepMs))
         var counterSteps = 0
         val steps = p.zipWithNext().mapNotNull { (a, b) ->
             val dt = b.timeMs - a.timeMs
             if (a.charging == true || b.charging == true || dt <= 0 || dt > maxStepMs || b.percent > a.percent) return@mapNotNull null
             val ra = a.remainingUah; val rb = b.remainingUah
-            // Counter step in % of capacity; rejected if the counter reset or jumped up.
+            val percentDrop = (a.percent - b.percent).toDouble()
+            // Allow percent quantization, but reject counter resets or implausible jumps.
             val counterDrop = if (capacityMah != null && capacityMah > 0 && ra != null && rb != null && rb <= ra + 1000)
-                max(0.0, (ra - rb) / (capacityMah * 10.0)) else null
+                max(0.0, (ra - rb) / (capacityMah * 10.0)).takeIf { it <= percentDrop + 3.0 } else null
             if (counterDrop != null) counterSteps++
             val mv = listOfNotNull(a.voltageMv, b.voltageMv).takeIf { it.isNotEmpty() }?.average()
-            Step(a.timeMs, b.timeMs, counterDrop ?: (a.percent - b.percent).toDouble(), screen.overlap(a.timeMs, b.timeMs).coerceAtMost(dt), mv)
+            Step(a.timeMs, b.timeMs, counterDrop ?: percentDrop, screen.overlap(a.timeMs, b.timeMs).coerceAtMost(dt), mv)
         }
         val usedCounter = steps.isNotEmpty() && counterSteps * 2 >= steps.size
         val onMs = steps.sumOf { it.onMs }
@@ -250,6 +252,7 @@ class ForegroundSpans(private val out: MutableMap<String, MutableList<Span>> = H
 
 /** Reads screen and app-on-screen history from Android's usage data (needs Usage access). */
 object UsageSource {
+    internal data class UsageEvent(val type: Int, val packageName: String, val className: String?, val timeMs: Long)
     internal data class ServiceEvent(val type: Int, val packageName: String, val className: String?, val timeMs: Long)
 
     internal fun serviceSpans(events: List<ServiceEvent>, toMs: Long): Map<String, List<Span>> {
@@ -289,20 +292,52 @@ object UsageSource {
      */
     fun load(context: Context, fromMs: Long, toMs: Long): UsageWindow {
         val usm = context.getSystemService(UsageStatsManager::class.java) ?: return UsageWindow(emptyList(), emptyMap(), null)
-        var coverage: Long? = null
         val events = usm.queryEvents(fromMs, toMs)
         val e = UsageEvents.Event()
+        // Streamed one event at a time: a month of usage events can run to hundreds of thousands.
+        val history = sequence {
+            while (events.hasNextEvent()) {
+                events.getNextEvent(e)
+                yield(UsageEvent(e.eventType, e.packageName ?: "", e.className, e.timeStamp))
+            }
+        }
+        val window = fromEvents(history, toMs)
+        // Private apps are folded into "Other" here, before anything else sees their names.
+        // If a hidden list exists but can't be read, hide every app rather than risk showing one.
+        val hidden = privateApps(context)
+        fun fold(source: Map<String, List<Span>>): Map<String, List<Span>> {
+            val folded = HashMap<String, MutableList<Span>>()
+            source.forEach { (pkg, spans) ->
+                val hide = hidden == null || pkg in hidden
+                folded.getOrPut(if (hide) DrainAnalysis.UNATTRIBUTED else pkg) { mutableListOf() } += spans
+            }
+            return folded
+        }
+        return window.copy(apps = fold(window.apps), services = fold(window.services))
+    }
+
+    /** Builds spans from chronological events without needing Android or a Context. */
+    internal fun fromEvents(events: List<UsageEvent>, toMs: Long): UsageWindow = fromEvents(events.asSequence(), toMs)
+
+    internal fun fromEvents(events: Sequence<UsageEvent>, toMs: Long): UsageWindow {
+        var coverage: Long? = null
         val screen = mutableListOf<Span>()
         val apps = HashMap<String, MutableList<Span>>()
         var screenSince: Long? = null
         var screenKnown = false
         val foreground = ForegroundSpans(apps)
         val serviceEvents = mutableListOf<ServiceEvent>()
+        var lastEventMs: Long? = null
         fun closeApp(at: Long) = foreground.close(at)
-        while (events.hasNextEvent()) {
-            events.getNextEvent(e)
-            val t = e.timeStamp
-            when (e.eventType) {
+        fun closeAll(at: Long) {
+            if (screenKnown) screenSince?.let { if (at > it) screen += Span(it, at) }
+            screenSince = null
+            closeApp(at)
+            serviceEvents += ServiceEvent(DEVICE_SHUTDOWN, "", null, at)
+        }
+        for (e in events) {
+            val t = e.timeMs
+            when (e.type) {
                 UsageEvents.Event.SCREEN_INTERACTIVE -> {
                     if (coverage == null) coverage = t
                     screenKnown = true; if (screenSince == null) screenSince = t
@@ -319,30 +354,17 @@ object UsageSource {
                 UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED ->
                     foreground.pausedOrStopped(e.packageName, e.className, t)
                 FOREGROUND_SERVICE_START, FOREGROUND_SERVICE_STOP ->
-                    serviceEvents += ServiceEvent(e.eventType, e.packageName, e.className, t)
-                DEVICE_SHUTDOWN -> {
-                    // Nothing runs while the phone is off: close everything at shutdown.
-                    if (screenKnown) screenSince?.let { if (t > it) screen += Span(it, t) }
-                    screenSince = null
-                    closeApp(t)
-                    serviceEvents += ServiceEvent(DEVICE_SHUTDOWN, "", null, t)
-                }
+                    serviceEvents += ServiceEvent(e.type, e.packageName, e.className, t)
+                DEVICE_SHUTDOWN -> closeAll(t)
+                // A crash may leave no shutdown event. Only the last pre-boot event is known
+                // to have happened while the old session was still running.
+                DEVICE_STARTUP -> lastEventMs?.let { closeAll(it) }
             }
+            lastEventMs = t
         }
         screenSince?.let { if (toMs > it) screen += Span(it, toMs) }
         closeApp(toMs)
-        // Private apps are folded into "Other" here, before anything else sees their names.
-        // If a hidden list exists but can't be read, hide every app rather than risk showing one.
-        val hidden = privateApps(context)
-        fun fold(source: Map<String, List<Span>>): Map<String, List<Span>> {
-            val folded = HashMap<String, MutableList<Span>>()
-            source.forEach { (pkg, spans) ->
-                val hide = hidden == null || pkg in hidden
-                folded.getOrPut(if (hide) DrainAnalysis.UNATTRIBUTED else pkg) { mutableListOf() } += spans
-            }
-            return folded
-        }
-        return UsageWindow(screen, fold(apps), coverage, fold(serviceSpans(serviceEvents, toMs)))
+        return UsageWindow(screen, apps, coverage, serviceSpans(serviceEvents, toMs))
     }
 
     /**
@@ -373,6 +395,7 @@ object UsageSource {
     private const val FOREGROUND_SERVICE_START = 19
     private const val FOREGROUND_SERVICE_STOP = 20
     private const val DEVICE_SHUTDOWN = 26
+    private const val DEVICE_STARTUP = 27
 
     /** The app's display name, or a tidy version of its package name if it isn't visible. */
     fun label(context: Context, pkg: String): String = when (pkg) {

@@ -783,7 +783,10 @@ class BatteryStore private constructor(context: Context) :
                 }
             }
             db.setTransactionSuccessful()
-        } finally { db.endTransaction() }
+        } finally {
+            // Between chunks no transaction is open; ending one then would hide the real error.
+            if (db.inTransaction()) db.endTransaction()
+        }
         // A test started on this phone during the import must win over a running one from the file.
         // Taking the test lock outside the import's transaction keeps the same order as starting a
         // test (lock, then database), so the two can't wait on each other.

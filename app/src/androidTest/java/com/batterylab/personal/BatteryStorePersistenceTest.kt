@@ -299,6 +299,20 @@ class BatteryStorePersistenceTest {
         }
     }
 
+    @Test fun failureBetweenChunksSurfacesItselfAndKeepsTheCommittedChunk() {
+        val header = "kind,device,mode_or_source,timestamp_utc,percentage\n"
+        val csv = header + (0 until 2500).joinToString("") { i ->
+            "reading,phone,android,${RangeExport.utc(i * 1000L)},50\n"
+        }
+        val failure = assertThrows(IOException::class.java) {
+            store.importCsv(StringReader(csv)) { throw IOException("synthetic failure between chunks") }
+        }
+        assertEquals("synthetic failure between chunks", failure.message)
+        val count = store.readableDatabase.rawQuery("SELECT COUNT(*) FROM readings", null).use { it.moveToFirst(); it.getInt(0) }
+        assertEquals(2000, count)
+        assertFalse(store.writableDatabase.inTransaction())
+    }
+
     @Test fun restorePastTheFirstChunkWithAConcurrentWriterKeepsOneCopyOfEachKey() {
         val header = "kind,device,mode_or_source,timestamp_utc,percentage\n"
         val csv = header + (0 until 3000).joinToString("") { i ->

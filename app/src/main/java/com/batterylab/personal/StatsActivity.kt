@@ -631,7 +631,8 @@ class StatsActivity : StyledActivity() {
                     if (h.n == 0 && h.androidN == 0) continue
                     addView(label("${h.hours} hours ahead", 13f, ink, bold = true).apply { setPadding(0, dp(6), 0, dp(2)) })
                     addView(label("Battery Lab: off by ${na(h.labMae, " pts")} (bias ${na(h.labBias, "")}, n=${h.n})" +
-                        (if (h.androidN > 0) "\nAndroid: off by ${na(h.androidMae, " pts")} (bias ${na(h.androidBias, "")}, n=${h.androidN})" else ""),
+                        (if (h.androidN > 0) "\nAndroid: off by ${na(h.androidMae, " pts")} (bias ${na(h.androidBias, "")}, n=${h.androidN})" +
+                            (if (h.androidN < h.n) "\nOn those same ${h.androidN}, Battery Lab: off by ${na(h.pairedLabMae, " pts")}" else "") else ""),
                         12.5f, Palette.body))
                 }
             }

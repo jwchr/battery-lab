@@ -70,7 +70,7 @@ class StatsPrecomputerTest {
         assertEquals(data.map { BatteryStats.device(it, ::hourOf, gaps) }, r.stats.value())
         val watch = (data[1] + raw.watchCompanion.value()).sortedBy { it.timeMs }
         assertEquals(watch.map { it.timeMs }, r.audit.value().watchTimes)
-        assertEquals(HonestyAuditor.audit(phone, raw.phoneWidget.value(), watch, data[2], capacity.combinedMah, gaps), r.audit.value().report)
+        assertEquals(HonestyAuditor.audit(phone, raw.phoneWidget.value(), watch, data[2], r.health.value().headlineMah, gaps), r.audit.value().report)
         assertTrue(r.audit.value().report.watchWidgetVsCompanionPairs > 0)
         val times = data.map { ChargeTimes.analyze(it, gaps) }
         assertEquals(times, r.chargeTimes.value().times)
@@ -100,9 +100,12 @@ class StatsPrecomputerTest {
             val rate = BatteryMath.median(charges[i].filter { it.peakMs - it.startMs >= 10 * 60_000L }
                 .map { (it.toPct - it.fromPct) / ((it.peakMs - it.startMs) / 60_000.0) })
             assertEquals(rate, input.chargeRate)
+            assertEquals(stretches[i].map { it.hours }, input.hours)
+            assertEquals(r.chargeTimes.value().times[i]?.steps.orEmpty(), input.chargeSteps)
+            assertTrue(input.chargeSteps.isNotEmpty())
         }
         for (hours in listOf(8, 12, 18, 24)) {
-            val assessed = plan.inputs.map { ReadinessPlanner.assess(it.name, it.percent, it.rates, it.chargeRate, hours.toDouble(), 15) }
+            val assessed = plan.inputs.map { ReadinessPlanner.assess(it.name, it.percent, it.rates, it.chargeRate, hours.toDouble(), 15, it.hours, it.chargeSteps) }
             assertEquals(assessed, plan.assessed[hours])
             assertEquals(ReadinessPlanner.order(assessed), plan.order[hours])
         }
@@ -151,7 +154,7 @@ class StatsPrecomputerTest {
         assertEquals(StatsCapabilities.batteryOnly(raw.capabilities.value()), r.capabilities.value().rows)
         assertEquals(1, r.capabilities.value().verified)
         val drain = r.drain.value()!!
-        assertEquals(DrainAnalysis.analyze(phone.map(BatteryPoint::of), usage.screenOn, usage.apps, gaps.stepMs, capacity.combinedMah, usage.services), drain.d)
+        assertEquals(DrainAnalysis.analyze(phone.map(BatteryPoint::of), usage.screenOn, usage.apps, gaps.stepMs, r.health.value().headlineMah, usage.services), drain.d)
         assertTrue(drain.candidates.size > 8)
         assertEquals(drain.d.apps.map { it.app }.toSet(), drain.labels.keys)
         assertTrue(drain.candidates.all { drain.labels[it] == "Label $it" })

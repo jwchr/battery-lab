@@ -421,18 +421,29 @@ object ForecastScoring {
      * is censored as a gap, and so is one with a hole longer than [GapLimits.stepMs] anywhere
      * between the forecast and the horizon: a charge and drain could hide in it (Neon deep review,
      * Nov 26, 2026, 1.P2j-i). Stays PENDING until 8 h have passed (or everything is censored).
+     * One-reading glitches are dropped first, with the forecast's own level standing before the
+     * first reading. A rise seen only in the newest reading, not marked as charging, waits for
+     * the next reading to show whether it was a glitch (Neon review of #88, Nov 26, 2026, 88.1).
      */
     fun score(f: Forecast, readingsAfter: List<Reading>, nowMs: Long, gaps: GapLimits = GapLimits()): ForecastScore {
-        val r = BatteryMath.withoutSpikes(
-            readingsAfter.filter { it.timeMs >= f.issuedMs }.sortedBy { it.timeMs },
-            { it.percent }, { it.charging }, { it.timeMs })
+        val anchored: List<Reading?> = listOf(null) + readingsAfter.filter { it.timeMs >= f.issuedMs }.sortedBy { it.timeMs }
+        val r = BatteryMath.withoutSpikes(anchored, { it?.percent ?: f.startPct }, { it?.charging }, { it?.timeMs ?: f.issuedMs }, gaps)
+            .filterNotNull()
+        val newest = r.lastOrNull()
+        // Waiting is bounded: once the last horizon's window plus one normal gap has passed, the score is final.
+        val canWait = nowMs < f.issuedMs + HORIZONS.last() * 3_600_000L + 30 * 60_000L + gaps.stepMs
+        fun unconfirmed(x: Reading?) = canWait && x != null && x === newest && x.charging != true
         val actual = arrayOfNulls<Double>(3)
         var charged = false; var gap = false
         for ((i, h) in HORIZONS.withIndex()) {
             val target = f.issuedMs + h * 3_600_000L
             if (nowMs < target + 30 * 60_000L) return ForecastScore(actual[0], actual[1], actual[2], "PENDING")
             val before = r.filter { it.timeMs <= target }
-            if (before.any { it.charging == true } || rose(before, f.startPct)) { charged = true; break }
+            if (before.any { it.charging == true } || rose(before, f.startPct)) {
+                if (before.none { it.charging == true } && unconfirmed(before.last()) && !rose(before.dropLast(1), f.startPct))
+                    return ForecastScore(actual[0], actual[1], actual[2], "PENDING")
+                charged = true; break
+            }
             if ((listOf(f.issuedMs) + before.map { it.timeMs }).zipWithNext().any { (a, b) -> b - a > gaps.stepMs }) { gap = true; break }
             val prev = before.lastOrNull { target - it.timeMs <= 30 * 60_000L }
             // The first reading at or after the horizon, and only if no charge came before it:
@@ -440,7 +451,10 @@ object ForecastScoring {
             val after = r.firstOrNull { it.timeMs >= target }?.takeIf { it.timeMs - target <= 30 * 60_000L }
             val next = after?.takeIf { it.charging != true && (prev == null || it.percent <= prev.percent + 2) }
             // A charge right after the horizon censors it as charged, not as a gap.
-            if (after != null && next == null) { charged = true; break }
+            if (after != null && next == null) {
+                if (unconfirmed(after)) return ForecastScore(actual[0], actual[1], actual[2], "PENDING")
+                charged = true; break
+            }
             actual[i] = when {
                 prev != null && next != null && next.timeMs > prev.timeMs ->
                     prev.percent + (next.percent - prev.percent) * (target - prev.timeMs).toDouble() / (next.timeMs - prev.timeMs)

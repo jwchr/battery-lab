@@ -92,4 +92,41 @@ class AnalyticsVisibleFixesTest {
         assertEquals(4200.0, StatsPrecomputer.Health(audit, proxy.copy(estimateMah = null)).headlineMah!!, 1e-9)
         assertEquals(3900.0, StatsPrecomputer.Health(audit, proxy.copy(estimateMah = 3900.0)).headlineMah!!, 1e-9)
     }
+
+    private fun pr(min: Long, pct: Int, charging: Boolean? = false) = Reading("phone", t0 + min * m, pct, charging, "android")
+    private val pending = Forecast(1, "phone", t0, 80, 2.0, 40.0, null, null, ForecastScoring.MODEL_VERSION, null, null, null, "PENDING")
+    private fun draining(fromMin: Long, toMin: Long) = (fromMin..toMin step 15).map { pr(it, (80 - it / 30).toInt()) }
+
+    /** 88.1: a glitch in the first reading after a forecast was kept (no reading before it) and censored every horizon. */
+    @Test fun aGlitchRightAfterTheForecastIsDropped() {
+        val s = ForecastScoring.score(pending, listOf(pr(5, 99)) + draining(15, 540), t0 + 10 * h)
+        assertEquals("SCORED", s.status)
+        assertEquals(76.0, s.actual2h!!, 1e-9)
+    }
+
+    /** 88.1: a glitch in the newest reading censored a horizon before the next reading could show it was a glitch. */
+    @Test fun aRiseInTheNewestReadingWaitsForTheNextOne() {
+        val upTo = draining(0, 105) + pr(125, 99)
+        assertEquals("PENDING", ForecastScoring.score(pending, upTo, t0 + 151 * m).status)
+        val next = ForecastScoring.score(pending, upTo + pr(140, 75), t0 + 151 * m)
+        assertEquals(77.0 + (75 - 77) * 15.0 / 35, next.actual2h!!, 1e-9)
+        // The same when the newest reading falls just before the horizon.
+        val early = draining(0, 105) + pr(115, 99)
+        assertEquals("PENDING", ForecastScoring.score(pending, early, t0 + 151 * m).status)
+        assertEquals(77.0 + (75 - 77) * 15.0 / 35, ForecastScoring.score(pending, early + pr(140, 75), t0 + 151 * m).actual2h!!, 1e-9)
+        // A reading marked charging needs no wait.
+        assertEquals("CENSORED_CHARGED", ForecastScoring.score(pending, draining(0, 105) + pr(125, 99, true), t0 + 10 * h).status)
+    }
+
+    @Test fun theWaitForAConfirmingReadingEnds() {
+        val s = ForecastScoring.score(pending, draining(0, 105) + pr(125, 99), t0 + 10 * h)
+        assertEquals("CENSORED_CHARGED", s.status)
+    }
+
+    /** 88.1: the glitch filter used the default 60-minute step, not the caller's, so sparse glitches stayed. */
+    @Test fun theGlitchFilterUsesTheCallersGapLimits() {
+        val s = ForecastScoring.score(pending, listOf(pr(0, 80), pr(90, 99), pr(120, 77), pr(240, 72), pr(480, 64)),
+            t0 + 10 * h, GapLimits(stepMs = 3 * h))
+        assertEquals(77.0, s.actual2h!!, 1e-9)
+    }
 }

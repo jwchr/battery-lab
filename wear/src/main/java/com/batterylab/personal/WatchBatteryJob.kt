@@ -46,7 +46,9 @@ object WatchReporter {
         return if (level >= 0 && scale > 0) (100.0 * level / scale).toInt().coerceIn(0, 100) else null
     }
 
-    fun send(context: Context, onFinished: (Boolean) -> Unit) {
+    /** [urgent] is for a sample the user asked for: Wear OS may hold a normal item up to 30 minutes
+     *  before syncing it (Neon deep review, Nov 26, 2026). The 2-hour job stays non-urgent to save battery. */
+    fun send(context: Context, urgent: Boolean = false, onFinished: (Boolean) -> Unit) {
         val completion = JobFinishGate()
         fun finish(success: Boolean) {
             completion.finish { onFinished(success) }
@@ -69,7 +71,7 @@ object WatchReporter {
             dataMap.putInt("percent", percent)
             dataMap.putBoolean("charging", charging)
             dataMap.putString("model", Build.MODEL)
-        }.asPutDataRequest()
+        }.asPutDataRequest().apply { if (urgent) setUrgent() }
         finishWhenDone(Wearable.getDataClient(context).putDataItem(request), context.mainExecutor, ::finish)
     }
 

@@ -108,7 +108,7 @@ object ChargeCurves {
 
     /** Charges built only from readings flagged charging; inferred jumps never count. */
     fun observedCharges(readings: List<Reading>, gaps: GapLimits = GapLimits()): List<ObservedCharge> =
-        chargeRuns(readings, gaps).map(::build)
+        chargeRuns(readings, gaps).map { build(it, gaps) }
 
     /** The readings of each watched charge, in time order: a run of charging readings without gaps. */
     fun chargeRuns(readings: List<Reading>, gaps: GapLimits = GapLimits()): List<List<Reading>> {
@@ -130,23 +130,24 @@ object ChargeCurves {
         return out
     }
 
-    private fun build(run: List<Reading>): ObservedCharge {
-        fun firstAtOrAbove(p: Int) = run.indexOfFirst { it.percent >= p }.takeIf { it >= 0 }
+    private fun build(run: List<Reading>, gaps: GapLimits): ObservedCharge {
+        // Ignore a one-reading glitch (60 -> 100 -> 61) for the top and the band timings, with the
+        // same gap limits that split the runs. The spike filter normally keeps charging readings,
+        // so the run is checked as if none were charging.
+        val clean = BatteryMath.withoutSpikes(run, { it.percent }, { null }, { it.timeMs }, gaps)
+        fun firstAtOrAbove(p: Int) = clean.indexOfFirst { it.percent >= p }.takeIf { it >= 0 }
         val bands = BANDS.mapNotNull { (lo, hi) ->
-            val minutes = bandMinutes(run, lo, hi) ?: return@mapNotNull null
-            val a = run[firstAtOrAbove(lo)!!]; val b = run[firstAtOrAbove(hi)!!]
+            val minutes = bandMinutes(clean, lo, hi) ?: return@mapNotNull null
+            val a = clean[firstAtOrAbove(lo)!!]; val b = clean[firstAtOrAbove(hi)!!]
             val ra = a.remainingUah; val rb = b.remainingUah
             val readingHours = (b.timeMs - a.timeMs) / 3_600_000.0
-            val mv = run.filter { it.timeMs in a.timeMs..b.timeMs }.mapNotNull { it.voltageMv }.takeIf { it.isNotEmpty() }?.average()
+            val mv = clean.filter { it.timeMs in a.timeMs..b.timeMs }.mapNotNull { it.voltageMv }.takeIf { it.isNotEmpty() }?.average()
             val watts = if (ra != null && rb != null && rb > ra && mv != null && readingHours > 0)
                 (rb - ra) / 1000.0 * mv / 1000.0 / readingHours / 1000.0 else null
             BandTiming(lo, hi, minutes, watts)
         }
         val plugged = run.mapNotNull { it.detail?.plugged }.filter { it > 0 }.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
         val temps = run.mapNotNull { it.tempTenthsC?.div(10.0) }
-        // Highest level reached, ignoring a one-reading glitch (60 -> 100 -> 61). The spike filter
-        // normally keeps charging readings, so the run is checked as if none were charging.
-        val clean = BatteryMath.withoutSpikes(run, { it.percent }, { null }, { it.timeMs })
         val top = clean.maxOf { it.percent }
         return ObservedCharge(run.first().timeMs, run.last().timeMs, run.first().percent, top, bands, plugged,
             if (temps.size >= 2) temps.max() - temps.first() else null, temps.maxOrNull(),

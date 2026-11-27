@@ -1,6 +1,7 @@
 package com.batterylab.personal
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AnalyticsEdgeCaseTest {
@@ -59,6 +60,19 @@ class AnalyticsEdgeCaseTest {
 
         assertEquals(70, charge.toPct)
         assertEquals(startMs + 60 * minuteMs, charge.peakMs)
+        // The glitch must not complete bands the charge never reached either.
+        assertTrue(charge.bands.none { it.toPct > 70 })
+    }
+
+    @Test fun chargeGlitchUsesTheCallersGapLimits() {
+        // 90-minute checks with a 120-minute step: one run, and the glitch must still be dropped.
+        val readings = listOf(40, 60, 100, 61, 70).mapIndexed { i, pct -> reading(i * 90L, pct, charging = true) }
+            .map { it.copy(detail = ReadingDetail(plugged = 1)) }
+
+        val charge = ChargeCurves.observedCharges(readings, GapLimits(stepMs = 120 * 60_000L)).single()
+
+        assertEquals(70, charge.toPct)
+        assertTrue(charge.bands.none { it.toPct > 70 })
     }
 
     @Test fun heatMatrixExcludesImplausibleTemperatureButCountsValidHeat() {

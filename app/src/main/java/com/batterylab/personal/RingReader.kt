@@ -13,6 +13,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -36,6 +37,15 @@ class RingReader(
     private val closer = Runnable { closeGatt() }
     @Volatile private var rssi: Int? = null
     @Volatile private var holdsLock = false
+    /** Set once the one reconnect inside this read is used (Neon deep review, Nov 26, 2026, 3.P3c). */
+    private val retried = AtomicBoolean(false)
+    /** True from a failed first connect until the reconnect starts: the old link's late events are ignored. */
+    @Volatile private var reconnecting = false
+    /** The failed first link: any event it still sends after the second try starts is ignored too. */
+    @Volatile private var retired: BluetoothGatt? = null
+    @Volatile private var device: BluetoothDevice? = null
+    @Volatile private var startedAt = 0L
+    private val reconnect = Runnable { connectAgain() }
 
     fun start() {
         // One Ring connection at a time across the whole app (manual reads and background checks).
@@ -56,12 +66,39 @@ class RingReader(
                 return
             }
             val device = adapter.getRemoteDevice(address)
-            main.postDelayed(deadline, 20_000)
+            this.device = device
+            startedAt = SystemClock.elapsedRealtime()
+            main.postDelayed(deadline, DEADLINE_MS)
             step("connecting")
-            gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+            connect(device)
         } catch (e: Exception) {
             complete(null, "Connection unavailable: ${e.javaClass.simpleName}")
         }
+    }
+
+    /**
+     * connectGatt() returns null when the Bluetooth stack is going down. Say so at once instead
+     * of holding the one-read lock for the full 20 seconds (Neon deep review, Nov 26, 2026, 3.P1b).
+     */
+    private fun connect(device: BluetoothDevice) {
+        val g = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+        if (g == null) { complete(null, "Bluetooth is turning off"); return }
+        gatt = g
+        // If the read ended while connectGatt() was running, its close may already have passed
+        // over this link, so close it here (Neon review of #95, Nov 27, 2026, 95.2).
+        if (finished.get()) main.post { if (gatt === g) { gatt = null; closeQuietly(g) } }
+    }
+
+    /**
+     * Main thread only. The first link is closed before this runs, so its callbacks have stopped;
+     * the second try stays inside the same read, the same lock and the same 20-second deadline.
+     */
+    private fun connectAgain() {
+        if (finished.get()) return
+        val d = device ?: return complete(null, "Connection unavailable")
+        step("connecting again")
+        reconnecting = false
+        try { connect(d) } catch (e: Exception) { complete(null, "Connection unavailable: ${e.javaClass.simpleName}") }
     }
 
     fun cancel() = complete(null, "Cancelled")
@@ -79,6 +116,7 @@ class RingReader(
         if (!finished.compareAndSet(false, true)) return
         Log.i(LOG_TAG, if (reading != null) "Ring read: done" else "Ring read failed: $error")
         main.removeCallbacks(deadline)
+        main.removeCallbacks(reconnect)
         // Hang up now, but release the connection only once Android reports the link is down
         // (or after 2 s), so the Bluetooth stack isn't left holding a half-closed link.
         try { gatt?.disconnect() } catch (_: Exception) { }
@@ -97,12 +135,17 @@ class RingReader(
         main.removeCallbacks(closer)
         gatt?.let { g ->
             gatt = null
-            try { g.close() } catch (_: Exception) { }
+            closeQuietly(g)
         }
         val result = pending ?: return
         pending = null
         if (holdsLock) { holdsLock = false; inFlight.set(false) }
         completion(result.first, result.second)
+    }
+
+    /** close() can throw SecurityException if the Nearby devices permission was just revoked. */
+    private fun closeQuietly(g: BluetoothGatt) {
+        try { g.close() } catch (_: SecurityException) { } catch (_: Exception) { }
     }
 
     private val callback = object : BluetoothGattCallback() {
@@ -116,9 +159,25 @@ class RingReader(
         }
 
         private fun handleState(g: BluetoothGatt, status: Int, newState: Int, down: Boolean) {
-            if (finished.get()) return
+            if (finished.get() || reconnecting || g === retired) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
-                complete(null, "BLE connection failed (status $status)")
+                val left = DEADLINE_MS - (SystemClock.elapsedRealtime() - startedAt)
+                if (shouldRetryConnect(status, stage, retried.get(), left) && retried.compareAndSet(false, true)) {
+                    // One more try for a common passing failure while connecting. The old link is
+                    // closed first so the two never overlap.
+                    retired = g
+                    reconnecting = true
+                    Log.i(LOG_TAG, "Ring read: connect failed (status $status), trying once more")
+                    main.post {
+                        if (gatt === g) gatt = null
+                        closeQuietly(g)
+                        main.removeCallbacks(reconnect)
+                        if (!finished.get()) main.postDelayed(reconnect, RETRY_DELAY_MS)
+                    }
+                    return
+                }
+                complete(null, if (stage == "connecting again") "BLE connection failed twice (status $status)"
+                    else "BLE connection failed (status $status)")
                 return
             }
             if (newState == android.bluetooth.BluetoothProfile.STATE_CONNECTED) {
@@ -222,6 +281,17 @@ class RingReader(
 
     companion object {
         private const val LOG_TAG = "BatteryLabRing"
+        internal const val DEADLINE_MS = 20_000L
+        /** Pause between closing the failed link and the second try, so the stack can let go of it. */
+        internal const val RETRY_DELAY_MS = 1_000L
+        /** A second try needs this much of the 20 seconds left to have a fair chance. */
+        internal const val RETRY_MIN_LEFT_MS = 8_000L
+        /** GATT_ERROR (133) and GATT_CONN_TIMEOUT (8): the usual passing failures while a link comes up. */
+        private val RETRY_STATUSES = setOf(133, 8)
+
+        /** Retry only while connecting, only once, and only with enough time left in the read. */
+        internal fun shouldRetryConnect(status: Int, stage: String, retried: Boolean, msLeft: Long): Boolean =
+            status in RETRY_STATUSES && stage == "connecting" && !retried && msLeft >= RETRY_MIN_LEFT_MS + RETRY_DELAY_MS
         private val inFlight = AtomicBoolean(false)
         private val DATA_SERVICE = UUID.fromString("00001b1b-0000-1000-8000-00805f9b34fb")
         private val NOTIFY_UUID = UUID.fromString("797ae4e9-2e58-4fe8-b48d-b5c79599fb9b")

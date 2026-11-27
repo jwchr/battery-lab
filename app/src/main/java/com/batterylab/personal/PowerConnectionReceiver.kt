@@ -109,8 +109,11 @@ internal object PowerReceiverAsync {
             val startedAt = now()
             // Every path gets the cap, so a stuck I/O thread can't hold the broadcast past
             // Android's limit. This callback runs on main, not behind a possibly busy I/O queue.
-            // This includes a settled read still saving: the receiver is registered at runtime,
-            // so the process is alive and the save carries on after the broadcast is finished.
+            // This includes a settled read still saving. That save is best-effort: once the
+            // broadcast is finished nothing holds the process (the receiver is registered from a
+            // job or app start, not a foreground service), so if Android reclaims it in that moment
+            // the one settled reading is lost. The read starts by SETTLED_START_CUTOFF_MS and a
+            // save takes milliseconds, so this is rare.
             postDelayed((DEADLINE_MS - (now() - startedAt)).coerceAtLeast(0)) { finishOnce() }
             if (!isCurrent()) {
                 postToIo { try { logLate() } finally { finishOnce() } }

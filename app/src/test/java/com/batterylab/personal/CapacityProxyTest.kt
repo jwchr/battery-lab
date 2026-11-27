@@ -156,6 +156,21 @@ class CapacityProxyTest {
         early.flatMapIndexed { d, mah -> List(perDay) { p -> reading(16L + d, mah).copy(timeMs = now - (16L + d) * day + p) } } +
             late.flatMapIndexed { d, mah -> List(perDay) { p -> reading(1L + d, mah).copy(timeMs = now - (1L + d) * day + p) } }
 
+    @Test fun theDayHoldingTheMidpointCountsInOneHalfOnly() {
+        // Hourly polls over 7 calendar days with the midpoint at 14:00 on the fourth: that day goes
+        // to the later half, so the earlier half has 3 days, not 4.
+        val at = now + 14 * 3_600_000L
+        val mid = at - 15 * day
+        val polls = (0 until 7 * 24).map { hr ->
+            val t = (25L - 3) * day + hr * 3_600_000L
+            reading(0, if (t < mid) 5000 else 4000).copy(timeMs = t)
+        }
+        assertEquals(Trend.NOT_ENOUGH, CapacityProxy.summarize(polls, at).trend)
+        // One more earlier day gives each half 4 days, and the drop is named.
+        val more = (0 until 24).map { hr -> reading(0, 5000).copy(timeMs = (25L - 4) * day + hr * 3_600_000L) }
+        assertEquals(Trend.LOWER, CapacityProxy.summarize(more + polls, at).trend)
+    }
+
     @Test fun threeDaysInAHalfCannotEstablishTrend() {
         val result = CapacityProxy.summarize(days(List(3) { 5000 }, List(4) { 4000 }), now)
         assertEquals(Trend.NOT_ENOUGH, result.trend)

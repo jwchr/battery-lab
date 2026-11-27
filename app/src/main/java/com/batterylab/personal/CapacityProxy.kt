@@ -60,8 +60,12 @@ object CapacityProxy {
         val values = used.map { it.second }
         // One value per day: polls 15 minutes apart move together, so 40 of them on one day are
         // one observation, not 40 (Neon deep review, Nov 26, 2026, 1.P2e).
-        val early = dailyMedians(used.filter { it.first.timeMs < midpointMs })
-        val late = dailyMedians(used.filter { it.first.timeMs >= midpointMs })
+        // Whole days go to one half (the day holding the midpoint goes to the later half), so two
+        // polls minutes apart across the midpoint are not two days (Neon and Flash review of #96).
+        val midDay = Math.floorDiv(midpointMs, DAY_MS)
+        val byDay = used.groupBy { Math.floorDiv(it.first.timeMs, DAY_MS) }
+        val early = dailyMedians(byDay.filterKeys { it < midDay })
+        val late = dailyMedians(byDay.filterKeys { it >= midDay })
         val earlyMah = BatteryMath.median(early)
         val lateMah = BatteryMath.median(late)
         val trend = if (early.size < MIN_DAYS || late.size < MIN_DAYS) Trend.NOT_ENOUGH else {
@@ -94,9 +98,11 @@ object CapacityProxy {
     /** Changes of 3 percent or less are within the counter's usual drift with temperature and calibration. */
     internal const val MIN_CHANGE_FRACTION = 0.03
 
+    private const val DAY_MS = 86_400_000L
+
     /** The median capacity of each calendar day (UTC) that has readings. */
-    private fun dailyMedians(samples: List<Pair<Reading, Double>>): List<Double> =
-        samples.groupBy { Math.floorDiv(it.first.timeMs, 86_400_000L) }.values.mapNotNull { day -> BatteryMath.median(day.map { it.second }) }
+    private fun dailyMedians(days: Map<Long, List<Pair<Reading, Double>>>): List<Double> =
+        days.values.mapNotNull { day -> BatteryMath.median(day.map { it.second }) }
 
     /** Linearly interpolated quartiles, matching the other Stats spread calculations. */
     private fun iqr(values: List<Double>): Double? {

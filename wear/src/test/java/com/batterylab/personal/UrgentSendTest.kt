@@ -18,5 +18,11 @@ class UrgentSendTest {
         assertTrue(job.contains("if (urgent) setUrgent()"))
         assertEquals(1, Regex("WatchReporter\\.send\\(this\\)").findAll(job).count())
         assertTrue(src("WatchActivity.kt").contains("WatchReporter.send(this@WatchActivity, urgent = true)"))
+        // Background sends rely on the default, so it must stay non-urgent.
+        assertTrue(job.contains("fun send(context: Context, urgent: Boolean = false,"))
+        // The button is the only urgent caller anywhere in the Watch app.
+        val urgentCalls = dir.listFiles()!!.filter { it.extension == "kt" }
+            .sumOf { Regex("urgent = true").findAll(it.readText()).count() }
+        assertEquals(1, urgentCalls)
     }
 }

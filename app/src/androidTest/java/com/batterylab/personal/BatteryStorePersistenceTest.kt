@@ -17,6 +17,9 @@ import java.io.StringReader
 import java.io.StringWriter
 import java.io.Writer
 import java.time.ZoneId
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
@@ -235,5 +238,141 @@ class BatteryStorePersistenceTest {
         val before = snapshot()
         assertEquals(0 to 0, store.importCsv(StringReader(complete)))
         assertEquals(before, snapshot())
+    }
+
+    @Test fun appendIfNewRejectsAnExistingKeyWithoutChangingAnyRow() {
+        val reading = Reading("watch:synthetic", 100, 50, false, "wear_os")
+        assertTrue(store.appendIfNew(reading))
+        val before = snapshot()
+        assertFalse(store.appendIfNew(reading.copy(percent = 49)))
+        assertEquals(before, snapshot())
+        assertTrue(store.appendIfNew(reading.copy(timeMs = 101)))
+        assertTrue(store.appendIfNew(reading.copy(source = "samsung_widget")))
+        assertTrue(store.appendIfNew(reading.copy(device = "phone")))
+        assertEquals(4, store.since("watch:synthetic", 0).size + store.since("phone", 0).size)
+        assertTrue(QualityFlags.has(store.latestFrom("watch:synthetic", "wear_os")?.detail?.qualityFlags,
+            QualityFlags.UNCHANGED_REPEAT))
+    }
+
+    private fun <T> simultaneousWrites(write: (Int) -> T): List<T> {
+        val ready = CountDownLatch(2)
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val futures = (0..1).map { index -> executor.submit<T> {
+                ready.countDown()
+                check(start.await(10, TimeUnit.SECONDS)) { "Writer start timed out" }
+                write(index)
+            } }
+            assertTrue("Both writers must be ready", ready.await(10, TimeUnit.SECONDS))
+            start.countDown()
+            return futures.map { it.get(20, TimeUnit.SECONDS) }
+        } finally {
+            start.countDown()
+            executor.shutdownNow()
+            assertTrue("Writers must exit before database cleanup", executor.awaitTermination(20, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test fun simultaneousAppendsAssessFlagsAgainstEachOther() {
+        repeat(40) { round ->
+            val device = "watch:synthetic-$round"
+            store.append(Reading(device, 100, 50, false, "wear_os"))
+            // Same new timestamp/value: either ordering must flag exactly the second insert.
+            simultaneousWrites {
+                store.append(Reading(device, 200, 49, false, "wear_os",
+                    detail = ReadingDetail(qualityFlags = QualityFlags.AMBIGUOUS_WIDGET_SLOT)))
+            }
+            val rows = store.since(device, 200)
+            assertEquals(2, rows.size)
+            assertEquals(1, rows.count { QualityFlags.has(it.detail?.qualityFlags, QualityFlags.UNCHANGED_REPEAT) })
+            assertTrue(rows.all { QualityFlags.has(it.detail?.qualityFlags, QualityFlags.AMBIGUOUS_WIDGET_SLOT) })
+        }
+    }
+
+    @Test fun simultaneousAppendIfNewStoresExactlyOneSample() {
+        repeat(40) { round ->
+            val reading = Reading("watch:synthetic-$round", 100, 50, false, "wear_os")
+            val results = simultaneousWrites { store.appendIfNew(reading) }
+            assertEquals(1, results.count { it })
+            assertEquals(1, store.since(reading.device, 0).size)
+        }
+    }
+
+    @Test fun failureBetweenChunksSurfacesItselfAndKeepsTheCommittedChunk() {
+        val header = "kind,device,mode_or_source,timestamp_utc,percentage\n"
+        val csv = header + (0 until 2500).joinToString("") { i ->
+            "reading,phone,android,${RangeExport.utc(i * 1000L)},50\n"
+        }
+        val failure = assertThrows(IOException::class.java) {
+            store.importCsv(StringReader(csv)) { throw IOException("synthetic failure between chunks") }
+        }
+        assertEquals("synthetic failure between chunks", failure.message)
+        val count = store.readableDatabase.rawQuery("SELECT COUNT(*) FROM readings", null).use { it.moveToFirst(); it.getInt(0) }
+        assertEquals(2000, count)
+        assertFalse(store.writableDatabase.inTransaction())
+    }
+
+    @Test fun restorePastTheFirstChunkWithAConcurrentWriterKeepsOneCopyOfEachKey() {
+        val header = "kind,device,mode_or_source,timestamp_utc,percentage\n"
+        val csv = header + (0 until 3000).joinToString("") { i ->
+            "reading,phone,android,${RangeExport.utc(i * 1000L)},50\n"
+        }
+        // Backdated key that restore reaches only after its first 2,000-row commit.
+        val late = Reading("phone", 2500 * 1000L, 50, false, "android")
+        fun copies() = store.readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM readings WHERE device='phone' AND source='android' AND time_ms=?",
+            arrayOf(late.timeMs.toString())).use { it.moveToFirst(); it.getInt(0) }
+        var writes = 0
+        // Another writer saves the key exactly between the chunks, from its own thread, while
+        // no restore transaction is open; restore must then see it and skip its own copy.
+        val (added, _) = store.importCsv(StringReader(csv)) {
+            val writer = Executors.newSingleThreadExecutor()
+            try { assertTrue(writer.submit<Boolean> { store.appendIfNew(late) }.get(20, TimeUnit.SECONDS)) }
+            finally { writer.shutdownNow() }
+            writes++
+        }
+        assertEquals("One chunk boundary in 3,000 rows", 1, writes)
+        assertEquals("Restore skipped the key the other writer saved", 2999, added)
+        assertEquals("Concurrent backdated key stored once", 1, copies())
+        val total = store.readableDatabase.rawQuery("SELECT COUNT(*) FROM readings", null).use { it.moveToFirst(); it.getInt(0) }
+        assertEquals("Each CSV key stored once", 3000, total)
+    }
+
+    @Test fun failedAppendRollsBackAndReleasesTheWriteTransaction() {
+        store.writableDatabase.execSQL("CREATE TRIGGER reject_reading BEFORE INSERT ON readings BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")
+        val reading = Reading("watch:synthetic", 100, 50, false, "wear_os")
+        assertThrows(android.database.sqlite.SQLiteException::class.java) { store.append(reading) }
+        assertFalse(store.writableDatabase.inTransaction())
+        assertThrows(android.database.sqlite.SQLiteException::class.java) { store.appendIfNew(reading) }
+        assertFalse(store.writableDatabase.inTransaction())
+        store.writableDatabase.execSQL("DROP TRIGGER reject_reading")
+        assertTrue(store.appendIfNew(reading))
+        assertEquals(1, store.since(reading.device, 0).size)
+    }
+
+    @Test fun widgetRepeatAfterBluetoothReadingIsNotInsertedAgain() {
+        val prefsName = "synthetic-widget-${System.nanoTime()}"
+        val isolated = object : ContextWrapper(context) {
+            override fun getApplicationContext(): Context = this
+            override fun getSharedPreferences(name: String, mode: Int) = context.getSharedPreferences(prefsName, mode)
+        }
+        try {
+            val fingerprint = "0".repeat(128)
+            // Prelabel the phone too so this synthetic test never reads the phone battery.
+            SamsungWidgetSource.setLabel(isolated, "f".repeat(128), SamsungWidgetSource.LABEL_PHONE)
+            SamsungWidgetSource.setLabel(isolated, fingerprint, SamsungWidgetSource.LABEL_RING)
+            fun widget(time: Long, percent: Int = 50, charging: Boolean = false) = SamsungWidgetSource.record(isolated, store,
+                WidgetSnapshot(time, listOf(WidgetSlot(0, percent, null, charging, fingerprint, null)), elapsedMs = time))
+            assertEquals(100L, widget(100).single().timeMs)
+            store.append(Reading(BatteryStore.RING_ID, 200, 50, false, "ring_ble"))
+            assertEquals(100L, widget(300).single().timeMs)
+            assertEquals(2, store.since(BatteryStore.RING_ID, 0).size)
+            // Exactly five minutes is outside the duplicate window; changed values still save.
+            assertEquals(300_100L, widget(300_100).single().timeMs)
+            assertEquals(300_101L, widget(300_101, percent = 49).single().timeMs)
+            assertEquals(300_102L, widget(300_102, percent = 49, charging = true).single().timeMs)
+            assertEquals(5, store.since(BatteryStore.RING_ID, 0).size)
+        } finally { context.deleteSharedPreferences(prefsName) }
     }
 }

@@ -27,8 +27,7 @@ class WatchReceiver : WearableListenerService() {
                 if (ts <= 0) return@forEachIsolated
                 val model = data.getString("model") ?: "Watch"
                 val identifier = "watch:$model"
-                if (!store.has(identifier, "wear_os", ts))
-                    store.append(Reading(identifier, ts, pct, data.getBoolean("charging"), "wear_os"))
+                store.appendIfNew(Reading(identifier, ts, pct, data.getBoolean("charging"), "wear_os"))
                 // Stored: remove the sample so the watch's backlog doesn't grow.
                 if (path != "/batterylab/watch") Wearable.getDataClient(this).deleteDataItems(event.dataItem.uri)
             }

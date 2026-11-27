@@ -238,10 +238,26 @@ class BatteryStore private constructor(context: Context) :
      * and source, keeping any flags the caller already set.
      */
     fun append(r: Reading) {
+        writeReading(r, onlyIfNew = false)
+    }
+
+    /** Saves a watch sample only once, including when restore or another receiver is writing. */
+    fun appendIfNew(r: Reading): Boolean = writeReading(r, onlyIfNew = true)
+
+    private fun writeReading(r: Reading, onlyIfNew: Boolean): Boolean {
         require(r.percent in 0..100)
-        val flags = QualityFlags.assess(latestFrom(r.device, r.source), r)
-        val withFlags = r.copy(detail = (r.detail ?: ReadingDetail()).copy(qualityFlags = flags))
-        writableDatabase.insertOrThrow("readings", null, values(withFlags))
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val insert = !onlyIfNew || !has(r.device, r.source, r.timeMs)
+            if (insert) {
+                val flags = QualityFlags.assess(latestFrom(r.device, r.source), r)
+                val withFlags = r.copy(detail = (r.detail ?: ReadingDetail()).copy(qualityFlags = flags))
+                db.insertOrThrow("readings", null, values(withFlags))
+            }
+            db.setTransactionSuccessful()
+            return insert
+        } finally { db.endTransaction() }
     }
 
     private fun values(r: Reading) = ContentValues().apply {
@@ -284,7 +300,7 @@ class BatteryStore private constructor(context: Context) :
 
     fun latest(device: String): Reading? = recent(device, 1).lastOrNull()
 
-    private fun latestFrom(device: String, source: String): Reading? =
+    internal fun latestFrom(device: String, source: String): Reading? =
         query("device=? AND source=?", arrayOf(device, source), "1").lastOrNull()
 
     fun recent(device: String, limit: Int = 500): List<Reading> =
@@ -642,7 +658,10 @@ class BatteryStore private constructor(context: Context) :
      * existing is changed or removed. Exports made before journal and forecast rows existed
      * import as before. Returns (readings added, experiments added).
      */
-    fun importCsv(input: Reader): Pair<Int, Int> {
+    fun importCsv(input: Reader): Pair<Int, Int> = importCsv(input) {}
+
+    /** [afterChunkCommit] runs between chunks, when no restore transaction is open; tests use it. */
+    internal fun importCsv(input: Reader, afterChunkCommit: () -> Unit): Pair<Int, Int> {
         val lines = input.buffered()
         val first = CsvCodec.readRecord(lines) ?: return 0 to 0
         when (RangeExport.classify(first)) {
@@ -653,10 +672,7 @@ class BatteryStore private constructor(context: Context) :
         val head = CsvCodec.parseLine(first)
         val col = head.withIndex().associate { (i, n) -> n to i }
         require("kind" in col && "timestamp_utc" in col && "percentage" in col) { "Not a Battery Lab export" }
-        val existing = HashSet<String>()
-        readableDatabase.rawQuery("SELECT device, source, time_ms FROM readings", null).use { c ->
-            while (c.moveToNext()) existing += "${c.getString(0)}|${c.getString(1)}|${c.getLong(2)}"
-        }
+        val existing = ReadingImportDedupe()
         val existingExp = experiments(100_000).associateBy { "${it.device}|${it.mode}|${it.startMs}" }.toMutableMap()
         val existingJournal = journal(Int.MAX_VALUE).mapTo(HashSet(), ContextRows::journalKey)
         val existingForecasts = forecasts().mapTo(HashSet(), ContextRows::forecastKey)
@@ -665,8 +681,17 @@ class BatteryStore private constructor(context: Context) :
         val running = LinkedHashMap<String, ContentValues>()
         val parseTime = CsvCodec.utcParser()
         val db = writableDatabase
+        // Called only after acquiring the write lock, so no writer can slip between refresh
+        // and insert. AUTOINCREMENT ids also cover backdated readings from other writers.
+        fun refreshReadings() {
+            db.rawQuery("SELECT id, device, source, time_ms FROM readings WHERE id > ?",
+                arrayOf(existing.watermark.toString())).use { c ->
+                while (c.moveToNext()) existing.includeCommitted(c.getLong(0), c.getString(1), c.getString(2), c.getLong(3))
+            }
+        }
         db.beginTransaction()
         try {
+            refreshReadings()
             while (true) {
                 val line = CsvCodec.readRecord(lines) ?: break
                 if (line.isBlank()) continue
@@ -707,7 +732,7 @@ class BatteryStore private constructor(context: Context) :
                 when (get("kind")) {
                     "reading" -> {
                         val source = get("mode_or_source") ?: continue
-                        if (!existing.add("$device|$source|$time")) continue
+                        if (!existing.add(device, source, time)) continue
                         val v = ContentValues().apply {
                             put("device", device); put("time_ms", time); put("percent", pct); put("source", source)
                             get("charging")?.let { put("charging", if (it == "true") 1 else 0) }
@@ -722,7 +747,12 @@ class BatteryStore private constructor(context: Context) :
                         db.insertOrThrow("readings", null, v); added++
                         // Commit in chunks: a long restore doesn't lock out the 15-minute job, and if
                         // the process dies part way, what was imported stays (the import skips it next time).
-                        if (added % 2000 == 0) { db.setTransactionSuccessful(); db.endTransaction(); db.beginTransaction() }
+                        if (added % 2000 == 0) {
+                            db.setTransactionSuccessful(); db.endTransaction()
+                            afterChunkCommit()
+                            db.beginTransaction()
+                            refreshReadings()
+                        }
                     }
                     "experiment" -> {
                         val mode = get("mode_or_source")?.takeIf(ExperimentEndpoint::knownMode) ?: continue
@@ -753,7 +783,10 @@ class BatteryStore private constructor(context: Context) :
                 }
             }
             db.setTransactionSuccessful()
-        } finally { db.endTransaction() }
+        } finally {
+            // Between chunks no transaction is open; ending one then would hide the real error.
+            if (db.inTransaction()) db.endTransaction()
+        }
         // A test started on this phone during the import must win over a running one from the file.
         // Taking the test lock outside the import's transaction keeps the same order as starting a
         // test (lock, then database), so the two can't wait on each other.
@@ -814,6 +847,21 @@ class BatteryStore private constructor(context: Context) :
                 r.source != SamsungWidgetSource.SOURCE || direct.none { kotlin.math.abs(it - r.timeMs) <= 5 * 60_000L }
             }
         }
+    }
+}
+
+/** Restore's reading keys and forward-only database scan position; no Android dependencies. */
+internal class ReadingImportDedupe {
+    private val keys = HashSet<String>()
+    var watermark: Long = 0
+        private set
+
+    fun add(device: String, source: String, timeMs: Long): Boolean =
+        keys.add("$device|$source|$timeMs")
+
+    fun includeCommitted(id: Long, device: String, source: String, timeMs: Long) {
+        add(device, source, timeMs)
+        watermark = maxOf(watermark, id)
     }
 }
 

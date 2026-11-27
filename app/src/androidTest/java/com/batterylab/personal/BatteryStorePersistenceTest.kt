@@ -291,10 +291,31 @@ class BatteryStorePersistenceTest {
     }
 
     @Test fun simultaneousAppendIfNewStoresExactlyOneSample() {
-        val reading = Reading("watch:synthetic", 100, 50, false, "wear_os")
-        val results = simultaneousWrites { store.appendIfNew(reading) }
-        assertEquals(1, results.count { it })
-        assertEquals(1, store.since(reading.device, 0).size)
+        repeat(40) { round ->
+            val reading = Reading("watch:synthetic-$round", 100, 50, false, "wear_os")
+            val results = simultaneousWrites { store.appendIfNew(reading) }
+            assertEquals(1, results.count { it })
+            assertEquals(1, store.since(reading.device, 0).size)
+        }
+    }
+
+    @Test fun restorePastTheFirstChunkWithAConcurrentWriterKeepsOneCopyOfEachKey() {
+        val header = "kind,device,mode_or_source,timestamp_utc,percentage\n"
+        val csv = header + (0 until 3000).joinToString("") { i ->
+            "reading,phone,android,${RangeExport.utc(i * 1000L)},50\n"
+        }
+        // Backdated key that restore reaches only after its first 2,000-row commit.
+        val late = Reading("phone", 2500 * 1000L, 50, false, "android")
+        repeat(5) { round ->
+            if (round > 0) store.writableDatabase.execSQL("DELETE FROM readings")
+            simultaneousWrites<Any> { index -> if (index == 0) store.importCsv(StringReader(csv)) else store.appendIfNew(late) }
+            val total = store.readableDatabase.rawQuery("SELECT COUNT(*) FROM readings", null).use { it.moveToFirst(); it.getInt(0) }
+            val copies = store.readableDatabase.rawQuery(
+                "SELECT COUNT(*) FROM readings WHERE device='phone' AND source='android' AND time_ms=?",
+                arrayOf(late.timeMs.toString())).use { it.moveToFirst(); it.getInt(0) }
+            assertEquals("Each CSV key stored once", 3000, total)
+            assertEquals("Concurrent backdated key stored once", 1, copies)
+        }
     }
 
     @Test fun failedAppendRollsBackAndReleasesTheWriteTransaction() {

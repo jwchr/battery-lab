@@ -168,8 +168,7 @@ object SamsungWidgetSource {
                 detail = clock.copy(rawExtra = slot.progress?.let { "arc_progress=$it" },
                     qualityFlags = if (loose) QualityFlags.AMBIGUOUS_WIDGET_SLOT else null))
             val last = store.latestFrom(device, SOURCE)
-            if (last != null && last.source == SOURCE && last.percent == reading.percent &&
-                last.charging == reading.charging && reading.timeMs - last.timeMs < DUPLICATE_WINDOW_MS) {
+            if (last != null && WidgetRepeat.isRecent(last, reading, DUPLICATE_WINDOW_MS)) {
                 saved += last
                 continue
             }
@@ -357,4 +356,12 @@ object SamsungWidgetSource {
         copy.draw(Canvas(bmp))
         return bmp
     }
+}
+
+/** Pure, unit-tested: a widget read repeats the last one when nothing changed within the window. */
+internal object WidgetRepeat {
+    // A clock stepped backward gives a negative gap; that read is kept, not taken for a repeat.
+    fun isRecent(last: Reading?, reading: Reading, windowMs: Long): Boolean =
+        last != null && last.source == reading.source && last.percent == reading.percent &&
+            last.charging == reading.charging && (reading.timeMs - last.timeMs) in 0 until windowMs
 }

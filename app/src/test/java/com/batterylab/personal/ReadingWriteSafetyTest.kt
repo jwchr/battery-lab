@@ -60,9 +60,27 @@ class ReadingWriteSafetyTest {
         val record = source("SamsungWidgetSource").substringAfter("fun record(").substringBefore("private fun recognizePhoneSlot")
         assertFalse(Regex("store\\.latest\\s*\\(").containsMatchIn(record))
         assertTrue(record.contains("store.latestFrom(device, SOURCE)"))
-        assertTrue(record.contains("last.percent == reading.percent"))
-        assertTrue(record.contains("last.charging == reading.charging"))
-        assertTrue(record.contains("reading.timeMs - last.timeMs < DUPLICATE_WINDOW_MS"))
+        assertTrue(record.contains("last != null && WidgetRepeat.isRecent(last, reading, DUPLICATE_WINDOW_MS)"))
+    }
+
+    private val last = Reading("ring:synthetic", 1_000_000, 50, false, "samsung_widget")
+
+    @Test fun sameValueInsideTheWindowIsARepeat() {
+        assertTrue(WidgetRepeat.isRecent(last, last.copy(timeMs = last.timeMs), 300_000))
+        assertTrue(WidgetRepeat.isRecent(last, last.copy(timeMs = last.timeMs + 299_999), 300_000))
+        assertFalse(WidgetRepeat.isRecent(last, last.copy(timeMs = last.timeMs + 300_000), 300_000))
+        assertFalse(WidgetRepeat.isRecent(null, last, 300_000))
+    }
+
+    @Test fun changedValueOrOtherSourceIsNotARepeat() {
+        assertFalse(WidgetRepeat.isRecent(last, last.copy(timeMs = last.timeMs + 1, percent = 49), 300_000))
+        assertFalse(WidgetRepeat.isRecent(last, last.copy(timeMs = last.timeMs + 1, charging = true), 300_000))
+        assertFalse(WidgetRepeat.isRecent(last.copy(source = "ring_ble"), last.copy(timeMs = last.timeMs + 1), 300_000))
+    }
+
+    @Test fun clockSteppedBackwardIsKeptNotTakenForARepeat() {
+        assertFalse(WidgetRepeat.isRecent(last, last.copy(timeMs = last.timeMs - 1), 300_000))
+        assertFalse(WidgetRepeat.isRecent(last, last.copy(timeMs = last.timeMs - 3_600_000), 300_000))
     }
 
     @Test fun watchUsesAtomicAppendInsteadOfCheckThenAppend() {

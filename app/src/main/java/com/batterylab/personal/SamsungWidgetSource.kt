@@ -167,7 +167,7 @@ object SamsungWidgetSource {
             val reading = Reading(device, snapshot.timeMs, slot.percent, slot.chargingIcon, SOURCE,
                 detail = clock.copy(rawExtra = slot.progress?.let { "arc_progress=$it" },
                     qualityFlags = if (loose) QualityFlags.AMBIGUOUS_WIDGET_SLOT else null))
-            val last = store.latest(device)
+            val last = store.latestFrom(device, SOURCE)
             if (last != null && last.source == SOURCE && last.percent == reading.percent &&
                 last.charging == reading.charging && reading.timeMs - last.timeMs < DUPLICATE_WINDOW_MS) {
                 saved += last

@@ -107,7 +107,15 @@ class RingReader(
 
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
-            if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) main.post { if (finished.get()) closeGatt() }
+            val down = newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED
+            handleState(g, status, newState, down)
+            // Post the close only after handleState: this callback runs on a Binder thread, so a
+            // close posted first could reach main before complete() marks the read finished,
+            // and the link would then wait out the 2 s closer instead of closing at once.
+            if (down) main.post { if (finished.get()) closeGatt() }
+        }
+
+        private fun handleState(g: BluetoothGatt, status: Int, newState: Int, down: Boolean) {
             if (finished.get()) return
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 complete(null, "BLE connection failed (status $status)")
@@ -119,7 +127,7 @@ class RingReader(
                     g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
                     if (!g.discoverServices()) complete(null, "BLE service discovery did not start")
                 } catch (e: SecurityException) { complete(null, "Bluetooth permission denied") }
-            } else if (newState == android.bluetooth.BluetoothProfile.STATE_DISCONNECTED) {
+            } else if (down) {
                 complete(null, "Ring disconnected before battery reply")
             }
         }

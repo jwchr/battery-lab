@@ -198,7 +198,7 @@ internal object StatsPrecomputer {
         }
         return Result(now, devices, gaps, data.sumOf { it.size }, health, stats, drain, audit, chargeTimes, charging,
             nights, planner, forecasts, journal, heat, comparison, leftOut, rolling, spread, week,
-            SectionResult.capture { BatteryStats.temperature(phone) }, coverage,
+            SectionResult.capture { BatteryStats.temperature(phone, gaps) }, coverage,
             SectionResult.capture { Overhead.summarize(raw.probeEvents.get()) },
             SectionResult.capture { StatsCapabilities.batteryOnly(raw.capabilities.get()).let { rows ->
                 Capabilities(rows, rows.count { it.status == CapabilityProbe.VERIFIED })

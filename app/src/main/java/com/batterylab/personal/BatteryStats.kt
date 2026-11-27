@@ -183,14 +183,32 @@ object BatteryStats {
             (0 until 24).map { if (hourWeight[it] >= 0.5) hourSum[it] / hourWeight[it] else null }, longest, high)
     }
 
-    fun temperature(readings: List<Reading>): TempStats? {
-        val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in VALID_TEMP_TENTHS_C }
+    /**
+     * Battery temperature over [readings]. The averages are time-weighted: each reading stands for
+     * half the time to each neighbor (each half capped at one [GapLimits.stepMs] step, and the first
+     * and last readings mirror their one side), so the sparse polls of deep sleep count for as long
+     * as they cover and evenly spaced polls give the plain average (Neon deep review, Nov 26, 2026,
+     * 1.P2m-i). Readings that all share one time fall back to the plain average.
+     */
+    fun temperature(readings: List<Reading>, gaps: GapLimits = GapLimits()): TempStats? {
+        val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in VALID_TEMP_TENTHS_C }.sortedBy { it.timeMs }
         if (t.isEmpty()) return null
-        val c = t.map { it.tempTenthsC!! / 10.0 }
+        fun half(a: Reading, b: Reading) = minOf(b.timeMs - a.timeMs, gaps.stepMs) / 2.0
+        val weights = t.indices.map { i ->
+            val left = if (i > 0) half(t[i - 1], t[i]) else null
+            val right = if (i < t.lastIndex) half(t[i], t[i + 1]) else null
+            (left ?: right ?: 0.0) + (right ?: left ?: 0.0)
+        }
+        fun average(keep: (Reading) -> Boolean): Double? {
+            val picked = t.indices.filter { keep(t[it]) }
+            if (picked.isEmpty()) return null
+            val total = picked.sumOf { weights[it] }
+            return if (total > 0) picked.sumOf { t[it].tempTenthsC!! / 10.0 * weights[it] } / total
+            else picked.map { t[it].tempTenthsC!! / 10.0 }.average()
+        }
         val hottest = t.maxByOrNull { it.tempTenthsC!! }!!
-        return TempStats(c.average(), c.min(), c.max(), hottest.timeMs,
-            t.filter { it.charging == true }.map { it.tempTenthsC!! / 10.0 }.takeIf { it.isNotEmpty() }?.average(),
-            t.filter { it.charging == false }.map { it.tempTenthsC!! / 10.0 }.takeIf { it.isNotEmpty() }?.average())
+        return TempStats(average { true }!!, t.minOf { it.tempTenthsC!! } / 10.0, hottest.tempTenthsC!! / 10.0, hottest.timeMs,
+            average { it.charging == true }, average { it.charging == false })
     }
 
     /** Energy in watt-hours for [percentUsed] of a [capacityMah] battery at a nominal 3.87 V. */

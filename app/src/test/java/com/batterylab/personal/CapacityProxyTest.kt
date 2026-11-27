@@ -151,46 +151,72 @@ class CapacityProxyTest {
         assertEquals(0, result.skippedLowPercent)
     }
 
-    @Test fun nineSamplesPerHalfCannotEstablishTrend() {
-        val result = CapacityProxy.summarize(halves(List(9) { 5000 }, List(9) { 4000 }), now)
+    /** One value per day, with [perDay] polls on each day, early half 16+ days ago, late half under 15. */
+    private fun days(early: List<Int>, late: List<Int>, perDay: Int = 3) =
+        early.flatMapIndexed { d, mah -> List(perDay) { p -> reading(16L + d, mah).copy(timeMs = now - (16L + d) * day + p) } } +
+            late.flatMapIndexed { d, mah -> List(perDay) { p -> reading(1L + d, mah).copy(timeMs = now - (1L + d) * day + p) } }
+
+    @Test fun threeDaysInAHalfCannotEstablishTrend() {
+        val result = CapacityProxy.summarize(days(List(3) { 5000 }, List(4) { 4000 }), now)
         assertEquals(Trend.NOT_ENOUGH, result.trend)
     }
 
-    @Test fun bothHalvesMustHaveTenSamples() {
-        val result = CapacityProxy.summarize(halves(List(9) { 5000 }, List(20) { 4000 }), now)
+    @Test fun manyPollsOnOneDayCountAsOneDay() {
+        // 40 polls a half used to pass the old 10-sample rule; they are one day each.
+        val result = CapacityProxy.summarize(halves(List(40) { 5000 }, List(40) { 4000 }), now)
         assertEquals(Trend.NOT_ENOUGH, result.trend)
     }
 
     @Test fun equalMediansGiveNoClearChange() {
-        val result = CapacityProxy.summarize(halves(List(10) { 4500 }, List(10) { 4500 }), now)
+        val result = CapacityProxy.summarize(days(List(4) { 4500 }, List(4) { 4500 }), now)
         assertEquals(Trend.NO_CLEAR_CHANGE, result.trend)
     }
 
+    @Test fun aFlatCounterWithASmallShiftIsNoClearChange() {
+        // Both halves have zero spread; a 2 percent shift is within counter drift.
+        val result = CapacityProxy.summarize(days(List(4) { 4500 }, List(4) { 4590 }), now)
+        assertEquals(Trend.NO_CLEAR_CHANGE, result.trend)
+        val drop = CapacityProxy.summarize(days(List(4) { 4500 }, List(4) { 4410 }), now)
+        assertEquals(Trend.NO_CLEAR_CHANGE, drop.trend)
+    }
+
+    @Test fun aChangeJustOverThreePercentOfAFlatCounterCounts() {
+        val result = CapacityProxy.summarize(days(List(4) { 5000 }, List(4) { 4849 }), now)
+        assertEquals(Trend.LOWER, result.trend)
+        val edge = CapacityProxy.summarize(days(List(4) { 5000 }, List(4) { 4850 }), now)
+        assertEquals("exactly 3 percent is not a clear change", Trend.NO_CLEAR_CHANGE, edge.trend)
+    }
+
     @Test fun clearDropGivesLower() {
-        val result = CapacityProxy.summarize(halves(List(10) { 5000 }, List(10) { 4000 }), now)
+        val result = CapacityProxy.summarize(days(List(4) { 5000 }, List(4) { 4000 }), now)
         assertEquals(Trend.LOWER, result.trend)
         assertEquals(5000.0, result.earlyMah!!, 1e-9)
         assertEquals(4000.0, result.lateMah!!, 1e-9)
     }
 
     @Test fun clearRiseGivesHigher() {
-        val result = CapacityProxy.summarize(halves(List(10) { 4000 }, List(10) { 5000 }), now)
+        val result = CapacityProxy.summarize(days(List(4) { 4000 }, List(4) { 5000 }), now)
         assertEquals(Trend.HIGHER, result.trend)
     }
 
     @Test fun differenceMustExceedLargerHalfSpread() {
-        // Early IQR is 1,000; the difference is exactly 1,000, so it is not a clear change.
-        val early = List(5) { 4000 } + List(5) { 5000 }
-        val result = CapacityProxy.summarize(halves(early, List(10) { 3500 }), now)
+        // Early daily IQR is 1,000; the difference is exactly 1,000, so it is not a clear change.
+        val result = CapacityProxy.summarize(days(listOf(4000, 4000, 5000, 5000), List(4) { 3500 }), now)
         assertEquals(Trend.NO_CLEAR_CHANGE, result.trend)
     }
 
+    @Test fun oneDaysPollsCountOnceInTheMedian() {
+        // A busy day of 30 polls at 4,000 no longer outweighs three quiet days at 5,000.
+        val early = days(List(4) { 5000 }, emptyList(), perDay = 1) +
+            List(30) { p -> reading(20, 4000).copy(timeMs = now - 20 * day + 1000 + p) }
+        val result = CapacityProxy.summarize(early + days(emptyList(), List(4) { 5000 }), now)
+        assertEquals(5000.0, result.earlyMah!!, 1e-9)
+    }
+
     @Test fun splitUsesWindowMidpointRatherThanSampleCount() {
-        val early = List(10) { reading(16, 5000) }
-        val late = List(10) { reading(15, 4000) }
-        val result = CapacityProxy.summarize(early + late, now)
+        val result = CapacityProxy.summarize(days(List(4) { 5000 }, List(4) { 4000 }), now)
         assertEquals(Trend.LOWER, result.trend)
-        val allEarly = CapacityProxy.summarize(early + late.map { it.copy(timeMs = now - 16 * day) }, now)
+        val allEarly = CapacityProxy.summarize(days(List(8) { 5000 }, emptyList()), now)
         assertEquals(Trend.NOT_ENOUGH, allEarly.trend)
     }
 

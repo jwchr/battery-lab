@@ -149,7 +149,11 @@ object BatteryStats {
                 // this reading (also when the reading before the gap was charging too).
                 if (isCharging && (!prevCharging || dt > gaps.stepMs)) {
                     closeCharge(ended = false)   // only an open charge here: readings stopped mid-charge
-                    if (dt > gaps.stepMs) { chargeStart = cur; plugInKnown = false } else chargeStart = prev
+                    // Start from the lower of the two: a phone that drained 45 -> 40 before the first
+                    // charging reading charged from 40, so a charge to 44 still counts (Neon deep
+                    // review, Nov 26, 2026, 1.P2a-ii).
+                    if (dt > gaps.stepMs) { chargeStart = cur; plugInKnown = false }
+                    else chargeStart = if (cur.percent < prev.percent) cur else prev
                     chargePeak = cur
                 }
                 // ">" not ">=": time parked at the peak afterwards isn't charging speed.

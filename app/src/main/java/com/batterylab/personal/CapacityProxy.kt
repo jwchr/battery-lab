@@ -58,13 +58,17 @@ object CapacityProxy {
         }
         val other = used.filter { it.first !== full }
         val values = used.map { it.second }
-        val early = used.filter { it.first.timeMs < midpointMs }.map { it.second }
-        val late = used.filter { it.first.timeMs >= midpointMs }.map { it.second }
+        // One value per day: polls 15 minutes apart move together, so 40 of them on one day are
+        // one observation, not 40 (Neon deep review, Nov 26, 2026, 1.P2e).
+        val early = dailyMedians(used.filter { it.first.timeMs < midpointMs })
+        val late = dailyMedians(used.filter { it.first.timeMs >= midpointMs })
         val earlyMah = BatteryMath.median(early)
         val lateMah = BatteryMath.median(late)
-        val trend = if (early.size < 10 || late.size < 10) Trend.NOT_ENOUGH else {
+        val trend = if (early.size < MIN_DAYS || late.size < MIN_DAYS) Trend.NOT_ENOUGH else {
             val difference = lateMah!! - earlyMah!!
-            if (abs(difference) <= maxOf(iqr(early)!!, iqr(late)!!)) Trend.NO_CLEAR_CHANGE
+            // A flat counter has no spread, so also require a change big enough to matter.
+            val floor = maxOf(iqr(early)!!, iqr(late)!!, earlyMah * MIN_CHANGE_FRACTION)
+            if (abs(difference) <= floor) Trend.NO_CLEAR_CHANGE
             else if (difference < 0) Trend.LOWER else Trend.HIGHER
         }
         return CapacityProxySummary(
@@ -84,6 +88,15 @@ object CapacityProxy {
             lateMah = lateMah,
         )
     }
+
+    /** Each half needs readings on this many different days before a trend is named. */
+    internal const val MIN_DAYS = 4
+    /** Changes of 3 percent or less are within the counter's usual drift with temperature and calibration. */
+    internal const val MIN_CHANGE_FRACTION = 0.03
+
+    /** The median capacity of each calendar day (UTC) that has readings. */
+    private fun dailyMedians(samples: List<Pair<Reading, Double>>): List<Double> =
+        samples.groupBy { Math.floorDiv(it.first.timeMs, 86_400_000L) }.values.mapNotNull { day -> BatteryMath.median(day.map { it.second }) }
 
     /** Linearly interpolated quartiles, matching the other Stats spread calculations. */
     private fun iqr(values: List<Double>): Double? {

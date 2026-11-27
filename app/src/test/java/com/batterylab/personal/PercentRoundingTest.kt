@@ -15,4 +15,9 @@ class PercentRoundingTest {
         assertEquals(100, PhoneBattery.percentOf(120, 100))
         assertEquals(0, PhoneBattery.percentOf(0, 255))
     }
+
+    @Test fun extremeLevelsClampWithoutOverflow() {
+        assertEquals(100, PhoneBattery.percentOf(Int.MAX_VALUE, 1))
+        assertEquals(0, PhoneBattery.percentOf(Int.MIN_VALUE, 1))
+    }
 }

@@ -9,8 +9,9 @@ import android.os.PowerManager
 
 object PhoneBattery {
     /** Level as a whole percent, in integer math: the old `level.toDouble() / scale * 100`
-     *  truncated 29, 57 and 58 (of 100) to one less (Neon deep review, Nov 26, 2026). */
-    internal fun percentOf(level: Int, scale: Int): Int = (level.toLong() * 100 / scale).toInt().coerceIn(0, 100)
+     *  truncated 29, 57 and 58 (of 100) to one less (Neon deep review, Nov 26, 2026).
+     *  [scale] must be above 0; the caller checks it. Clamped before narrowing, so no overflow. */
+    internal fun percentOf(level: Int, scale: Int): Int = (level.toLong() * 100 / scale).coerceIn(0L, 100L).toInt()
 
     /** Whether a charger is connected right now, or null if Android won't say. */
     fun isPlugged(context: Context): Boolean? =

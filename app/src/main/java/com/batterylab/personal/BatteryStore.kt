@@ -764,9 +764,14 @@ class BatteryStore private constructor(context: Context) :
                         if (known != null) {
                             // A later backup can finish a test that was restored while still running.
                             if (ExperimentEndpoint.importCompletes(known.endMs, time, endMs, endPct)) {
-                                db.update("experiments", ContentValues().apply { put("end_ms", endMs); put("end_pct", endPct) },
+                                val changed = db.update("experiments", ContentValues().apply { put("end_ms", endMs); put("end_pct", endPct) },
                                     "id = ? AND end_ms IS NULL", arrayOf(known.id.toString()))
-                                existingExp["$device|$mode|$time"] = known.copy(endMs = endMs, endPct = endPct); addedExp++
+                                // 0 rows means the test was finished here during the restore: that end
+                                // stays, and the restore didn't complete anything (Neon deep review,
+                                // Nov 26, 2026, 2.P2b-1).
+                                if (changed > 0) {
+                                    existingExp["$device|$mode|$time"] = known.copy(endMs = endMs, endPct = endPct); addedExp++
+                                }
                             }
                             continue
                         }

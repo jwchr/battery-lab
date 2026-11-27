@@ -37,7 +37,11 @@ internal object StatsPrecomputer {
         val appLabel: (String) -> String,
     )
 
-    data class Health(val capacity: CapacityEstimate, val phoneCapacity: CapacityProxySummary)
+    data class Health(val capacity: CapacityEstimate, val phoneCapacity: CapacityProxySummary) {
+        /** The capacity the headline shows. Per-app mAh, the audit and fun facts all use it too, so
+         *  their numbers agree with the headline (Neon deep review, Nov 26, 2026, 1.P2n-ii). */
+        val headlineMah: Double? get() = phoneCapacity.estimateMah ?: capacity.combinedMah
+    }
     data class Drain(val recent: List<Reading>, val d: DrainBreakdown, val labels: Map<String, String>,
                      val candidates: List<String>, val hidden: Int?)
     data class Audit(val report: HonestyAudit, val phoneCount: Int, val widgetCount: Int, val watchTimes: List<Long>)
@@ -45,7 +49,8 @@ internal object StatsPrecomputer {
     data class Charging(val count: Int, val bands: List<ChargeBand>, val longest: Double, val topUp: Double?)
     data class ChargeTiming(val times: List<DeviceChargeTimes?>, val count: Int)
     data class Nights(val report: IdleReport, val best: IdleStretch?, val worst: IdleStretch?)
-    data class PlanInput(val name: String, val percent: Int, val rates: List<Double>, val chargeRate: Double?)
+    data class PlanInput(val name: String, val percent: Int, val rates: List<Double>, val chargeRate: Double?,
+                         val hours: List<Double>? = null, val chargeSteps: Map<Int, Double> = emptyMap())
     data class Plan(val inputs: List<PlanInput>, val assessed: Map<Int, List<DeviceReadiness>>,
                     val order: Map<Int, List<DeviceReadiness>>)
     data class Forecasts(val cards: List<Triple<String, String, List<HorizonStats>>>, val count: Int,
@@ -109,14 +114,14 @@ internal object StatsPrecomputer {
         val drain = SectionResult.capture { raw.usage.get()?.let { u ->
             val recent = u.coverageStartMs?.let { start -> phone.filter { it.timeMs >= start } }.orEmpty()
             val d = DrainAnalysis.analyze(recent.map(BatteryPoint::of), u.screenOn, u.apps, gaps.stepMs,
-                health.get().capacity.combinedMah, u.services)
+                health.get().headlineMah, u.services)
             Drain(recent, d, d.apps.associate { it.app to raw.appLabel(it.app) },
                 d.apps.map { it.app }.filter { it != DrainAnalysis.UNATTRIBUTED }.take(15), raw.hidden.get())
         } }
         val audit = SectionResult.capture {
             val widget = raw.phoneWidget.get()
             val watch = (data[1] + raw.watchCompanion.get()).sortedBy { it.timeMs }
-            Audit(HonestyAuditor.audit(phone, widget, watch, data[2], health.get().capacity.combinedMah, gaps), phone.size, widget.size, watch.map { it.timeMs })
+            Audit(HonestyAuditor.audit(phone, widget, watch, data[2], health.get().headlineMah, gaps), phone.size, widget.size, watch.map { it.timeMs })
         }
         val chargeTimes = SectionResult.capture {
             val times = data.map { ChargeTimes.analyze(it, gaps) }
@@ -140,10 +145,13 @@ internal object StatsPrecomputer {
                 val last = readings.lastOrNull()?.takeIf { now - it.timeMs < 6 * 3_600_000L } ?: return@mapIndexedNotNull null
                 val chargeRate = BatteryMath.median(allCharges[i].filter { it.peakMs - it.startMs >= 10 * 60_000L }
                     .map { (it.toPct - it.fromPct) / ((it.peakMs - it.startMs) / 60_000.0) })
-                PlanInput(device.second, last.percent, allStretches[i].map { it.drop / it.hours }, chargeRate)
+                PlanInput(device.second, last.percent, allStretches[i].map { it.drop / it.hours }, chargeRate,
+                    allStretches[i].map { it.hours },
+                    // A failed charge-times section falls back to the average charge speed, not a failed planner.
+                    (chargeTimes as? SectionResult.Ok)?.value?.times?.getOrNull(i)?.steps.orEmpty())
             }
             val assessed = listOf(8, 12, 18, 24).associateWith { hours -> inputs.map {
-                ReadinessPlanner.assess(it.name, it.percent, it.rates, it.chargeRate, hours.toDouble(), RESERVE_PCT)
+                ReadinessPlanner.assess(it.name, it.percent, it.rates, it.chargeRate, hours.toDouble(), RESERVE_PCT, it.hours, it.chargeSteps)
             } }
             Plan(inputs, assessed, assessed.mapValues { ReadinessPlanner.order(it.value) })
         }
@@ -192,7 +200,7 @@ internal object StatsPrecomputer {
             }
         } }
         val funFacts = SectionResult.capture {
-            val capacity = health.get().let { it.phoneCapacity.estimateMah ?: it.capacity.combinedMah }
+            val capacity = health.get().headlineMah
             capacity?.let { cap -> Fun(BatteryStats.wattHours(stats.get()[0].percentUsed, cap), BatteryStats.wattHours(100, cap),
                 phone.firstOrNull()?.let { (now - it.timeMs) / day.toDouble() } ?: 0.0, raw.rate, raw.rateIsSet) }
         }

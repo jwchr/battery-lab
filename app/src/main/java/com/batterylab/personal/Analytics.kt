@@ -1,7 +1,13 @@
 package com.batterylab.personal
 
+import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.cos
+import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
+import kotlin.math.tan
 
 // ================================================================================================
 // Charge times — how long each device takes to charge, for the Stats page
@@ -268,13 +274,22 @@ object IdleAnalysis {
                     ?.let { s -> s.count { it == 2 }.toDouble() / s.size }
             }
             if (onFraction == null || onFraction > 0.05) return@mapNotNull null
+            // Each reading stands for the time until the next one (capped at one step), so the
+            // sparse polls of deep sleep count for as long as they cover, not once each (Neon deep
+            // review, Nov 26, 2026, 1.P2m-i).
+            val steps = run.zipWithNext { x, y -> x to minOf(y.timeMs - x.timeMs, gaps.stepMs).toDouble() }
+            fun mean(value: (Reading) -> Double?): Double? {
+                val seen = steps.mapNotNull { (r, w) -> value(r)?.let { it to w } }
+                val total = seen.sumOf { it.second }
+                return if (total > 0) seen.sumOf { it.first * it.second } / total else null
+            }
             fun share(pred: (ReadingDetail) -> Boolean?): Double? =
-                run.mapNotNull { r -> r.detail?.let(pred) }.takeIf { it.isNotEmpty() }?.let { v -> v.count { it }.toDouble() / v.size }
+                mean { r -> r.detail?.let(pred)?.let { if (it) 1.0 else 0.0 } }
             IdleStretch(a.timeMs, b.timeMs, a.percent, b.percent, onFraction,
                 share { d -> d.transport?.let { it.startsWith("cellular") } },
                 share { d -> d.displayState?.let { it == 3 || it == 4 } },
                 share { d -> d.deviceIdle },
-                run.mapNotNull { it.tempTenthsC?.div(10.0) }.takeIf { it.isNotEmpty() }?.average())
+                mean { it.tempTenthsC?.div(10.0) })
         }
     }
 
@@ -334,20 +349,48 @@ object ReadinessPlanner {
      * Per-device survival over [targetHours] keeping [reservePct]. Devices are never averaged
      * together; [drainRates] are each device's historical stretch rates (%/h) and [chargeRate]
      * its median charge speed (%/min).
+     *
+     * With [stretchHours], each rate counts by how long its stretch lasted, so one busy hour
+     * doesn't weigh as much as a whole day. With [chargeSteps] (median minutes per 10% step from
+     * [ChargeTimes]), the top-up is timed step by step, so the slow top of a charge is included.
+     * Neon deep review, Nov 26, 2026, 1.P2i-ii.
      */
     fun assess(name: String, percent: Int, drainRates: List<Double>, chargeRate: Double?,
-               targetHours: Double, reservePct: Int): DeviceReadiness {
-        val sorted = drainRates.filter { it > 0 }.sorted()
-        if (sorted.isEmpty()) return DeviceReadiness(name, percent, null, null, null, null, null)
-        val typical = HonestyAuditor.quantile(sorted, 0.5)
-        val fast = HonestyAuditor.quantile(sorted, 0.75)
-        val slow = HonestyAuditor.quantile(sorted, 0.25)
+               targetHours: Double, reservePct: Int, stretchHours: List<Double>? = null,
+               chargeSteps: Map<Int, Double> = emptyMap()): DeviceReadiness {
+        val weighted = drainRates.indices.map { it to drainRates[it] }.filter { it.second > 0 }
+            .map { (i, rate) -> rate to (stretchHours?.getOrNull(i)?.takeIf { w -> w > 0 } ?: 1.0) }
+        if (weighted.isEmpty()) return DeviceReadiness(name, percent, null, null, null, null, null)
+        fun q(p: Double) = if (stretchHours == null) HonestyAuditor.quantile(weighted.map { it.first }.sorted(), p)
+            else weightedQuantile(weighted, p)
+        val typical = q(0.5)
+        val fast = q(0.75)
+        val slow = q(0.25)
         val usable = (percent - reservePct).coerceAtLeast(0)
         fun h(rate: Double) = usable / rate
         val needed = (typical * targetHours + reservePct - percent).coerceAtLeast(0.0)
-        val minutes = if (needed <= 0) 0.0 else chargeRate?.takeIf { it > 0 }?.let { minOf(needed, 100.0 - percent) / it }
+        val target = minOf(100, percent + ceil(needed).toInt())
+        val minutes = if (needed <= 0) 0.0
+            else ChargeTimes.estimate(chargeSteps, percent, target)?.minutes
+                ?: chargeRate?.takeIf { it > 0 }?.let { minOf(needed, 100.0 - percent) / it }
         return DeviceReadiness(name, percent, h(typical), h(fast), h(slow), h(typical) >= targetHours, minutes,
             (100 - reservePct) / typical)
+    }
+
+    /**
+     * The value below which a share [p] of the total weight lies. Each value sits at the middle of
+     * its own weight, with straight lines between neighbours, so equal weights give the usual median.
+     */
+    internal fun weightedQuantile(values: List<Pair<Double, Double>>, p: Double): Double {
+        val sorted = values.sortedBy { it.first }
+        val total = sorted.sumOf { it.second }
+        var before = 0.0
+        val mids = sorted.map { (v, w) -> (v to (before + w / 2) / total).also { before += w } }
+        if (p <= mids.first().second) return mids.first().first
+        if (p >= mids.last().second) return mids.last().first
+        val i = mids.indexOfFirst { it.second >= p }
+        val (v0, p0) = mids[i - 1]; val (v1, p1) = mids[i]
+        return v0 + (v1 - v0) * (p - p0) / (p1 - p0)
     }
 
     /** Charging order with one charger: the device that falls short soonest goes first. */
@@ -362,7 +405,9 @@ object ReadinessPlanner {
 data class ForecastScore(val actual2h: Double?, val actual4h: Double?, val actual8h: Double?, val status: String)
 
 data class HorizonStats(val hours: Int, val n: Int, val labMae: Double?, val labBias: Double?,
-                        val androidN: Int, val androidMae: Double?, val androidBias: Double?)
+                        val androidN: Int, val androidMae: Double?, val androidBias: Double?,
+                        /** Battery Lab's error on only the forecasts Android also made, for a like-for-like comparison. */
+                        val pairedLabMae: Double? = null)
 
 object ForecastScoring {
     const val MODEL_VERSION = "estimate-1"
@@ -373,26 +418,45 @@ object ForecastScoring {
      * readings around each horizon (each within 30 min of it). Only readings after the forecast
      * are used, so nothing it couldn't have known leaks in. A charge (or a rise over 2 points)
      * before a horizon censors that horizon and the later ones; a horizon with no nearby readings
-     * is censored as a gap. Stays PENDING until 8 h have passed (or everything is censored).
+     * is censored as a gap, and so is one with a hole longer than [GapLimits.stepMs] anywhere
+     * between the forecast and the horizon: a charge and drain could hide in it (Neon deep review,
+     * Nov 26, 2026, 1.P2j-i). Stays PENDING until 8 h have passed (or everything is censored).
+     * One-reading glitches are dropped first, with the forecast's own level standing before the
+     * first reading. A rise seen only in the newest reading, not marked as charging, waits for
+     * the next reading to show whether it was a glitch (Neon review of #88, Nov 26, 2026, 88.1).
      */
-    fun score(f: Forecast, readingsAfter: List<Reading>, nowMs: Long): ForecastScore {
-        val r = BatteryMath.withoutSpikes(
-            readingsAfter.filter { it.timeMs >= f.issuedMs }.sortedBy { it.timeMs },
-            { it.percent }, { it.charging }, { it.timeMs })
+    fun score(f: Forecast, readingsAfter: List<Reading>, nowMs: Long, gaps: GapLimits = GapLimits()): ForecastScore {
+        val anchored: List<Reading?> = listOf(null) + readingsAfter.filter { it.timeMs >= f.issuedMs }.sortedBy { it.timeMs }
+        val r = BatteryMath.withoutSpikes(anchored, { it?.percent ?: f.startPct }, { it?.charging }, { it?.timeMs ?: f.issuedMs }, gaps)
+            .filterNotNull()
+        val newest = r.lastOrNull()
+        // Waiting is bounded: once the last horizon's window plus one normal gap has passed, the score is final.
+        val canWait = nowMs < f.issuedMs + HORIZONS.last() * 3_600_000L + 30 * 60_000L + gaps.stepMs
+        fun unconfirmed(x: Reading?) = canWait && x != null && x === newest && x.charging != true
         val actual = arrayOfNulls<Double>(3)
         var charged = false; var gap = false
         for ((i, h) in HORIZONS.withIndex()) {
             val target = f.issuedMs + h * 3_600_000L
             if (nowMs < target + 30 * 60_000L) return ForecastScore(actual[0], actual[1], actual[2], "PENDING")
             val before = r.filter { it.timeMs <= target }
-            if (before.any { it.charging == true } || rose(before, f.startPct)) { charged = true; break }
+            if (before.any { it.charging == true } || rose(before, f.startPct)) {
+                if (before.none { it.charging == true } && unconfirmed(before.last()) && !rose(before.dropLast(1), f.startPct))
+                    return ForecastScore(actual[0], actual[1], actual[2], "PENDING")
+                charged = true; break
+            }
+            if ((listOf(f.issuedMs) + before.map { it.timeMs }).zipWithNext().any { (a, b) -> b - a > gaps.stepMs }) { gap = true; break }
             val prev = before.lastOrNull { target - it.timeMs <= 30 * 60_000L }
             // The first reading at or after the horizon, and only if no charge came before it:
             // skipping a charging reading would score the forecast against a topped-up value.
             val after = r.firstOrNull { it.timeMs >= target }?.takeIf { it.timeMs - target <= 30 * 60_000L }
             val next = after?.takeIf { it.charging != true && (prev == null || it.percent <= prev.percent + 2) }
             // A charge right after the horizon censors it as charged, not as a gap.
-            if (after != null && next == null) { charged = true; break }
+            if (after != null && next == null) {
+                if (unconfirmed(after)) return ForecastScore(actual[0], actual[1], actual[2], "PENDING")
+                charged = true; break
+            }
+            // The stretch from the last reading at or before the horizon to the one after it counts too.
+            if (next != null && next.timeMs - (before.lastOrNull()?.timeMs ?: f.issuedMs) > gaps.stepMs) { gap = true; break }
             actual[i] = when {
                 prev != null && next != null && next.timeMs > prev.timeMs ->
                     prev.percent + (next.percent - prev.percent) * (target - prev.timeMs).toDouble() / (next.timeMs - prev.timeMs)
@@ -430,10 +494,15 @@ object ForecastScoring {
         fun actualOf(f: Forecast) = when (i) { 0 -> f.actual2h; 1 -> f.actual4h; else -> f.actual8h }
         val scored = forecasts.filter { actualOf(it) != null }
         val labErr = scored.map { it.labPredicted(h.toDouble()).coerceAtLeast(0.0) - actualOf(it)!! }
-        val andErr = scored.mapNotNull { f -> f.androidPredicted(h.toDouble())?.coerceAtLeast(0.0)?.let { it - actualOf(f)!! } }
+        val withAndroid = scored.filter { it.androidPredicted(h.toDouble()) != null }
+        val andErr = withAndroid.map { f -> f.androidPredicted(h.toDouble())!!.coerceAtLeast(0.0) - actualOf(f)!! }
+        // Android often gives no estimate, so its error covers fewer forecasts than Battery Lab's.
+        // Compare the two on the same forecasts (Neon deep review, Nov 26, 2026, 1.P2j-iii).
+        val pairedLab = withAndroid.map { abs(it.labPredicted(h.toDouble()).coerceAtLeast(0.0) - actualOf(it)!!) }
         HorizonStats(h, labErr.size,
             labErr.takeIf { it.isNotEmpty() }?.map { abs(it) }?.average(), labErr.takeIf { it.isNotEmpty() }?.average(),
-            andErr.size, andErr.takeIf { it.isNotEmpty() }?.map { abs(it) }?.average(), andErr.takeIf { it.isNotEmpty() }?.average())
+            andErr.size, andErr.takeIf { it.isNotEmpty() }?.map { abs(it) }?.average(), andErr.takeIf { it.isNotEmpty() }?.average(),
+            pairedLab.takeIf { it.isNotEmpty() }?.average())
     }
 }
 
@@ -555,16 +624,29 @@ object ExperimentStats {
         return sqrt(x.sumOf { (it - m) * (it - m) } / (x.size - 1))
     }
 
-    /** Two-sided 95% Student-t critical value (interpolated table; normal beyond 120 df). */
+    /**
+     * Two-sided 95% Student-t critical value, computed rather than read from a table: straight-line
+     * steps between table rows gave 8.50 at df 1.5 where the true value is 6.02 (Neon deep review,
+     * Nov 26, 2026, 1.P2k-iii). With x = sqrt(df) * tan(a), the t density becomes cos(a)^(df - 1), so
+     * the answer is the angle that holds 95% of that curve's area on 0..pi/2.
+     */
     fun tCrit(df: Double): Double {
-        val table = listOf(1.0 to 12.706, 2.0 to 4.303, 3.0 to 3.182, 4.0 to 2.776, 5.0 to 2.571, 6.0 to 2.447,
-            7.0 to 2.365, 8.0 to 2.306, 9.0 to 2.262, 10.0 to 2.228, 12.0 to 2.179, 15.0 to 2.131, 20.0 to 2.086,
-            25.0 to 2.060, 30.0 to 2.042, 40.0 to 2.021, 60.0 to 2.000, 120.0 to 1.980)
-        if (df <= 1.0) return table.first().second
-        if (df >= 120.0) return 1.96
-        val hi = table.indexOfFirst { it.first >= df }
-        val (x0, y0) = table[hi - 1]; val (x1, y1) = table[hi]
-        return y0 + (y1 - y0) * (df - x0) / (x1 - x0)
+        if (df.isNaN() || df <= 1.0) return 12.706
+        if (df >= 10_000.0) return 1.96
+        val steps = 4000
+        val h = PI / 2 / steps
+        val k = df - 1
+        val area = DoubleArray(steps + 1)
+        var prev = 1.0
+        for (i in 1..steps) {
+            val cur = cos(i * h).pow(k)
+            area[i] = area[i - 1] + (prev + cur) * h / 2
+            prev = cur
+        }
+        val target = 0.95 * area[steps]
+        val i = area.indexOfFirst { it >= target }.coerceAtLeast(1)
+        val angle = (i - 1) * h + h * (target - area[i - 1]) / (area[i] - area[i - 1])
+        return sqrt(df) * tan(angle)
     }
 }
 
@@ -607,13 +689,18 @@ object UpdateImpactAnalysis {
         fun mean(list: List<IdleStretch>, f: (IdleStretch) -> Double?) = list.mapNotNull(f).takeIf { it.isNotEmpty() }?.average()
         val cellB = mean(before) { it.cellularShare }; val cellA = mean(after) { it.cellularShare }
         val aodB = mean(before) { it.aodShare }; val aodA = mean(after) { it.aodShare }
-        val confounder = when {
-            cellB != null && cellA != null && abs(cellA - cellB) >= 0.25 ->
-                "Confounded: cellular time went from ${(cellB * 100).toInt()}% to ${(cellA * 100).toInt()}%"
-            aodB != null && aodA != null && abs(aodA - aodB) >= 0.25 ->
-                "Confounded: Always-On Display time went from ${(aodB * 100).toInt()}% to ${(aodA * 100).toInt()}%"
-            else -> null
-        }
+        val dozeB = mean(before) { it.dozeShare }; val dozeA = mean(after) { it.dozeShare }
+        val tempB = mean(before) { it.avgTempC }; val tempA = mean(after) { it.avgTempC }
+        fun pct(x: Double) = "${(x * 100).toInt()}%"
+        // Every shift that could explain the change is listed, not just the first one, and
+        // temperature and Doze count too (Neon deep review, Nov 26, 2026, 1.P3c).
+        val shifts = listOfNotNull(
+            if (cellB != null && cellA != null && abs(cellA - cellB) >= 0.25) "cellular time went from ${pct(cellB)} to ${pct(cellA)}" else null,
+            if (aodB != null && aodA != null && abs(aodA - aodB) >= 0.25) "Always-On Display time went from ${pct(aodB)} to ${pct(aodA)}" else null,
+            if (dozeB != null && dozeA != null && abs(dozeA - dozeB) >= 0.25) "deep-sleep (Doze) time went from ${pct(dozeB)} to ${pct(dozeA)}" else null,
+            if (tempB != null && tempA != null && abs(tempA - tempB) >= 4.0)
+                "average temperature went from ${tempB.roundToInt()}°C to ${tempA.roundToInt()}°C" else null)
+        val confounder = shifts.takeIf { it.isNotEmpty() }?.joinToString("; ", prefix = "Confounded: ")
         return UpdateImpact(entry, before, after, delta, strength, confounder)
     }
 }

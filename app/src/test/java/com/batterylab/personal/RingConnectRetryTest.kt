@@ -48,7 +48,7 @@ class RingConnectRetryTest {
         assertTrue(Regex("postDelayed\\(deadline").findAll(src).count() == 1)
         val complete = src.substringAfter("private fun complete(").substringBefore("\n    }")
         assertTrue(complete.contains("main.removeCallbacks(reconnect)"))
-        val again = src.substringAfter("private fun connectAgain()").substringBefore("\n    }")
+        val again = src.substringAfter("private fun connectAgain() {").substringBefore("\n    }")
         assertTrue(again.trimStart().startsWith("if (finished.get()) return"))
     }
 

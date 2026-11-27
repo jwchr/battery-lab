@@ -10,7 +10,7 @@ import org.junit.Test
  * "Send reading" button marks its item urgent; the 2-hour job does not (it would cost battery).
  */
 class UrgentSendTest {
-    private val dir = File("src/main/java/com/batterylab/personal")
+    private val dir = listOf(File("src/main/java/com/batterylab/personal"), File("wear/src/main/java/com/batterylab/personal")).first { it.isDirectory }
     private fun src(name: String) = File(dir, name).readText()
 
     @Test fun onlyTheButtonSendsUrgently() {

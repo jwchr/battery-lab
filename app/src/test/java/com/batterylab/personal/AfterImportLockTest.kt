@@ -21,7 +21,9 @@ class AfterImportLockTest {
 
     @Test fun abandonChangesTheRingSettingUnderTheSameLock() {
         val abandon = source("MainActivity").substringAfter("private fun abandon(").substringBefore("\n    }\n")
-        val lock = abandon.indexOf("synchronized(PollScheduler.experimentLock)")
-        assertTrue(lock >= 0 && abandon.indexOf("PollScheduler.setRingEnabled(") > lock)
+        assertTrue(abandon.contains("synchronized(PollScheduler.experimentLock) {"))
+        // Only the text between the lock's opening brace and its own closing brace counts.
+        val locked = abandon.substringAfter("synchronized(PollScheduler.experimentLock) {").substringBefore("\n        }\n")
+        assertTrue(locked.contains("PollScheduler.setRingEnabled("))
     }
 }

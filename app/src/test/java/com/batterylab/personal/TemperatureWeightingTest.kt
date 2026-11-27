@@ -41,4 +41,16 @@ class TemperatureWeightingTest {
         assertEquals(100.0 / 3, t.avgC, 1e-9)
         assertEquals(10 * min, t.maxAtMs)
     }
+
+    @Test fun readingsAtTheSameTimeShareItsWeightInAnyOrder() {
+        // Neon Nov27g P3-1: two polls at minute 0 split its 60 minutes (30 each); minute 60 gets 60.
+        val expected = (40.0 * 30 + 30.0 * 30 + 20.0 * 60) / 120
+        assertEquals(expected, BatteryStats.temperature(listOf(r(0, 40), r(0, 30), r(60, 20)), hourStep)!!.avgC, 1e-9)
+        assertEquals(expected, BatteryStats.temperature(listOf(r(0, 30), r(0, 40), r(60, 20)), hourStep)!!.avgC, 1e-9)
+        // The same at the end of the list.
+        val tail = (20.0 * 60 + 40.0 * 30 + 30.0 * 30) / 120
+        assertEquals(tail, BatteryStats.temperature(listOf(r(0, 20), r(60, 40), r(60, 30)), hourStep)!!.avgC, 1e-9)
+        // All at one time: the plain average.
+        assertEquals(35.0, BatteryStats.temperature(listOf(r(5, 40), r(5, 30)), hourStep)!!.avgC, 1e-9)
+    }
 }

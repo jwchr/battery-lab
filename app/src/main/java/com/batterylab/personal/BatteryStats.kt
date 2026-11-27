@@ -185,20 +185,24 @@ object BatteryStats {
 
     /**
      * Battery temperature over [readings]. The averages are time-weighted: each reading stands for
-     * half the time to each neighbor (each half capped at one [GapLimits.stepMs] step, and the first
-     * and last readings mirror their one side), so the sparse polls of deep sleep count for as long
+     * half the time to each neighbor (each gap capped at one [GapLimits.stepMs] step, and the first
+     * and last times mirror their one side), so the sparse polls of deep sleep count for as long
      * as they cover and evenly spaced polls give the plain average (Neon deep review, Nov 26, 2026,
-     * 1.P2m-i). Readings that all share one time fall back to the plain average.
+     * 1.P2m-i). Readings that share a time split that time's weight evenly, so their order does not
+     * matter (Neon Nov27g P3-1). Readings that all share one time fall back to the plain average.
      */
     fun temperature(readings: List<Reading>, gaps: GapLimits = GapLimits()): TempStats? {
         val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in VALID_TEMP_TENTHS_C }.sortedBy { it.timeMs }
         if (t.isEmpty()) return null
-        fun half(a: Reading, b: Reading) = minOf(b.timeMs - a.timeMs, gaps.stepMs) / 2.0
-        val weights = t.indices.map { i ->
-            val left = if (i > 0) half(t[i - 1], t[i]) else null
-            val right = if (i < t.lastIndex) half(t[i], t[i + 1]) else null
-            (left ?: right ?: 0.0) + (right ?: left ?: 0.0)
+        val times = t.map { it.timeMs }.distinct()
+        fun half(a: Long, b: Long) = minOf(b - a, gaps.stepMs) / 2.0
+        val timeWeight = times.indices.associate { i ->
+            val left = if (i > 0) half(times[i - 1], times[i]) else null
+            val right = if (i < times.lastIndex) half(times[i], times[i + 1]) else null
+            times[i] to (left ?: right ?: 0.0) + (right ?: left ?: 0.0)
         }
+        val sharing = t.groupingBy { it.timeMs }.eachCount()
+        val weights = t.map { timeWeight.getValue(it.timeMs) / sharing.getValue(it.timeMs) }
         fun average(keep: (Reading) -> Boolean): Double? {
             val picked = t.indices.filter { keep(t[it]) }
             if (picked.isEmpty()) return null

@@ -14,15 +14,18 @@ class ForecastAndExperimentTest {
     private fun forecast(start: Int = 80, rate: Double = 2.0, android: Double? = 40.0) =
         Forecast(1, "phone", t0, start, rate, start / rate, android, true, ForecastScoring.MODEL_VERSION, null, null, null, "PENDING")
 
+    /** These fixtures are sparse on purpose; the gap check has its own tests with the default step. */
+    private val sparse = GapLimits(stepMs = 4 * h)
+
     @Test fun staysPendingUntilEightHoursPass() {
-        val s = ForecastScoring.score(forecast(), listOf(r(120, 76)), t0 + 3 * h)
+        val s = ForecastScoring.score(forecast(), listOf(r(120, 76)), t0 + 3 * h, sparse)
         assertEquals("PENDING", s.status)
         assertEquals(76.0, s.actual2h!!, 1e-9)
     }
 
     @Test fun interpolatesBetweenReadingsAroundEachHorizon() {
         val readings = listOf(r(110, 77), r(130, 75), r(240, 72), r(470, 66), r(490, 64))
-        val s = ForecastScoring.score(forecast(), readings, t0 + 10 * h)
+        val s = ForecastScoring.score(forecast(), readings, t0 + 10 * h, sparse)
         assertEquals("SCORED", s.status)
         assertEquals(76.0, s.actual2h!!, 1e-9)
         assertEquals(72.0, s.actual4h!!, 1e-9)
@@ -31,7 +34,7 @@ class ForecastAndExperimentTest {
 
     @Test fun chargingCensorsLaterHorizons() {
         val readings = listOf(r(120, 76), r(180, 76, true), r(240, 90), r(480, 85))
-        val s = ForecastScoring.score(forecast(), readings, t0 + 10 * h)
+        val s = ForecastScoring.score(forecast(), readings, t0 + 10 * h, sparse)
         assertEquals(76.0, s.actual2h!!, 1e-9)
         assertNull(s.actual4h)
         assertNull(s.actual8h)
@@ -40,6 +43,27 @@ class ForecastAndExperimentTest {
     @Test fun chargedBeforeFirstHorizonIsCensored() {
         val s = ForecastScoring.score(forecast(), listOf(r(30, 80, true), r(120, 95)), t0 + 10 * h)
         assertEquals("CENSORED_CHARGED", s.status)
+    }
+
+    /** 1.P2j-i: a hole longer than one step inside the window could hide a charge and a drain. */
+    @Test fun aHoleInsideTheWindowCensorsThatHorizonAndLaterOnes() {
+        val steady = (0..16).map { i -> r(i * 15L, 80 - i / 4) }          // every 15 min for 4 h
+        val after = listOf(r(330, 69), r(345, 68)) + (24..34).map { i -> r(i * 15L, 80 - i / 2) }
+        val s = ForecastScoring.score(forecast(), steady + after, t0 + 10 * h)
+        assertEquals(78.0, s.actual2h!!, 1e-9)
+        assertEquals(76.0, s.actual4h!!, 1e-9)
+        assertNull("90 minutes unseen between 4 h and 5.5 h", s.actual8h)
+        assertEquals("SCORED", s.status)
+        // The same readings with no hole score all three.
+        val full = (0..34).map { i -> r(i * 15L, 80 - i / 4) }
+        assertEquals(72.0, ForecastScoring.score(forecast(), full, t0 + 10 * h).actual8h!!, 1e-9)
+    }
+
+    @Test fun aLongWaitForTheFirstReadingIsAGap() {
+        val late = (6..34).map { i -> r(i * 15L, 80 - i / 4) }             // nothing for 90 min after the forecast
+        val s = ForecastScoring.score(forecast(), late, t0 + 10 * h)
+        assertNull(s.actual2h); assertNull(s.actual8h)
+        assertEquals("CENSORED_GAP", s.status)
     }
 
     @Test fun noReadingsNearHorizonsIsAGap() {
@@ -95,10 +119,18 @@ class ForecastAndExperimentTest {
     }
 
     @Test fun tTableIsSane() {
-        assertEquals(12.706, ExperimentStats.tCrit(1.0), 1e-9)
-        assertEquals(1.96, ExperimentStats.tCrit(500.0), 1e-9)
+        // Printed two-sided 95% t-table values.
+        for ((df, t) in listOf(1.0 to 12.706, 2.0 to 4.303, 3.0 to 3.182, 5.0 to 2.571, 10.0 to 2.228,
+                30.0 to 2.042, 120.0 to 1.980)) assertEquals("df $df", t, ExperimentStats.tCrit(df), 0.002)
         val mid = ExperimentStats.tCrit(11.0)
         assertTrue(mid < 2.228 && mid > 2.179)
+        // Between 1 and 2 df the curve bends hard: a straight line between the table rows gave 8.50
+        // at df 1.5; the t density puts 95% of its area inside +-6.017 (1.P2k-iii).
+        assertEquals(6.017, ExperimentStats.tCrit(1.5), 0.002)
+        assertEquals(3.575, ExperimentStats.tCrit(2.5), 0.002)
+        // No jump at 120 df: just above it the value keeps falling smoothly toward 1.96.
+        assertEquals(1.980, ExperimentStats.tCrit(121.0), 0.002)
+        assertEquals(1.965, ExperimentStats.tCrit(500.0), 0.002)
     }
 
     @Test fun readinessPlannerKeepsAReserveAndOrdersCharging() {
@@ -128,7 +160,7 @@ class ForecastAndExperimentTest {
 
     @Test fun aReadingAfterATopUpIsNotTheActual() {
         // 2 h mark at 120 min: 77% at 110, plugged in at 125, unplugged at 88% at 145.
-        val s = ForecastScoring.score(forecast(), listOf(r(110, 77), r(125, 80, true), r(145, 88)), t0 + 10 * h)
+        val s = ForecastScoring.score(forecast(), listOf(r(110, 77), r(125, 80, true), r(145, 88)), t0 + 10 * h, sparse)
         org.junit.Assert.assertNull(s.actual2h)
         assertEquals("CENSORED_CHARGED", s.status)
     }

@@ -177,7 +177,7 @@ object ForecastKeeper {
             val scoreFrom = maxOf(now - 30 * 86_400_000L, pending.minOfOrNull { it.issuedMs } ?: now)
             val scoring = if (scoreFrom >= now - 4 * 86_400_000L) readings
                 else BatteryStats.fullHoldAsCharging(store.since(id, scoreFrom))
-            for ((f, s) in rescore(pending, scoring, now)) store.updateForecast(f.id, s.actual2h, s.actual4h, s.actual8h, s.status)
+            for ((f, s) in rescore(pending, scoring, now, gaps)) store.updateForecast(f.id, s.actual2h, s.actual4h, s.actual8h, s.status)
             val last = readings.lastOrNull() ?: continue
             // Issue at most one per hour, only while on battery with a live estimate.
             if (last.charging == true || now - last.timeMs > 30 * 60_000L) continue
@@ -197,9 +197,9 @@ object ForecastKeeper {
     }
 
     /** Pending forecasts whose score changed, with the new score. Pure; [readings] may be empty. */
-    fun rescore(pending: List<Forecast>, readings: List<Reading>, now: Long): List<Pair<Forecast, ForecastScore>> =
+    fun rescore(pending: List<Forecast>, readings: List<Reading>, now: Long, gaps: GapLimits = GapLimits()): List<Pair<Forecast, ForecastScore>> =
         pending.mapNotNull { f ->
-            val s = ForecastScoring.keepScored(f, ForecastScoring.score(f, readings.filter { it.timeMs >= f.issuedMs }, now))
+            val s = ForecastScoring.keepScored(f, ForecastScoring.score(f, readings.filter { it.timeMs >= f.issuedMs }, now, gaps))
             (f to s).takeIf { s.status != "PENDING" || s.actual2h != f.actual2h || s.actual4h != f.actual4h }
         }
 }

@@ -183,14 +183,36 @@ object BatteryStats {
             (0 until 24).map { if (hourWeight[it] >= 0.5) hourSum[it] / hourWeight[it] else null }, longest, high)
     }
 
-    fun temperature(readings: List<Reading>): TempStats? {
-        val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in VALID_TEMP_TENTHS_C }
+    /**
+     * Battery temperature over [readings]. The averages are time-weighted: each reading stands for
+     * half the time to each neighbor (each gap capped at one [GapLimits.stepMs] step, and the first
+     * and last times mirror their one side), so the sparse polls of deep sleep count for as long
+     * as they cover and evenly spaced polls give the plain average (Neon deep review, Nov 26, 2026,
+     * 1.P2m-i). Readings that share a time split that time's weight evenly, so their order does not
+     * matter (Neon Nov27g P3-1). Readings that all share one time fall back to the plain average.
+     */
+    fun temperature(readings: List<Reading>, gaps: GapLimits = GapLimits()): TempStats? {
+        val t = readings.filter { it.tempTenthsC != null && it.tempTenthsC in VALID_TEMP_TENTHS_C }.sortedBy { it.timeMs }
         if (t.isEmpty()) return null
-        val c = t.map { it.tempTenthsC!! / 10.0 }
+        val times = t.map { it.timeMs }.distinct()
+        fun half(a: Long, b: Long) = minOf(b - a, gaps.stepMs) / 2.0
+        val timeWeight = times.indices.associate { i ->
+            val left = if (i > 0) half(times[i - 1], times[i]) else null
+            val right = if (i < times.lastIndex) half(times[i], times[i + 1]) else null
+            times[i] to (left ?: right ?: 0.0) + (right ?: left ?: 0.0)
+        }
+        val sharing = t.groupingBy { it.timeMs }.eachCount()
+        val weights = t.map { timeWeight.getValue(it.timeMs) / sharing.getValue(it.timeMs) }
+        fun average(keep: (Reading) -> Boolean): Double? {
+            val picked = t.indices.filter { keep(t[it]) }
+            if (picked.isEmpty()) return null
+            val total = picked.sumOf { weights[it] }
+            return if (total > 0) picked.sumOf { t[it].tempTenthsC!! / 10.0 * weights[it] } / total
+            else picked.map { t[it].tempTenthsC!! / 10.0 }.average()
+        }
         val hottest = t.maxByOrNull { it.tempTenthsC!! }!!
-        return TempStats(c.average(), c.min(), c.max(), hottest.timeMs,
-            t.filter { it.charging == true }.map { it.tempTenthsC!! / 10.0 }.takeIf { it.isNotEmpty() }?.average(),
-            t.filter { it.charging == false }.map { it.tempTenthsC!! / 10.0 }.takeIf { it.isNotEmpty() }?.average())
+        return TempStats(average { true }!!, t.minOf { it.tempTenthsC!! } / 10.0, hottest.tempTenthsC!! / 10.0, hottest.timeMs,
+            average { it.charging == true }, average { it.charging == false })
     }
 
     /** Energy in watt-hours for [percentUsed] of a [capacityMah] battery at a nominal 3.87 V. */

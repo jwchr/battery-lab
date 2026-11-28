@@ -143,7 +143,7 @@ class StatsPrecomputerTest {
                 if (now - data[i].first().timeMs < span && span < Long.MAX_VALUE / 2) (now - data[i].first().timeMs) / day.toDouble() else null)
         } }, r.rolling.value())
         assertTrue(r.rolling.value().all { it.isNotEmpty() })
-        assertEquals(BatteryStats.temperature(phone), r.temperature.value())
+        assertEquals(BatteryStats.temperature(phone, gaps), r.temperature.value())
         assertNotNull(r.temperature.value())
         assertEquals(data.map { readings -> windows.take(3).mapNotNull { (label, span) ->
             CoverageMath.of(readings.map { it.timeMs }, now - span, now, gaps.stepMs)?.let { label to it }
